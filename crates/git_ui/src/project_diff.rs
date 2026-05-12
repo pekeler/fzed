@@ -14,7 +14,7 @@ use editor::{
     scroll::Autoscroll,
 };
 use futures_lite::future::yield_now;
-use git::repository::DiffType;
+use git::repository::{DiffType, RepositoryKind};
 
 use git::{
     Commit, StageAll, StageAndNext, ToggleStaged, UnstageAll, UnstageAndNext, repository::RepoPath,
@@ -595,23 +595,29 @@ impl ProjectDiff {
         }
         let mut stage_all = false;
         let mut unstage_all = false;
+        let mut can_commit = false;
+        let mut repository_kind = Default::default();
         self.workspace
             .read_with(cx, |workspace, cx| {
                 if let Some(git_panel) = workspace.panel::<GitPanel>(cx) {
                     let git_panel = git_panel.read(cx);
-                    stage_all = git_panel.can_stage_all();
-                    unstage_all = git_panel.can_unstage_all();
+                    stage_all = git_panel.can_stage_all(cx);
+                    unstage_all = git_panel.can_unstage_all(cx);
+                    can_commit = git_panel.can_commit(cx);
+                    repository_kind = git_panel.active_repository_kind(cx);
                 }
             })
             .ok();
 
         ButtonStates {
-            stage: has_unstaged_hunks,
-            unstage: has_staged_hunks,
+            stage: has_unstaged_hunks && !repository_kind.is_fossil(),
+            unstage: has_staged_hunks && !repository_kind.is_fossil(),
             prev_next,
             selection,
             stage_all,
             unstage_all,
+            can_commit,
+            repository_kind,
         }
     }
 
@@ -1396,6 +1402,7 @@ impl ToolbarItemView for ProjectDiffToolbar {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ButtonStates {
     stage: bool,
     unstage: bool,
@@ -1403,6 +1410,8 @@ struct ButtonStates {
     selection: bool,
     stage_all: bool,
     unstage_all: bool,
+    can_commit: bool,
+    repository_kind: RepositoryKind,
 }
 
 impl Render for ProjectDiffToolbar {
@@ -1425,11 +1434,24 @@ impl Render for ProjectDiffToolbar {
                     .when(button_states.selection, |el| {
                         el.child(
                             Button::new("stage", "Toggle Staged")
-                                .tooltip(Tooltip::for_action_title_in(
-                                    "Toggle Staged",
-                                    &ToggleStaged,
-                                    &focus_handle,
-                                ))
+                                .tooltip({
+                                    let focus_handle = focus_handle.clone();
+                                    move |_window, cx| {
+                                        if button_states.repository_kind.is_fossil() {
+                                            Tooltip::simple(
+                                                "Fossil hunk selection is not implemented yet",
+                                                cx,
+                                            )
+                                        } else {
+                                            Tooltip::for_action_in(
+                                                "Toggle Staged",
+                                                &ToggleStaged,
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                        }
+                                    }
+                                })
                                 .disabled(!button_states.stage && !button_states.unstage)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.dispatch_action(&ToggleStaged, window, cx)
@@ -1439,15 +1461,29 @@ impl Render for ProjectDiffToolbar {
                     .when(!button_states.selection, |el| {
                         el.child(
                             Button::new("stage", "Stage")
-                                .tooltip(Tooltip::for_action_title_in(
-                                    "Stage and go to next hunk",
-                                    &StageAndNext,
-                                    &focus_handle,
-                                ))
+                                .tooltip({
+                                    let focus_handle = focus_handle.clone();
+                                    move |_window, cx| {
+                                        if button_states.repository_kind.is_fossil() {
+                                            Tooltip::simple(
+                                                "Fossil hunk selection is not implemented yet",
+                                                cx,
+                                            )
+                                        } else {
+                                            Tooltip::for_action_in(
+                                                "Stage and go to next hunk",
+                                                &StageAndNext,
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                        }
+                                    }
+                                })
                                 .disabled(
-                                    !button_states.prev_next
-                                        && !button_states.stage_all
-                                        && !button_states.unstage_all,
+                                    button_states.repository_kind.is_fossil()
+                                        || !button_states.prev_next
+                                            && !button_states.stage_all
+                                            && !button_states.unstage_all,
                                 )
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.dispatch_action(&StageAndNext, window, cx)
@@ -1455,15 +1491,29 @@ impl Render for ProjectDiffToolbar {
                         )
                         .child(
                             Button::new("unstage", "Unstage")
-                                .tooltip(Tooltip::for_action_title_in(
-                                    "Unstage and go to next hunk",
-                                    &UnstageAndNext,
-                                    &focus_handle,
-                                ))
+                                .tooltip({
+                                    let focus_handle = focus_handle.clone();
+                                    move |_window, cx| {
+                                        if button_states.repository_kind.is_fossil() {
+                                            Tooltip::simple(
+                                                "Fossil hunk selection is not implemented yet",
+                                                cx,
+                                            )
+                                        } else {
+                                            Tooltip::for_action_in(
+                                                "Unstage and go to next hunk",
+                                                &UnstageAndNext,
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                        }
+                                    }
+                                })
                                 .disabled(
-                                    !button_states.prev_next
-                                        && !button_states.stage_all
-                                        && !button_states.unstage_all,
+                                    button_states.repository_kind.is_fossil()
+                                        || !button_states.prev_next
+                                            && !button_states.stage_all
+                                            && !button_states.unstage_all,
                                 )
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.dispatch_action(&UnstageAndNext, window, cx)
@@ -1509,15 +1559,35 @@ impl Render for ProjectDiffToolbar {
                         button_states.unstage_all && !button_states.stage_all,
                         |el| {
                             el.child(
-                                Button::new("unstage-all", "Unstage All")
-                                    .tooltip(Tooltip::for_action_title_in(
-                                        "Unstage all changes",
-                                        &UnstageAll,
-                                        &focus_handle,
-                                    ))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.unstage_all(window, cx)
-                                    })),
+                                Button::new(
+                                    "unstage-all",
+                                    if button_states.repository_kind.is_fossil() {
+                                        "Exclude All"
+                                    } else {
+                                        "Unstage All"
+                                    },
+                                )
+                                .tooltip({
+                                    let focus_handle = focus_handle.clone();
+                                    move |_window, cx| {
+                                        if button_states.repository_kind.is_fossil() {
+                                            Tooltip::simple(
+                                                "Exclude all files from the next check-in",
+                                                cx,
+                                            )
+                                        } else {
+                                            Tooltip::for_action_in(
+                                                "Unstage all changes",
+                                                &UnstageAll,
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                        }
+                                    }
+                                })
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.unstage_all(window, cx)),
+                                ),
                             )
                         },
                     )
@@ -1528,30 +1598,65 @@ impl Render for ProjectDiffToolbar {
                                 // todo make it so that changing to say "Unstaged"
                                 // doesn't change the position.
                                 div().child(
-                                    Button::new("stage-all", "Stage All")
-                                        .disabled(!button_states.stage_all)
-                                        .tooltip(Tooltip::for_action_title_in(
-                                            "Stage all changes",
-                                            &StageAll,
-                                            &focus_handle,
-                                        ))
-                                        .on_click(cx.listener(|this, _, window, cx| {
+                                    Button::new(
+                                        "stage-all",
+                                        if button_states.repository_kind.is_fossil() {
+                                            "Include All"
+                                        } else {
+                                            "Stage All"
+                                        },
+                                    )
+                                    .disabled(!button_states.stage_all)
+                                    .tooltip({
+                                        let focus_handle = focus_handle.clone();
+                                        move |_window, cx| {
+                                            if button_states.repository_kind.is_fossil() {
+                                                Tooltip::simple(
+                                                    "Include all files in the next check-in",
+                                                    cx,
+                                                )
+                                            } else {
+                                                Tooltip::for_action_in(
+                                                    "Stage all changes",
+                                                    &StageAll,
+                                                    &focus_handle,
+                                                    cx,
+                                                )
+                                            }
+                                        }
+                                    })
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| {
                                             this.stage_all(window, cx)
-                                        })),
+                                        }),
+                                    ),
                                 ),
                             )
                         },
                     )
                     .child(
-                        Button::new("commit", "Commit")
-                            .tooltip(Tooltip::for_action_title_in(
-                                "Commit",
-                                &Commit,
-                                &focus_handle,
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dispatch_action(&Commit, window, cx);
-                            })),
+                        Button::new(
+                            "commit",
+                            if button_states.repository_kind.is_fossil() {
+                                "Check In"
+                            } else {
+                                "Commit"
+                            },
+                        )
+                        .disabled(!button_states.can_commit)
+                        .tooltip({
+                            let focus_handle = focus_handle.clone();
+                            move |_window, cx| {
+                                if button_states.repository_kind.is_fossil() {
+                                    Tooltip::for_action_in("Check In", &Commit, &focus_handle, cx)
+                                } else {
+                                    Tooltip::for_action_in("Commit", &Commit, &focus_handle, cx)
+                                }
+                            }
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.dispatch_action(&Commit, window, cx);
+                        })),
                     ),
             )
             // "Send Review to Agent" button (only shown when there are review comments)

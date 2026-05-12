@@ -721,7 +721,40 @@ pub struct SearchCommitArgs {
     pub case_sensitive: bool,
 }
 
+pub fn delete_branch_flag(is_remote_tracking_ref: bool, force: bool) -> &'static str {
+    match (is_remote_tracking_ref, force) {
+        (true, true) => "-Dr",
+        (true, false) => "-dr",
+        (false, true) => "-D",
+        (false, false) => "-d",
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum RepositoryKind {
+    #[default]
+    Git,
+    Fossil,
+}
+
+impl RepositoryKind {
+    pub fn binary_name(self) -> &'static str {
+        match self {
+            Self::Git => "git",
+            Self::Fossil => "fossil",
+        }
+    }
+
+    pub fn is_fossil(self) -> bool {
+        self == Self::Fossil
+    }
+}
+
 pub trait GitRepository: Send + Sync {
+    fn kind(&self) -> RepositoryKind {
+        RepositoryKind::Git
+    }
+
     fn reload_index(&self);
 
     /// Returns the contents of an entry in the repository's index, or None if there is no entry for the given path.
@@ -857,6 +890,18 @@ pub trait GitRepository: Send + Sync {
         askpass: AskPassDelegate,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
+
+    fn commit_paths(
+        &self,
+        message: SharedString,
+        name_and_email: Option<(SharedString, SharedString)>,
+        options: CommitOptions,
+        askpass: AskPassDelegate,
+        env: Arc<HashMap<String, String>>,
+        _paths: Vec<RepoPath>,
+    ) -> BoxFuture<'_, Result<()>> {
+        self.commit(message, name_and_email, options, askpass, env)
+    }
 
     fn stash_paths(
         &self,

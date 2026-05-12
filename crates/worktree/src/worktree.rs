@@ -21,8 +21,8 @@ use futures::{
 };
 use fuzzy::CharBag;
 use git::{
-    COMMIT_MESSAGE, DOT_GIT, FSMONITOR_DAEMON, GITIGNORE, INDEX_LOCK, LFS_DIR, REPO_EXCLUDE,
-    status::GitSummary,
+    COMMIT_MESSAGE, DOT_FOSSIL, DOT_GIT, FOSSIL_CHECKOUT, FSMONITOR_DAEMON, GITIGNORE, INDEX_LOCK,
+    LFS_DIR, REPO_EXCLUDE, status::GitSummary,
 };
 use gpui::{
     App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, EventEmitter, Priority,
@@ -3075,7 +3075,10 @@ impl BackgroundScannerState {
 
     async fn insert_entry(&mut self, entry: Entry, fs: &dyn Fs, watcher: &dyn Watcher) -> Entry {
         let entry = self.snapshot.insert_entry(entry, fs).await;
-        if entry.path.file_name() == Some(&DOT_GIT) {
+        if entry.path.file_name() == Some(&DOT_GIT)
+            || entry.path.file_name() == Some(&DOT_FOSSIL)
+            || entry.path.file_name() == Some(&FOSSIL_CHECKOUT)
+        {
             self.insert_git_repository(entry.path.clone(), fs, watcher)
                 .await;
         }
@@ -3320,9 +3323,23 @@ impl BackgroundScannerState {
     }
 }
 
-async fn is_dot_git(path: &Path, fs: &dyn Fs) -> bool {
+fn is_repository_metadata_name(name: &OsStr) -> bool {
+    name == DOT_GIT || name == DOT_FOSSIL || name == FOSSIL_CHECKOUT
+}
+
+async fn repository_metadata_path_for_directory(dir: &Path, fs: &dyn Fs) -> Option<PathBuf> {
+    for name in [DOT_GIT, DOT_FOSSIL, FOSSIL_CHECKOUT] {
+        let path = dir.join(name);
+        if fs.metadata(&path).await.ok().flatten().is_some() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+async fn is_repository_metadata_path(path: &Path, fs: &dyn Fs) -> bool {
     if let Some(file_name) = path.file_name()
-        && file_name == DOT_GIT
+        && is_repository_metadata_name(file_name)
     {
         return true;
     }
@@ -4406,7 +4423,7 @@ impl BackgroundScanner {
 
                 if self.track_git_repositories {
                     for ancestor in abs_path.as_path().ancestors() {
-                        if is_dot_git(ancestor, self.fs.as_ref()).await {
+                        if is_repository_metadata_path(ancestor, self.fs.as_ref()).await {
                             let path_in_git_dir = abs_path
                                 .as_path()
                                 .strip_prefix(ancestor)
@@ -4811,8 +4828,10 @@ impl BackgroundScanner {
             .collect::<Vec<_>>()
             .await;
 
-        // Ensure that .git and .gitignore are processed first.
+        // Ensure repository metadata and .gitignore are processed first.
         swap_to_front(&mut child_paths, GITIGNORE);
+        swap_to_front(&mut child_paths, FOSSIL_CHECKOUT);
+        swap_to_front(&mut child_paths, DOT_FOSSIL);
         swap_to_front(&mut child_paths, DOT_GIT);
 
         if let Some(path) = child_paths.first()
@@ -4832,7 +4851,7 @@ impl BackgroundScanner {
             };
 
             if self.track_git_repositories {
-                if child_name == DOT_GIT {
+                if is_repository_metadata_name(child_name) {
                     let mut state = self.state.lock().await;
                     state
                         .insert_git_repository(
@@ -5600,30 +5619,32 @@ async fn discover_ancestor_git_repo(
             }
         }
 
-        let ancestor_dot_git = ancestor.join(DOT_GIT);
-        log::trace!("considering ancestor: {ancestor_dot_git:?}");
-        // Check whether the directory or file called `.git` exists (in the
-        // case of worktrees it's a file.)
-        if fs
-            .metadata(&ancestor_dot_git)
-            .await
-            .is_ok_and(|metadata| metadata.is_some())
-        {
+        let ancestor_repository_metadata =
+            repository_metadata_path_for_directory(ancestor, fs.as_ref()).await;
+        log::trace!("considering ancestor repository metadata: {ancestor_repository_metadata:?}");
+        if let Some(ancestor_repository_metadata) = ancestor_repository_metadata {
             let dot_git_abs_path = if index != 0 {
                 // We canonicalize, since the FS events use the canonicalized path.
-                match fs.canonicalize(&ancestor_dot_git).await.log_err() {
+                match fs
+                    .canonicalize(&ancestor_repository_metadata)
+                    .await
+                    .log_err()
+                {
                     Some(path) => path,
                     None => continue,
                 }
             } else {
-                ancestor_dot_git.clone()
+                ancestor_repository_metadata.clone()
             };
             let dot_git_abs_path: Arc<Path> = dot_git_abs_path.as_path().into();
             let (_, common_dir_abs_path) = discover_git_paths(&dot_git_abs_path, fs.as_ref()).await;
 
-            let repo_exclude_abs_path = common_dir_abs_path.join(REPO_EXCLUDE);
-            if let Ok(repo_exclude) = build_gitignore(&repo_exclude_abs_path, fs.as_ref()).await {
-                exclude = Some(Arc::new(repo_exclude));
+            if dot_git_abs_path.file_name() == Some(OsStr::new(DOT_GIT)) {
+                let repo_exclude_abs_path = common_dir_abs_path.join(REPO_EXCLUDE);
+                if let Ok(repo_exclude) = build_gitignore(&repo_exclude_abs_path, fs.as_ref()).await
+                {
+                    exclude = Some(Arc::new(repo_exclude));
+                }
             }
 
             if index != 0 {
@@ -6391,12 +6412,13 @@ async fn discover_git_paths(dot_git_abs_path: &Arc<Path>, fs: &dyn Fs) -> (Arc<P
     let mut repository_dir_abs_path = dot_git_abs_path.clone();
     let mut common_dir_abs_path = dot_git_abs_path.clone();
 
-    if let Some(path) = fs
-        .load(dot_git_abs_path)
-        .await
-        .ok()
-        .as_ref()
-        .and_then(|contents| parse_gitfile(contents).log_err())
+    if dot_git_abs_path.file_name() == Some(OsStr::new(DOT_GIT))
+        && let Some(path) = fs
+            .load(dot_git_abs_path)
+            .await
+            .ok()
+            .as_ref()
+            .and_then(|contents| parse_gitfile(contents).log_err())
     {
         let path = resolve_gitfile_path(dot_git_abs_path, path);
         if let Some(path) = fs.canonicalize(&path).await.log_err() {

@@ -310,7 +310,8 @@ CREATE TABLE public.project_repositories (
     remote_origin_url character varying,
     linked_worktrees text,
     repository_dir_abs_path character varying,
-    common_dir_abs_path character varying
+    common_dir_abs_path character varying,
+    repository_kind integer
 );
 
 CREATE TABLE public.project_repository_statuses (

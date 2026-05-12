@@ -1,5 +1,6 @@
 pub mod blame;
 pub mod commit;
+pub mod fossil;
 mod hosting_provider;
 mod remote;
 pub mod repository;
@@ -18,6 +19,8 @@ use std::fmt;
 use std::str::FromStr;
 
 pub const DOT_GIT: &str = ".git";
+pub const DOT_FOSSIL: &str = ".fslckout";
+pub const FOSSIL_CHECKOUT: &str = "_FOSSIL_";
 pub const GITIGNORE: &str = ".gitignore";
 pub const FSMONITOR_DAEMON: &str = "fsmonitor--daemon";
 pub const LFS_DIR: &str = "lfs";

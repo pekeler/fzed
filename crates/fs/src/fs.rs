@@ -30,7 +30,11 @@ use std::mem::MaybeUninit;
 
 use async_tar::Archive;
 use futures::{AsyncRead, Stream, StreamExt, future::BoxFuture};
-use git::repository::{GitRepository, RealGitRepository};
+use git::{
+    DOT_FOSSIL, FOSSIL_CHECKOUT,
+    fossil::FossilRepository,
+    repository::{GitRepository, RealGitRepository},
+};
 use is_executable::IsExecutable;
 use rope::Rope;
 use serde::{Deserialize, Serialize};
@@ -1267,13 +1271,24 @@ impl Fs for RealFs {
 
     fn open_repo(
         &self,
-        dotgit_path: &Path,
-        system_git_binary_path: Option<&Path>,
+        repository_metadata_path: &Path,
+        system_binary_path: Option<&Path>,
     ) -> Result<Arc<dyn GitRepository>> {
+        if repository_metadata_path
+            .file_name()
+            .is_some_and(|file_name| file_name == DOT_FOSSIL || file_name == FOSSIL_CHECKOUT)
+        {
+            return Ok(Arc::new(FossilRepository::new(
+                repository_metadata_path,
+                system_binary_path.map(Path::to_path_buf),
+                self.executor.clone(),
+            )?));
+        }
+
         Ok(Arc::new(RealGitRepository::new(
-            dotgit_path,
+            repository_metadata_path,
             self.bundled_git_binary_path.clone(),
-            system_git_binary_path.map(|path| path.to_path_buf()),
+            system_binary_path.map(|path| path.to_path_buf()),
             self.executor.clone(),
         )?))
     }

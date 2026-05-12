@@ -341,7 +341,7 @@ impl CommitModal {
             workspace,
         ) = self.git_panel.update(cx, |git_panel, cx| {
             let (can_commit, tooltip) = git_panel.configure_commit_button(cx);
-            let title = git_panel.commit_button_title();
+            let title = git_panel.commit_button_title(cx);
             let co_authors = git_panel.render_co_authors(cx);
             let generate_commit_message = git_panel.render_generate_commit_message_button(cx);
             let active_repo = git_panel.active_repository.clone();
@@ -365,6 +365,10 @@ impl CommitModal {
             .and_then(|repo| repo.read(cx).branch.as_ref())
             .map(|b| b.name().to_owned())
             .unwrap_or_else(|| "<no branch>".to_owned());
+        let repository_kind = active_repo
+            .as_ref()
+            .map(|repo| repo.read(cx).kind())
+            .unwrap_or_default();
 
         let branch_picker_button = panel_button(branch)
             .start_icon(
@@ -467,18 +471,23 @@ impl CommitModal {
                             let focus_handle = focus_handle.clone();
                             move |_window, cx| {
                                 if can_commit {
-                                    Tooltip::with_meta_in(
-                                        tooltip,
-                                        Some(if is_amend_pending {
-                                            &git::Amend
-                                        } else {
-                                            &git::Commit
-                                        }),
+                                    let command = if repository_kind.is_fossil() {
+                                        "fossil commit".to_string()
+                                    } else {
                                         format!(
                                             "git commit{}{}",
                                             if is_amend_pending { " --amend" } else { "" },
                                             if is_signoff_enabled { " --signoff" } else { "" }
-                                        ),
+                                        )
+                                    };
+                                    Tooltip::with_meta_in(
+                                        tooltip,
+                                        Some(if is_amend_pending && !repository_kind.is_fossil() {
+                                            &git::Amend
+                                        } else {
+                                            &git::Commit
+                                        }),
+                                        command,
                                         &focus_handle.clone(),
                                         cx,
                                     )

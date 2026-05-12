@@ -130,11 +130,17 @@ message UpdateRepository {
   repeated Branch branch_list = 18;
   optional string repository_dir_abs_path = 19;
   optional string common_dir_abs_path = 20;
+  optional RepositoryKind repository_kind = 21;
 }
 
 message RemoveRepository {
   uint64 project_id = 1;
   uint64 id = 2;
+}
+
+enum RepositoryKind {
+  Git = 0;
+  Fossil = 1;
 }
 
 enum GitStatus {
@@ -380,6 +386,7 @@ message Commit {
   optional CommitOptions options = 7;
   reserved 8;
   uint64 askpass_id = 9;
+  repeated string paths = 10;
 
   message CommitOptions {
     bool amend = 1;

@@ -29,15 +29,15 @@ use futures::{
     stream::{FuturesOrdered, FuturesUnordered},
 };
 use git::{
-    BuildPermalinkParams, GitHostingProviderRegistry, Oid, RunHook,
+    BuildPermalinkParams, DOT_FOSSIL, FOSSIL_CHECKOUT, GitHostingProviderRegistry, Oid, RunHook,
     blame::Blame,
     parse_git_remote_url,
     repository::{
         Branch, CommitData, CommitDetails, CommitDiff, CommitFile, CommitOptions,
         CreateWorktreeTarget, DiffType, FetchOptions, GitCommitTemplate, GitRepository,
         GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote,
-        RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, UpstreamTrackingStatus,
-        Worktree as GitWorktree,
+        RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode, SearchCommitArgs,
+        UpstreamTrackingStatus, Worktree as GitWorktree, delete_branch_flag,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -299,6 +299,7 @@ pub enum CommitDataState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepositorySnapshot {
     pub id: RepositoryId,
+    pub kind: RepositoryKind,
     pub statuses_by_path: SumTree<StatusEntry>,
     pub work_directory_abs_path: Arc<Path>,
     /// Absolute path to the directory holding this worktree's Git state.
@@ -381,6 +382,7 @@ pub struct Repository {
     job_sender: mpsc::UnboundedSender<GitJob>,
     active_jobs: HashMap<JobId, JobInfo>,
     pending_ops: SumTree<PendingOps>,
+    fossil_included_paths: HashSet<RepoPath>,
     job_id: JobId,
     askpass_delegates: Arc<Mutex<HashMap<u64, AskPassDelegate>>>,
     latest_askpass_id: u64,
@@ -435,14 +437,20 @@ impl LocalRepositoryState {
         let backend = cx
             .background_spawn({
                 let fs = fs.clone();
+                let binary_name =
+                    repository_kind_for_metadata_path(&dot_git_abs_path).binary_name();
                 async move {
-                    let system_git_binary_path = search_paths
+                    let system_binary_path = search_paths
                         .and_then(|search_paths| {
-                            which::which_in("git", Some(search_paths), &work_directory_abs_path)
-                                .ok()
+                            which::which_in(
+                                binary_name,
+                                Some(search_paths),
+                                &work_directory_abs_path,
+                            )
+                            .ok()
                         })
-                        .or_else(|| which::which("git").ok());
-                    fs.open_repo(&dot_git_abs_path, system_git_binary_path.as_deref())
+                        .or_else(|| which::which(binary_name).ok());
+                    fs.open_repo(&dot_git_abs_path, system_binary_path.as_deref())
                         .with_context(|| format!("opening repository at {dot_git_abs_path:?}"))
                 }
             })
@@ -2078,6 +2086,7 @@ impl GitStore {
                 .common_dir_abs_path
                 .as_deref()
                 .map(|p| Path::new(p).into());
+            let kind = repository_kind_from_proto(update.repository_kind);
 
             let mut repo_subscription = None;
             let repo = this.repositories.entry(id).or_insert_with(|| {
@@ -2085,6 +2094,7 @@ impl GitStore {
                 let repo = cx.new(|cx| {
                     Repository::remote(
                         id,
+                        kind,
                         Path::new(&update.abs_path).into(),
                         repository_dir_abs_path.clone(),
                         common_dir_abs_path.clone(),
@@ -2464,20 +2474,32 @@ impl GitStore {
         let name = envelope.payload.name.map(SharedString::from);
         let email = envelope.payload.email.map(SharedString::from);
         let options = envelope.payload.options.unwrap_or_default();
+        let paths = envelope
+            .payload
+            .paths
+            .into_iter()
+            .map(|path| RepoPath::new(&path))
+            .collect::<Result<Vec<_>>>()?;
 
         repository_handle
             .update(&mut cx, |repository_handle, cx| {
-                repository_handle.commit(
-                    message,
-                    name.zip(email),
-                    CommitOptions {
-                        amend: options.amend,
-                        signoff: options.signoff,
-                        allow_empty: options.allow_empty,
-                    },
-                    askpass,
-                    cx,
-                )
+                let options = CommitOptions {
+                    amend: options.amend,
+                    signoff: options.signoff,
+                    allow_empty: options.allow_empty,
+                };
+                if paths.is_empty() {
+                    repository_handle.commit(message, name.zip(email), options, askpass, cx)
+                } else {
+                    repository_handle.commit_paths(
+                        message,
+                        name.zip(email),
+                        options,
+                        askpass,
+                        paths,
+                        cx,
+                    )
+                }
             })
             .await??;
         Ok(proto::Ack {})
@@ -4090,9 +4112,21 @@ impl RepositoryId {
     }
 }
 
+fn repository_kind_for_metadata_path(metadata_path: &Path) -> RepositoryKind {
+    if metadata_path
+        .file_name()
+        .is_some_and(|file_name| file_name == DOT_FOSSIL || file_name == FOSSIL_CHECKOUT)
+    {
+        RepositoryKind::Fossil
+    } else {
+        RepositoryKind::Git
+    }
+}
+
 impl RepositorySnapshot {
     fn empty(
         id: RepositoryId,
+        kind: RepositoryKind,
         work_directory_abs_path: Arc<Path>,
         repository_dir_abs_path: Option<Arc<Path>>,
         common_dir_abs_path: Option<Arc<Path>>,
@@ -4105,6 +4139,7 @@ impl RepositorySnapshot {
 
         Self {
             id,
+            kind,
             statuses_by_path: Default::default(),
             repository_dir_abs_path,
             common_dir_abs_path,
@@ -4158,6 +4193,7 @@ impl RepositorySnapshot {
                 self.repository_dir_abs_path.to_string_lossy().into_owned(),
             ),
             common_dir_abs_path: Some(self.common_dir_abs_path.to_string_lossy().into_owned()),
+            repository_kind: Some(repository_kind_to_proto(self.kind)),
             linked_worktrees: self
                 .linked_worktrees
                 .iter()
@@ -4241,6 +4277,7 @@ impl RepositorySnapshot {
                 self.repository_dir_abs_path.to_string_lossy().into_owned(),
             ),
             common_dir_abs_path: Some(self.common_dir_abs_path.to_string_lossy().into_owned()),
+            repository_kind: Some(repository_kind_to_proto(self.kind)),
             linked_worktrees: self
                 .linked_worktrees
                 .iter()
@@ -4287,6 +4324,10 @@ impl RepositorySnapshot {
 
     pub fn linked_worktrees(&self) -> &[GitWorktree] {
         &self.linked_worktrees
+    }
+
+    pub fn kind(&self) -> RepositoryKind {
+        self.kind
     }
 
     pub fn status(&self) -> impl Iterator<Item = StatusEntry> + '_ {
@@ -4456,6 +4497,26 @@ impl Repository {
             .cloned()
     }
 
+    pub fn fossil_path_included_for_check_in(&self, path: &RepoPath) -> bool {
+        self.snapshot.kind.is_fossil() && self.fossil_included_paths.contains(path)
+    }
+
+    fn prune_fossil_included_paths(&mut self) -> bool {
+        if !self.snapshot.kind.is_fossil() || self.fossil_included_paths.is_empty() {
+            return false;
+        }
+
+        let statuses_by_path = &self.snapshot.statuses_by_path;
+        let len_before = self.fossil_included_paths.len();
+        self.fossil_included_paths.retain(|path| {
+            statuses_by_path
+                .get(&PathKey(path.as_ref().clone()), ())
+                .is_some()
+        });
+
+        self.fossil_included_paths.len() != len_before
+    }
+
     fn local(
         id: RepositoryId,
         work_directory_abs_path: Arc<Path>,
@@ -4468,8 +4529,10 @@ impl Repository {
         git_store: WeakEntity<GitStore>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let kind = repository_kind_for_metadata_path(&dot_git_abs_path);
         let snapshot = RepositorySnapshot::empty(
             id,
+            kind,
             work_directory_abs_path.clone(),
             Some(repository_dir_abs_path),
             Some(common_dir_abs_path),
@@ -4514,6 +4577,7 @@ impl Repository {
             git_store,
             snapshot,
             pending_ops: Default::default(),
+            fossil_included_paths: Default::default(),
             repository_state: state,
             commit_message_buffer: None,
             askpass_delegates: Default::default(),
@@ -4531,6 +4595,7 @@ impl Repository {
 
     fn remote(
         id: RepositoryId,
+        kind: RepositoryKind,
         work_directory_abs_path: Arc<Path>,
         repository_dir_abs_path: Option<Arc<Path>>,
         common_dir_abs_path: Option<Arc<Path>>,
@@ -4542,6 +4607,7 @@ impl Repository {
     ) -> Self {
         let snapshot = RepositorySnapshot::empty(
             id,
+            kind,
             work_directory_abs_path,
             repository_dir_abs_path,
             common_dir_abs_path,
@@ -4567,6 +4633,7 @@ impl Repository {
             commit_message_buffer: None,
             git_store,
             pending_ops: Default::default(),
+            fossil_included_paths: Default::default(),
             paths_needing_status_update: Default::default(),
             job_sender,
             repository_state,
@@ -5840,6 +5907,26 @@ impl Repository {
         };
         let id = self.id;
         let save_tasks = self.save_buffers(&entries, cx);
+        if self.snapshot.kind.is_fossil() {
+            let mut changed = false;
+            for entry in entries {
+                if stage {
+                    changed |= self.fossil_included_paths.insert(entry);
+                } else {
+                    changed |= self.fossil_included_paths.remove(&entry);
+                }
+            }
+            if changed {
+                cx.emit(RepositoryEvent::StatusesChanged);
+                cx.notify();
+            }
+            return cx.spawn(async move |_, _| {
+                for save_task in save_tasks {
+                    save_task.await?;
+                }
+                anyhow::Ok(())
+            });
+        }
         let paths = entries
             .iter()
             .map(|p| p.as_unix_str())
@@ -6013,6 +6100,30 @@ impl Repository {
 
     pub fn stage_all(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
         let snapshot = self.snapshot.clone();
+        let fossil_included_paths = self.fossil_included_paths.clone();
+        if snapshot.kind.is_fossil() {
+            let to_stage = cx.background_spawn(async move {
+                snapshot
+                    .status()
+                    .filter_map(|entry| {
+                        if fossil_included_paths.contains(&entry.repo_path) {
+                            None
+                        } else {
+                            Some(entry.repo_path)
+                        }
+                    })
+                    .collect()
+            });
+
+            return cx.spawn(async move |this, cx| {
+                let to_stage = to_stage.await;
+                this.update(cx, |this, cx| {
+                    this.stage_or_unstage_entries(true, to_stage, cx)
+                })?
+                .await
+            });
+        }
+
         let pending_ops = self.pending_ops.clone();
         let to_stage = cx.background_spawn(async move {
             snapshot
@@ -6047,6 +6158,30 @@ impl Repository {
 
     pub fn unstage_all(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
         let snapshot = self.snapshot.clone();
+        let fossil_included_paths = self.fossil_included_paths.clone();
+        if snapshot.kind.is_fossil() {
+            let to_unstage = cx.background_spawn(async move {
+                snapshot
+                    .status()
+                    .filter_map(|entry| {
+                        if fossil_included_paths.contains(&entry.repo_path) {
+                            Some(entry.repo_path)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            });
+
+            return cx.spawn(async move |this, cx| {
+                let to_unstage = to_unstage.await;
+                this.update(cx, |this, cx| {
+                    this.stage_or_unstage_entries(false, to_unstage, cx)
+                })?
+                .await
+            });
+        }
+
         let pending_ops = self.pending_ops.clone();
         let to_unstage = cx.background_spawn(async move {
             snapshot
@@ -6330,25 +6465,85 @@ impl Repository {
         askpass: AskPassDelegate,
         cx: &mut App,
     ) -> oneshot::Receiver<Result<()>> {
+        let fossil_commit_paths = self.snapshot.kind.is_fossil().then(|| {
+            self.fossil_included_paths
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        self.send_commit_job(
+            message,
+            name_and_email,
+            options,
+            askpass,
+            fossil_commit_paths,
+            cx,
+        )
+    }
+
+    pub fn commit_paths(
+        &mut self,
+        message: SharedString,
+        name_and_email: Option<(SharedString, SharedString)>,
+        options: CommitOptions,
+        askpass: AskPassDelegate,
+        paths: Vec<RepoPath>,
+        cx: &mut App,
+    ) -> oneshot::Receiver<Result<()>> {
+        self.send_commit_job(message, name_and_email, options, askpass, Some(paths), cx)
+    }
+
+    fn send_commit_job(
+        &mut self,
+        message: SharedString,
+        name_and_email: Option<(SharedString, SharedString)>,
+        options: CommitOptions,
+        askpass: AskPassDelegate,
+        fossil_commit_paths: Option<Vec<RepoPath>>,
+        cx: &mut App,
+    ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         let askpass_delegates = self.askpass_delegates.clone();
         let askpass_id = util::post_inc(&mut self.latest_askpass_id);
 
         let rx = self.run_hook(RunHook::PreCommit, cx);
 
-        self.send_job(Some("git commit".into()), move |git_repo, _cx| async move {
-            rx.await??;
-
-            match git_repo {
-                RepositoryState::Local(LocalRepositoryState {
-                    backend,
-                    environment,
-                    ..
-                }) => {
-                    backend
-                        .commit(message, name_and_email, options, askpass, environment)
-                        .await
+        self.send_job(
+            Some(
+                if fossil_commit_paths.is_some() {
+                    "fossil commit"
+                } else {
+                    "git commit"
                 }
+                .into(),
+            ),
+            move |git_repo, _cx| async move {
+                rx.await??;
+
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => match fossil_commit_paths {
+                        Some(paths) => {
+                            backend
+                                .commit_paths(
+                                    message,
+                                    name_and_email,
+                                    options,
+                                    askpass,
+                                    environment,
+                                    paths,
+                                )
+                                .await
+                        }
+                        None => {
+                            backend
+                                .commit(message, name_and_email, options, askpass, environment)
+                                .await
+                        }
+                    },
                 RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                     askpass_delegates.lock().insert(askpass_id, askpass);
                     let _defer = util::defer(|| {
@@ -6356,6 +6551,11 @@ impl Repository {
                         debug_assert!(askpass_delegate.is_some());
                     });
                     let (name, email) = name_and_email.unzip();
+                    let paths = fossil_commit_paths
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|repo_path| repo_path.to_proto())
+                        .collect();
                     client
                         .request(proto::Commit {
                             project_id: project_id.0,
@@ -6369,6 +6569,7 @@ impl Repository {
                                 allow_empty: options.allow_empty,
                             }),
                             askpass_id,
+                            paths,
                         })
                         .await?;
 
@@ -7505,6 +7706,8 @@ impl Repository {
         update: proto::UpdateRepository,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        self.snapshot.kind = repository_kind_from_proto(update.repository_kind);
+
         if let Some(repository_dir_abs_path) = &update.repository_dir_abs_path {
             self.snapshot.repository_dir_abs_path =
                 Path::new(repository_dir_abs_path.as_str()).into();
@@ -7585,10 +7788,12 @@ impl Repository {
                     }),
             )
             .collect::<Vec<_>>();
-        if conflicts_changed || !edits.is_empty() {
+        let statuses_changed = !edits.is_empty();
+        self.snapshot.statuses_by_path.edit(edits, ());
+        let fossil_selection_changed = self.prune_fossil_included_paths();
+        if conflicts_changed || statuses_changed || fossil_selection_changed {
             cx.emit(RepositoryEvent::StatusesChanged);
         }
-        self.snapshot.statuses_by_path.edit(edits, ());
 
         if update.is_last_update {
             self.snapshot.scan_id = update.scan_id;
@@ -7990,12 +8195,16 @@ impl Repository {
                         this.snapshot.stash_entries = stash_entries;
                     }
 
-                    if !changed_path_statuses.is_empty() {
-                        cx.emit(RepositoryEvent::StatusesChanged);
+                    let statuses_changed = !changed_path_statuses.is_empty();
+                    if statuses_changed {
                         this.snapshot
                             .statuses_by_path
                             .edit(changed_path_statuses, ());
                         this.snapshot.scan_id += 1;
+                    }
+                    let fossil_selection_changed = this.prune_fossil_included_paths();
+                    if statuses_changed || fossil_selection_changed {
+                        cx.emit(RepositoryEvent::StatusesChanged);
                     }
 
                     if let Some(updates_tx) = updates_tx {
@@ -8469,6 +8678,20 @@ fn log_order_from_proto(log_order: proto::get_initial_graph_data::LogOrder) -> L
         proto::get_initial_graph_data::LogOrder::ReverseChronological => {
             LogOrder::ReverseChronological
         }
+    }
+}
+
+fn repository_kind_to_proto(kind: RepositoryKind) -> i32 {
+    match kind {
+        RepositoryKind::Git => proto::RepositoryKind::Git as i32,
+        RepositoryKind::Fossil => proto::RepositoryKind::Fossil as i32,
+    }
+}
+
+fn repository_kind_from_proto(kind: Option<i32>) -> RepositoryKind {
+    match proto::RepositoryKind::from_i32(kind.unwrap_or(proto::RepositoryKind::Git as i32)) {
+        Some(proto::RepositoryKind::Fossil) => RepositoryKind::Fossil,
+        Some(proto::RepositoryKind::Git) | None => RepositoryKind::Git,
     }
 }
 
@@ -9019,6 +9242,7 @@ async fn compute_snapshot(
     backend: Arc<dyn GitRepository>,
     cx: &mut AsyncApp,
 ) -> Result<RepositorySnapshot> {
+    let kind = backend.kind();
     let (id, work_directory_abs_path, prev_snapshot) = this.update(cx, |this, _| {
         this.paths_needing_status_update.clear();
         (
@@ -9081,6 +9305,7 @@ async fn compute_snapshot(
 
         this.snapshot = RepositorySnapshot {
             id,
+            kind,
             work_directory_abs_path,
             branch,
             branch_list: branch_list.clone(),
@@ -9164,9 +9389,7 @@ async fn compute_snapshot(
     log::debug!("new merge details: {merge_details:?}");
 
     Ok(this.update(cx, |this, cx| {
-        if conflicts_changed || statuses_by_path != this.snapshot.statuses_by_path {
-            cx.emit(RepositoryEvent::StatusesChanged);
-        }
+        let statuses_changed = statuses_by_path != this.snapshot.statuses_by_path;
         if stash_entries != this.snapshot.stash_entries {
             cx.emit(RepositoryEvent::StashEntriesChanged);
         }
@@ -9175,6 +9398,11 @@ async fn compute_snapshot(
         this.snapshot.merge = merge_details;
         this.snapshot.statuses_by_path = statuses_by_path;
         this.snapshot.stash_entries = stash_entries;
+        let fossil_selection_changed = this.prune_fossil_included_paths();
+
+        if conflicts_changed || statuses_changed || fossil_selection_changed {
+            cx.emit(RepositoryEvent::StatusesChanged);
+        }
 
         this.snapshot.clone()
     }))

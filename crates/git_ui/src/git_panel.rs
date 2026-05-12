@@ -25,8 +25,9 @@ use futures::StreamExt as _;
 use futures::channel::oneshot::Canceled;
 use git::commit::ParsedCommitMessage;
 use git::repository::{
-    Branch, CommitDetails, CommitOptions, CommitSummary, DiffType, FetchOptions, GitCommitTemplate,
-    GitCommitter, PushOptions, Remote, RemoteCommandOutput, ResetMode, Upstream, UpstreamTracking,
+    Branch, CommitDetails, CommitOptions, CommitSummary, DiffType, FetchOptions, FossilSyncState,
+    GitCommitTemplate, GitCommitter, PushOptions, Remote, RemoteCommandOutput, RepositoryKind,
+    ResetMode, Upstream, UpstreamTracking,
     UpstreamTrackingStatus, get_git_committer,
 };
 use git::stash::GitStash;
@@ -156,6 +157,9 @@ enum TrashCancel {
 }
 
 struct GitMenuState {
+    can_mutate: bool,
+    can_select_files: bool,
+    is_fossil: bool,
     has_tracked_changes: bool,
     has_staged_changes: bool,
     has_unstaged_changes: bool,
@@ -175,33 +179,45 @@ fn git_panel_context_menu(
         context_menu
             .context(focus_handle)
             .action_disabled_when(
-                !state.has_unstaged_changes,
-                "Stage All",
+                !state.can_select_files || !state.has_unstaged_changes,
+                if state.is_fossil {
+                    "Include All"
+                } else {
+                    "Stage All"
+                },
                 StageAll.boxed_clone(),
             )
             .action_disabled_when(
-                !state.has_staged_changes,
-                "Unstage All",
+                !state.can_select_files || !state.has_staged_changes,
+                if state.is_fossil {
+                    "Exclude All"
+                } else {
+                    "Unstage All"
+                },
                 UnstageAll.boxed_clone(),
             )
             .separator()
             .action_disabled_when(
-                !(state.has_new_changes || state.has_tracked_changes),
+                !state.can_mutate || !(state.has_new_changes || state.has_tracked_changes),
                 "Stash All",
                 StashAll.boxed_clone(),
             )
-            .action_disabled_when(!state.has_stash_items, "Stash Pop", StashPop.boxed_clone())
+            .action_disabled_when(
+                !state.can_mutate || !state.has_stash_items,
+                "Stash Pop",
+                StashPop.boxed_clone(),
+            )
             .action("View Stash", zed_actions::git::ViewStash.boxed_clone())
             .separator()
             .action("Open Diff", project_diff::Diff.boxed_clone())
             .separator()
             .action_disabled_when(
-                !state.has_tracked_changes,
+                !state.can_mutate || !state.has_tracked_changes,
                 "Discard Tracked Changes",
                 RestoreTrackedFiles.boxed_clone(),
             )
             .action_disabled_when(
-                !state.has_new_changes,
+                !state.can_mutate || !state.has_new_changes,
                 "Trash Untracked Files",
                 TrashUntrackedFiles.boxed_clone(),
             )
@@ -1718,6 +1734,9 @@ impl GitPanel {
     }
 
     fn change_all_files_stage(&mut self, stage: bool, cx: &mut Context<Self>) {
+        if !self.can_select_files_for_active_repository(cx) {
+            return;
+        }
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
@@ -1750,6 +1769,14 @@ impl GitPanel {
     }
 
     fn stage_status_for_entry(entry: &GitStatusEntry, repo: &Repository) -> StageStatus {
+        if repo.kind().is_fossil() {
+            return if repo.fossil_path_included_for_check_in(&entry.repo_path) {
+                StageStatus::Staged
+            } else {
+                StageStatus::Unstaged
+            };
+        }
+
         // Checking for current staged/unstaged file status is a chained operation:
         // 1. first, we check for any pending operation recorded in repository
         // 2. if there are no pending ops either running or finished, we then ask the repository
@@ -1841,6 +1868,9 @@ impl GitPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.can_select_files_for_active_repository(cx) {
+            return;
+        }
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
@@ -1945,6 +1975,9 @@ impl GitPanel {
         entries: Vec<GitStatusEntry>,
         cx: &mut Context<Self>,
     ) {
+        if !self.can_select_files_for_active_repository(cx) {
+            return;
+        }
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
@@ -2289,7 +2322,15 @@ impl GitPanel {
             .detach();
         };
 
-        if self.has_unstaged_conflicts() {
+        let repository_kind = active_repository.read(cx).kind();
+        if repository_kind.is_fossil() && self.conflicted_count > 0 {
+            error_spawn(
+                "There are still conflicts. You must resolve these before checking in",
+                window,
+                cx,
+            );
+            return;
+        } else if self.has_unstaged_conflicts() {
             error_spawn(
                 "There are still conflicts. You must stage these before committing",
                 window,
@@ -2298,7 +2339,25 @@ impl GitPanel {
             return;
         }
 
-        let askpass = self.askpass_delegate("git commit", window, cx);
+        let options = if repository_kind.is_fossil() {
+            CommitOptions {
+                amend: false,
+                signoff: false,
+                allow_empty: options.allow_empty,
+            }
+        } else {
+            options
+        };
+
+        let askpass = self.askpass_delegate(
+            if repository_kind.is_fossil() {
+                "fossil commit"
+            } else {
+                "git commit"
+            },
+            window,
+            cx,
+        );
         let commit_message = self.custom_or_suggested_commit_message(window, cx);
 
         let Some(mut message) = commit_message else {
@@ -2329,7 +2388,15 @@ impl GitPanel {
                 .collect::<Vec<_>>();
 
             if changed_files.is_empty() && !options.amend {
-                error_spawn("No changes to commit", window, cx);
+                error_spawn(
+                    if repository_kind.is_fossil() {
+                        "No changes to check in"
+                    } else {
+                        "No changes to commit"
+                    },
+                    window,
+                    cx,
+                );
                 return;
             }
 
@@ -2651,7 +2718,7 @@ impl GitPanel {
 
     /// Generates a commit message using an LLM.
     pub fn generate_commit_message(&mut self, cx: &mut Context<Self>) {
-        if !self.can_commit() || !AgentSettings::get_global(cx).enabled(cx) {
+        if !self.can_commit(cx) || !AgentSettings::get_global(cx).enabled(cx) {
             return;
         }
 
@@ -3615,7 +3682,15 @@ impl GitPanel {
             self.changes_count += 1;
             let is_conflict = repo.had_conflict_on_last_merge_head_change(&entry.repo_path);
             let is_new = entry.status.is_created();
-            let staging = entry.status.staging();
+            let staging = if repo.kind().is_fossil() {
+                if repo.fossil_path_included_for_check_in(&entry.repo_path) {
+                    StageStatus::Staged
+                } else {
+                    StageStatus::Unstaged
+                }
+            } else {
+                entry.status.staging()
+            };
 
             if let Some(pending) = repo.pending_ops_for_path(&entry.repo_path)
                 && pending
@@ -3953,16 +4028,22 @@ impl GitPanel {
         });
     }
 
-    pub fn can_commit(&self) -> bool {
-        (self.has_staged_changes() || self.has_tracked_changes()) && !self.has_unstaged_conflicts()
+    pub fn can_commit(&self, cx: &App) -> bool {
+        self.has_write_access(cx)
+            && (self.has_staged_changes() || self.has_tracked_changes())
+            && if self.active_repository_kind(cx).is_fossil() {
+                self.conflicted_count == 0
+            } else {
+                !self.has_unstaged_conflicts()
+            }
     }
 
-    pub fn can_stage_all(&self) -> bool {
-        self.has_unstaged_changes()
+    pub fn can_stage_all(&self, cx: &App) -> bool {
+        self.can_select_files_for_active_repository(cx) && self.has_unstaged_changes()
     }
 
-    pub fn can_unstage_all(&self) -> bool {
-        self.has_staged_changes()
+    pub fn can_unstage_all(&self, cx: &App) -> bool {
+        self.can_select_files_for_active_repository(cx) && self.has_staged_changes()
     }
 
     /// Computes tree indentation depths for visible entries in the given range.
@@ -4027,8 +4108,11 @@ impl GitPanel {
         path + file_name + depth * 2
     }
 
-    fn render_overflow_menu(&self, id: impl Into<ElementId>) -> impl IntoElement {
+    fn render_overflow_menu(&self, id: impl Into<ElementId>, cx: &App) -> impl IntoElement {
         let focus_handle = self.focus_handle.clone();
+        let repository_kind = self.active_repository_kind(cx);
+        let can_mutate = self.has_write_access(cx) && !repository_kind.is_fossil();
+        let can_select_files = self.has_write_access(cx);
         let has_tracked_changes = self.has_tracked_changes();
         let has_staged_changes = self.has_staged_changes();
         let has_unstaged_changes = self.has_unstaged_changes();
@@ -4045,6 +4129,9 @@ impl GitPanel {
                 Some(git_panel_context_menu(
                     focus_handle.clone(),
                     GitMenuState {
+                        can_mutate,
+                        can_select_files,
+                        is_fossil: repository_kind.is_fossil(),
                         has_tracked_changes,
                         has_staged_changes,
                         has_unstaged_changes,
@@ -4096,7 +4183,8 @@ impl GitPanel {
         let has_commit_model_configuration_error = model_registry
             .configuration_error(model_registry.commit_message_model(cx), cx)
             .is_some();
-        let can_commit = self.can_commit();
+        let can_commit = self.can_commit(cx);
+        let repository_kind = self.active_repository_kind(cx);
 
         let editor_focus_handle = self.commit_editor.focus_handle(cx);
 
@@ -4110,7 +4198,14 @@ impl GitPanel {
                 })
                 .tooltip(move |_window, cx| {
                     if !can_commit {
-                        Tooltip::simple("No Changes to Commit", cx)
+                        Tooltip::simple(
+                            if repository_kind.is_fossil() {
+                                "No Changes to Check In"
+                            } else {
+                                "No Changes to Commit"
+                            },
+                            cx,
+                        )
                     } else if has_commit_model_configuration_error {
                         Tooltip::simple("Configure an LLM provider to generate commit messages", cx)
                     } else {
@@ -4237,23 +4332,58 @@ impl GitPanel {
             .anchor(Anchor::TopRight)
     }
 
+    pub(crate) fn active_repository_kind(&self, cx: &App) -> RepositoryKind {
+        self.active_repository
+            .as_ref()
+            .map(|repository| repository.read(cx).kind())
+            .unwrap_or_default()
+    }
+
+    fn can_mutate_active_repository(&self, cx: &App) -> bool {
+        !self.active_repository_kind(cx).is_fossil()
+    }
+
+    fn can_select_files_for_active_repository(&self, _cx: &App) -> bool {
+        true
+    }
+
     pub fn configure_commit_button(&self, cx: &mut Context<Self>) -> (bool, &'static str) {
-        if self.has_unstaged_conflicts() {
-            (false, "You must resolve conflicts before committing")
+        let kind = self.active_repository_kind(cx);
+        if kind.is_fossil() && self.conflicted_count > 0 {
+            (false, "You must resolve conflicts before checking in")
+        } else if self.has_unstaged_conflicts() {
+            if kind.is_fossil() {
+                (false, "You must resolve conflicts before checking in")
+            } else {
+                (false, "You must resolve conflicts before committing")
+            }
         } else if !self.has_staged_changes() && !self.has_tracked_changes() && !self.amend_pending {
-            (false, "No changes to commit")
+            if kind.is_fossil() {
+                (false, "No changes to check in")
+            } else {
+                (false, "No changes to commit")
+            }
         } else if self.pending_commit.is_some() {
-            (false, "Commit in progress")
+            if kind.is_fossil() {
+                (false, "Check-in in progress")
+            } else {
+                (false, "Commit in progress")
+            }
         } else if !self.has_commit_message(cx) {
-            (false, "No commit message")
+            if kind.is_fossil() {
+                (false, "No check-in message")
+            } else {
+                (false, "No commit message")
+            }
         } else if !self.has_write_access(cx) {
             (false, "You do not have write access to this project")
         } else {
-            (true, self.commit_button_title())
+            (true, self.commit_button_title(cx))
         }
     }
 
-    pub fn commit_button_title(&self) -> &'static str {
+    pub fn commit_button_title(&self, cx: &App) -> &'static str {
+        let kind = self.active_repository_kind(cx);
         if self.amend_pending {
             if self.has_staged_changes() {
                 "Amend"
@@ -4262,6 +4392,10 @@ impl GitPanel {
             } else {
                 "Amend"
             }
+        } else if kind.is_fossil() && self.has_staged_changes() {
+            "Check In"
+        } else if kind.is_fossil() {
+            "Check In Tracked"
         } else if self.has_staged_changes() {
             "Commit"
         } else {
@@ -4321,12 +4455,31 @@ impl GitPanel {
 
         self.active_repository.as_ref()?;
 
+        let repository_kind = self.active_repository_kind(cx);
         let (text, action, stage, tooltip) =
             if self.total_staged_count() == self.entry_count && self.entry_count > 0 {
-                ("Unstage All", UnstageAll.boxed_clone(), false, "git reset")
+                if repository_kind.is_fossil() {
+                    (
+                        "Exclude All",
+                        UnstageAll.boxed_clone(),
+                        false,
+                        "fossil commit without selected files",
+                    )
+                } else {
+                    ("Unstage All", UnstageAll.boxed_clone(), false, "git reset")
+                }
+            } else if repository_kind.is_fossil() {
+                (
+                    "Include All",
+                    StageAll.boxed_clone(),
+                    true,
+                    "fossil commit FILE...",
+                )
             } else {
                 ("Stage All", StageAll.boxed_clone(), true, "git add --all")
             };
+        let can_select_files =
+            self.has_write_access(cx) && self.can_select_files_for_active_repository(cx);
 
         let change_string = match self.changes_count {
             0 => "No Changes".to_string(),
@@ -4355,15 +4508,28 @@ impl GitPanel {
                 .child(
                     h_flex()
                         .gap_1()
-                        .child(self.render_overflow_menu("overflow_menu"))
+                        .child(self.render_overflow_menu("overflow_menu", cx))
                         .child(
-                            panel_filled_button(text)
-                                .tooltip(Tooltip::for_action_title_in(
-                                    tooltip,
-                                    action.as_ref(),
-                                    &self.focus_handle,
-                                ))
-                                .disabled(self.entry_count == 0)
+                            Button::new("stage_unstage_all", text)
+                                .label_size(LabelSize::Small)
+                                .layer(ElevationIndex::ModalSurface)
+                                .style(ButtonStyle::Filled)
+                                .tooltip({
+                                    let focus_handle = self.focus_handle.clone();
+                                    move |_window, cx| {
+                                        if repository_kind.is_fossil() {
+                                            Tooltip::simple(tooltip, cx)
+                                        } else {
+                                            Tooltip::for_action_in(
+                                                tooltip,
+                                                action.as_ref(),
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                        }
+                                    }
+                                })
+                                .disabled(self.entry_count == 0 || !can_select_files)
                                 .on_click({
                                     let git_panel = cx.weak_entity();
                                     move |_, _, cx| {
@@ -4601,10 +4767,11 @@ impl GitPanel {
 
     fn render_commit_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (can_commit, tooltip) = self.configure_commit_button(cx);
-        let title = self.commit_button_title();
+        let title = self.commit_button_title(cx);
         let commit_tooltip_focus_handle = self.commit_editor.focus_handle(cx);
         let amend = self.amend_pending();
         let signoff = self.signoff_enabled;
+        let repository_kind = self.active_repository_kind(cx);
 
         let label_color = if self.pending_commit.is_some() {
             Color::Disabled
@@ -4655,14 +4822,23 @@ impl GitPanel {
                     let handle = commit_tooltip_focus_handle.clone();
                     move |_window, cx| {
                         if can_commit {
-                            Tooltip::with_meta_in(
-                                tooltip,
-                                Some(if amend { &git::Amend } else { &git::Commit }),
+                            let command = if repository_kind.is_fossil() {
+                                "fossil commit".to_string()
+                            } else {
                                 format!(
                                     "git commit{}{}",
                                     if amend { " --amend" } else { "" },
                                     if signoff { " --signoff" } else { "" }
-                                ),
+                                )
+                            };
+                            Tooltip::with_meta_in(
+                                tooltip,
+                                Some(if amend && !repository_kind.is_fossil() {
+                                    &git::Amend
+                                } else {
+                                    &git::Commit
+                                }),
+                                command,
                                 &handle.clone(),
                                 cx,
                             )
@@ -4961,21 +5137,14 @@ impl GitPanel {
         let ix = self.entry_by_path(&repo_path)?;
         let entry = self.entries.get(ix)?;
 
-        let is_staging_or_staged = repo
-            .pending_ops_for_path(&repo_path)
-            .map(|ops| !ops.last_op_errored() && (ops.staging() || ops.staged()))
-            .or_else(|| {
-                repo.status_for_path(&repo_path)
-                    .and_then(|status| status.status.staging().as_bool())
-            })
-            .or_else(|| {
-                entry
-                    .status_entry()
-                    .and_then(|entry| entry.staging.as_bool())
-            });
+        let is_staging_or_staged = entry
+            .status_entry()
+            .and_then(|entry| GitPanel::stage_status_for_entry(entry, repo).as_bool());
 
         let checkbox = Checkbox::new("stage-file", is_staging_or_staged.into())
-            .disabled(!self.has_write_access(cx))
+            .disabled(
+                !self.has_write_access(cx) || !self.can_select_files_for_active_repository(cx),
+            )
             .fill()
             .elevation(ElevationIndex::Surface)
             .on_click({
@@ -4984,6 +5153,9 @@ impl GitPanel {
                 move |_, window, cx| {
                     git_panel
                         .update(cx, |this, cx| {
+                            if !this.can_select_files_for_active_repository(cx) {
+                                return;
+                            }
                             this.toggle_staged_for_entry(&entry, window, cx);
                             cx.stop_propagation();
                         })
@@ -5285,9 +5457,15 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let can_mutate = self.has_write_access(cx) && self.can_mutate_active_repository(cx);
+        let can_select_files =
+            self.has_write_access(cx) && self.can_select_files_for_active_repository(cx);
         let context_menu = git_panel_context_menu(
             self.focus_handle.clone(),
             GitMenuState {
+                can_mutate,
+                can_select_files,
+                is_fossil: self.active_repository_kind(cx).is_fossil(),
                 has_tracked_changes: self.has_tracked_changes(),
                 has_staged_changes: self.has_staged_changes(),
                 has_unstaged_changes: self.has_unstaged_changes(),
@@ -5387,6 +5565,7 @@ impl GitPanel {
             ElementId::Name(format!("entry_{}_{}_checkbox", display_name, ix).into());
 
         let stage_status = GitPanel::stage_status_for_entry(entry, &repo);
+        let repository_kind = repo.kind();
         let mut is_staged: ToggleState = match stage_status {
             StageStatus::Staged => ToggleState::Selected,
             StageStatus::Unstaged => ToggleState::Unselected,
@@ -5533,12 +5712,21 @@ impl GitPanel {
                             })
                             .tooltip(move |_window, cx| {
                                 let action = match stage_status {
+                                    StageStatus::Staged if repository_kind.is_fossil() => "Exclude",
                                     StageStatus::Staged => "Unstage",
+                                    StageStatus::Unstaged | StageStatus::PartiallyStaged
+                                        if repository_kind.is_fossil() =>
+                                    {
+                                        "Include"
+                                    }
                                     StageStatus::Unstaged | StageStatus::PartiallyStaged => "Stage",
                                 };
-                                let tooltip_name = action.to_string();
 
-                                Tooltip::for_action(tooltip_name, &ToggleStaged, cx)
+                                if repository_kind.is_fossil() {
+                                    Tooltip::simple(format!("{action} in next check-in"), cx)
+                                } else {
+                                    Tooltip::for_action(action.to_string(), &ToggleStaged, cx)
+                                }
                             }),
                     ),
             )
@@ -5640,6 +5828,7 @@ impl GitPanel {
             );
             StageStatus::PartiallyStaged
         };
+        let repository_kind = self.active_repository_kind(cx);
 
         let toggle_state: ToggleState = match stage_status {
             StageStatus::Staged => ToggleState::Selected,
@@ -5715,7 +5904,13 @@ impl GitPanel {
                             })
                             .tooltip(move |_window, cx| {
                                 let action = match stage_status {
+                                    StageStatus::Staged if repository_kind.is_fossil() => "Exclude",
                                     StageStatus::Staged => "Unstage",
+                                    StageStatus::Unstaged | StageStatus::PartiallyStaged
+                                        if repository_kind.is_fossil() =>
+                                    {
+                                        "Include"
+                                    }
                                     StageStatus::Unstaged | StageStatus::PartiallyStaged => "Stage",
                                 };
                                 Tooltip::simple(format!("{action} folder"), cx)
@@ -5954,6 +6149,9 @@ impl Render for GitPanel {
         });
 
         let has_write_access = self.has_write_access(cx);
+        let has_file_selection_access =
+            has_write_access && self.can_select_files_for_active_repository(cx);
+        let has_mutation_access = has_write_access && self.can_mutate_active_repository(cx);
 
         let has_co_authors = room.is_some_and(|room| {
             self.load_local_committer(cx);
@@ -5967,21 +6165,26 @@ impl Render for GitPanel {
             .id("git_panel")
             .key_context(self.dispatch_context(window, cx))
             .track_focus(&self.focus_handle)
-            .when(has_write_access && !project.is_read_only(cx), |this| {
-                this.on_action(cx.listener(Self::toggle_staged_for_selected))
-                    .on_action(cx.listener(Self::stage_range))
-                    .on_action(cx.listener(GitPanel::on_commit))
-                    .on_action(cx.listener(GitPanel::on_amend))
+            .when(
+                has_file_selection_access && !project.is_read_only(cx),
+                |this| {
+                    this.on_action(cx.listener(Self::toggle_staged_for_selected))
+                        .on_action(cx.listener(Self::stage_range))
+                        .on_action(cx.listener(GitPanel::on_commit))
+                        .on_action(cx.listener(Self::stage_all))
+                        .on_action(cx.listener(Self::unstage_all))
+                        .on_action(cx.listener(Self::stage_selected))
+                        .on_action(cx.listener(Self::unstage_selected))
+                        .on_action(cx.listener(Self::generate_commit_message_action))
+                },
+            )
+            .when(has_mutation_access && !project.is_read_only(cx), |this| {
+                this.on_action(cx.listener(GitPanel::on_amend))
                     .on_action(cx.listener(GitPanel::toggle_signoff_enabled))
-                    .on_action(cx.listener(Self::stage_all))
-                    .on_action(cx.listener(Self::unstage_all))
-                    .on_action(cx.listener(Self::stage_selected))
-                    .on_action(cx.listener(Self::unstage_selected))
                     .on_action(cx.listener(Self::restore_tracked_files))
                     .on_action(cx.listener(Self::revert_selected))
                     .on_action(cx.listener(Self::add_to_gitignore))
                     .on_action(cx.listener(Self::clean_all))
-                    .on_action(cx.listener(Self::generate_commit_message_action))
                     .on_action(cx.listener(Self::stash_all))
                     .on_action(cx.listener(Self::stash_pop))
             })
@@ -6001,7 +6204,7 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::focus_changes_list))
             .on_action(cx.listener(Self::focus_editor))
             .on_action(cx.listener(Self::expand_commit_editor))
-            .when(has_write_access && has_co_authors, |git_panel| {
+            .when(has_mutation_access && has_co_authors, |git_panel| {
                 git_panel.on_action(cx.listener(Self::toggle_fill_co_authors))
             })
             .on_action(cx.listener(Self::toggle_sort_by_path))
@@ -6019,7 +6222,7 @@ impl Render for GitPanel {
                                     && has_entries
                                 {
                                     this.child(self.render_entries(
-                                        has_write_access,
+                                        has_file_selection_access,
                                         repo,
                                         window,
                                         cx,

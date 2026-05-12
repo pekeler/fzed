@@ -381,6 +381,7 @@ impl Database {
                 remote_origin_url: ActiveValue::set(update.remote_origin_url.clone()),
                 repository_dir_abs_path: ActiveValue::set(update.repository_dir_abs_path.clone()),
                 common_dir_abs_path: ActiveValue::set(update.common_dir_abs_path.clone()),
+                repository_kind: ActiveValue::set(update.repository_kind),
                 linked_worktrees: ActiveValue::Set(Some(
                     serde_json::to_string(&update.linked_worktrees).unwrap(),
                 )),
@@ -400,6 +401,7 @@ impl Database {
                     project_repository::Column::MergeMessage,
                     project_repository::Column::RepositoryDirAbsPath,
                     project_repository::Column::CommonDirAbsPath,
+                    project_repository::Column::RepositoryKind,
                     project_repository::Column::LinkedWorktrees,
                 ])
                 .to_owned(),
@@ -899,6 +901,7 @@ impl Database {
                         remote_origin_url: db_repository_entry.remote_origin_url.clone(),
                         repository_dir_abs_path: db_repository_entry.repository_dir_abs_path,
                         common_dir_abs_path: db_repository_entry.common_dir_abs_path,
+                        repository_kind: db_repository_entry.repository_kind,
                         linked_worktrees: db_repository_entry
                             .linked_worktrees
                             .as_deref()
