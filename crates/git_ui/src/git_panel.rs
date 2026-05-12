@@ -4294,6 +4294,7 @@ impl GitPanel {
                 let has_previous_commit = self.head_commit(cx).is_some();
                 let amend = self.amend_pending();
                 let signoff = self.signoff_enabled;
+                let repository_kind = self.active_repository_kind(cx);
 
                 move |window, cx| {
                     Some(ContextMenu::build(window, cx, |context_menu, _, _| {
@@ -4301,31 +4302,36 @@ impl GitPanel {
                             .when_some(keybinding_target.clone(), |el, keybinding_target| {
                                 el.context(keybinding_target)
                             })
-                            .when(has_previous_commit, |this| {
+                            .when(
+                                !repository_kind.is_fossil() && has_previous_commit,
+                                |this| {
+                                    this.toggleable_entry(
+                                        "Amend",
+                                        amend,
+                                        IconPosition::Start,
+                                        Some(Box::new(Amend)),
+                                        {
+                                            let git_panel = git_panel.downgrade();
+                                            move |_, cx| {
+                                                git_panel
+                                                    .update(cx, |git_panel, cx| {
+                                                        git_panel.toggle_amend_pending(cx);
+                                                    })
+                                                    .ok();
+                                            }
+                                        },
+                                    )
+                                },
+                            )
+                            .when(!repository_kind.is_fossil(), |this| {
                                 this.toggleable_entry(
-                                    "Amend",
-                                    amend,
+                                    "Signoff",
+                                    signoff,
                                     IconPosition::Start,
-                                    Some(Box::new(Amend)),
-                                    {
-                                        let git_panel = git_panel.downgrade();
-                                        move |_, cx| {
-                                            git_panel
-                                                .update(cx, |git_panel, cx| {
-                                                    git_panel.toggle_amend_pending(cx);
-                                                })
-                                                .ok();
-                                        }
-                                    },
+                                    Some(Box::new(Signoff)),
+                                    move |window, cx| window.dispatch_action(Box::new(Signoff), cx),
                                 )
                             })
-                            .toggleable_entry(
-                                "Signoff",
-                                signoff,
-                                IconPosition::Start,
-                                Some(Box::new(Signoff)),
-                                move |window, cx| window.dispatch_action(Box::new(Signoff), cx),
-                            )
                     }))
                 }
             })

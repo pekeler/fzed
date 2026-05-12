@@ -283,44 +283,51 @@ impl CommitModal {
                     let amend_enabled = git_panel.amend_pending();
                     let signoff_enabled = git_panel.signoff_enabled();
                     let has_previous_commit = git_panel.head_commit(cx).is_some();
+                    let repository_kind = git_panel.active_repository_kind(cx);
 
                     Some(ContextMenu::build(window, cx, |context_menu, _, _| {
                         context_menu
                             .when_some(keybinding_target.clone(), |el, keybinding_target| {
                                 el.context(keybinding_target)
                             })
-                            .when(has_previous_commit, |this| {
+                            .when(
+                                !repository_kind.is_fossil() && has_previous_commit,
+                                |this| {
+                                    this.toggleable_entry(
+                                        "Amend",
+                                        amend_enabled,
+                                        IconPosition::Start,
+                                        Some(Box::new(Amend)),
+                                        {
+                                            let git_panel = git_panel_entity.downgrade();
+                                            move |_, cx| {
+                                                git_panel
+                                                    .update(cx, |git_panel, cx| {
+                                                        git_panel.toggle_amend_pending(cx);
+                                                    })
+                                                    .ok();
+                                            }
+                                        },
+                                    )
+                                },
+                            )
+                            .when(!repository_kind.is_fossil(), |this| {
                                 this.toggleable_entry(
-                                    "Amend",
-                                    amend_enabled,
+                                    "Signoff",
+                                    signoff_enabled,
                                     IconPosition::Start,
-                                    Some(Box::new(Amend)),
+                                    Some(Box::new(Signoff)),
                                     {
-                                        let git_panel = git_panel_entity.downgrade();
-                                        move |_, cx| {
-                                            git_panel
-                                                .update(cx, |git_panel, cx| {
-                                                    git_panel.toggle_amend_pending(cx);
-                                                })
-                                                .ok();
+                                        let git_panel = git_panel_entity.clone();
+                                        move |window, cx| {
+                                            git_panel.update(cx, |git_panel, cx| {
+                                                git_panel
+                                                    .toggle_signoff_enabled(&Signoff, window, cx);
+                                            })
                                         }
                                     },
                                 )
                             })
-                            .toggleable_entry(
-                                "Signoff",
-                                signoff_enabled,
-                                IconPosition::Start,
-                                Some(Box::new(Signoff)),
-                                {
-                                    let git_panel = git_panel_entity.clone();
-                                    move |window, cx| {
-                                        git_panel.update(cx, |git_panel, cx| {
-                                            git_panel.toggle_signoff_enabled(&Signoff, window, cx);
-                                        })
-                                    }
-                                },
-                            )
                     }))
                 }
             })

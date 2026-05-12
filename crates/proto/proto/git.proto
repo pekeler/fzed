@@ -131,6 +131,7 @@ message UpdateRepository {
   optional string repository_dir_abs_path = 19;
   optional string common_dir_abs_path = 20;
   optional RepositoryKind repository_kind = 21;
+  repeated string fossil_included_paths = 22;
 }
 
 message RemoveRepository {

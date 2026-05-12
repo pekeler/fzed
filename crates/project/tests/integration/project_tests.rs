@@ -11085,6 +11085,11 @@ async fn test_fossil_repository_check_in_uses_selected_paths(
     .unwrap()
     .unwrap();
 
+    repo.read_with(cx, |repo, _cx| {
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("tracked.txt")));
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("extra.txt")));
+    });
+
     fs.with_git_state(path!("/root/my-repo/.fslckout").as_ref(), false, |state| {
         assert_eq!(
             state.head_contents.get(&repo_path("tracked.txt")),

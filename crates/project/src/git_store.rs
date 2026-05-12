@@ -324,6 +324,7 @@ pub struct RepositorySnapshot {
     pub remote_upstream_url: Option<String>,
     pub stash_entries: GitStash,
     pub linked_worktrees: Arc<[GitWorktree]>,
+    pub fossil_included_paths: Arc<[RepoPath]>,
 }
 
 type JobId = u64;
@@ -846,6 +847,16 @@ impl GitStore {
         self.active_repo_id
             .as_ref()
             .map(|id| self.repositories[id].clone())
+    }
+
+    fn downstream_update_sender(&self) -> Option<mpsc::UnboundedSender<DownstreamUpdate>> {
+        match &self.state {
+            GitStoreState::Local {
+                downstream: Some(downstream),
+                ..
+            } => Some(downstream.updates_tx.clone()),
+            _ => None,
+        }
     }
 
     pub fn open_unstaged_diff(
@@ -4123,6 +4134,12 @@ fn repository_kind_for_metadata_path(metadata_path: &Path) -> RepositoryKind {
     }
 }
 
+fn sorted_fossil_included_paths(paths: &HashSet<RepoPath>) -> Arc<[RepoPath]> {
+    let mut paths = paths.iter().cloned().collect::<Vec<_>>();
+    paths.sort();
+    Arc::from(paths)
+}
+
 impl RepositorySnapshot {
     fn empty(
         id: RepositoryId,
@@ -4153,6 +4170,7 @@ impl RepositorySnapshot {
             remote_upstream_url: None,
             stash_entries: Default::default(),
             linked_worktrees: Arc::from([]),
+            fossil_included_paths: Arc::from([]),
             path_style,
         }
     }
@@ -4198,6 +4216,11 @@ impl RepositorySnapshot {
                 .linked_worktrees
                 .iter()
                 .map(worktree_to_proto)
+                .collect(),
+            fossil_included_paths: self
+                .fossil_included_paths
+                .iter()
+                .map(|path| path.to_proto())
                 .collect(),
         }
     }
@@ -4282,6 +4305,11 @@ impl RepositorySnapshot {
                 .linked_worktrees
                 .iter()
                 .map(worktree_to_proto)
+                .collect(),
+            fossil_included_paths: self
+                .fossil_included_paths
+                .iter()
+                .map(|path| path.to_proto())
                 .collect(),
         }
     }
@@ -4501,6 +4529,11 @@ impl Repository {
         self.snapshot.kind.is_fossil() && self.fossil_included_paths.contains(path)
     }
 
+    fn sync_fossil_included_paths_snapshot(&mut self) {
+        self.snapshot.fossil_included_paths =
+            sorted_fossil_included_paths(&self.fossil_included_paths);
+    }
+
     fn prune_fossil_included_paths(&mut self) -> bool {
         if !self.snapshot.kind.is_fossil() || self.fossil_included_paths.is_empty() {
             return false;
@@ -4514,7 +4547,31 @@ impl Repository {
                 .is_some()
         });
 
-        self.fossil_included_paths.len() != len_before
+        let changed = self.fossil_included_paths.len() != len_before;
+        if changed {
+            self.sync_fossil_included_paths_snapshot();
+        }
+        changed
+    }
+
+    fn clear_fossil_included_paths(&mut self, cx: &mut Context<Self>) {
+        if self.fossil_included_paths.is_empty() {
+            return;
+        }
+
+        self.fossil_included_paths.clear();
+        self.sync_fossil_included_paths_snapshot();
+
+        if let Some(git_store) = self.git_store.upgrade()
+            && let Some(updates_tx) = git_store.read(cx).downstream_update_sender()
+        {
+            updates_tx
+                .unbounded_send(DownstreamUpdate::UpdateRepository(self.snapshot.clone()))
+                .ok();
+        }
+
+        cx.emit(RepositoryEvent::StatusesChanged);
+        cx.notify();
     }
 
     fn local(
@@ -5908,6 +5965,55 @@ impl Repository {
         let id = self.id;
         let save_tasks = self.save_buffers(&entries, cx);
         if self.snapshot.kind.is_fossil() {
+            let (updates_tx, remote_target) = {
+                let git_store = git_store.read(cx);
+                match &git_store.state {
+                    GitStoreState::Local { downstream, .. } => (
+                        downstream
+                            .as_ref()
+                            .map(|downstream| downstream.updates_tx.clone()),
+                        None,
+                    ),
+                    GitStoreState::Remote {
+                        upstream_client,
+                        upstream_project_id,
+                        ..
+                    } => (None, Some((upstream_client.clone(), *upstream_project_id))),
+                }
+            };
+            if let Some((client, project_id)) = remote_target {
+                let repository_id = id.to_proto();
+                let paths = entries
+                    .into_iter()
+                    .map(|repo_path| repo_path.to_proto())
+                    .collect();
+                return cx.spawn(async move |_, _| {
+                    for save_task in save_tasks {
+                        save_task.await?;
+                    }
+                    if stage {
+                        client
+                            .request(proto::Stage {
+                                project_id,
+                                repository_id,
+                                paths,
+                            })
+                            .await
+                            .context("sending fossil include request")?;
+                    } else {
+                        client
+                            .request(proto::Unstage {
+                                project_id,
+                                repository_id,
+                                paths,
+                            })
+                            .await
+                            .context("sending fossil exclude request")?;
+                    }
+                    anyhow::Ok(())
+                });
+            }
+
             let mut changed = false;
             for entry in entries {
                 if stage {
@@ -5917,6 +6023,12 @@ impl Repository {
                 }
             }
             if changed {
+                self.sync_fossil_included_paths_snapshot();
+                if let Some(updates_tx) = updates_tx {
+                    updates_tx
+                        .unbounded_send(DownstreamUpdate::UpdateRepository(self.snapshot.clone()))
+                        .ok();
+                }
                 cx.emit(RepositoryEvent::StatusesChanged);
                 cx.notify();
             }
@@ -6505,6 +6617,8 @@ impl Repository {
         let id = self.id;
         let askpass_delegates = self.askpass_delegates.clone();
         let askpass_id = util::post_inc(&mut self.latest_askpass_id);
+        let this = self.this.clone();
+        let is_fossil_commit = fossil_commit_paths.is_some();
 
         let rx = self.run_hook(RunHook::PreCommit, cx);
 
@@ -6517,10 +6631,10 @@ impl Repository {
                 }
                 .into(),
             ),
-            move |git_repo, _cx| async move {
+            move |git_repo, mut cx| async move {
                 rx.await??;
 
-                match git_repo {
+                let result = match git_repo {
                     RepositoryState::Local(LocalRepositoryState {
                         backend,
                         environment,
@@ -6544,39 +6658,49 @@ impl Repository {
                                 .await
                         }
                     },
-                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                    askpass_delegates.lock().insert(askpass_id, askpass);
-                    let _defer = util::defer(|| {
-                        let askpass_delegate = askpass_delegates.lock().remove(&askpass_id);
-                        debug_assert!(askpass_delegate.is_some());
-                    });
-                    let (name, email) = name_and_email.unzip();
-                    let paths = fossil_commit_paths
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|repo_path| repo_path.to_proto())
-                        .collect();
-                    client
-                        .request(proto::Commit {
-                            project_id: project_id.0,
-                            repository_id: id.to_proto(),
-                            message: String::from(message),
-                            name: name.map(String::from),
-                            email: email.map(String::from),
-                            options: Some(proto::commit::CommitOptions {
-                                amend: options.amend,
-                                signoff: options.signoff,
-                                allow_empty: options.allow_empty,
-                            }),
-                            askpass_id,
-                            paths,
-                        })
-                        .await?;
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        askpass_delegates.lock().insert(askpass_id, askpass);
+                        let _defer = util::defer(|| {
+                            let askpass_delegate = askpass_delegates.lock().remove(&askpass_id);
+                            debug_assert!(askpass_delegate.is_some());
+                        });
+                        let (name, email) = name_and_email.unzip();
+                        let paths = fossil_commit_paths
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|repo_path| repo_path.to_proto())
+                            .collect();
+                        client
+                            .request(proto::Commit {
+                                project_id: project_id.0,
+                                repository_id: id.to_proto(),
+                                message: String::from(message),
+                                name: name.map(String::from),
+                                email: email.map(String::from),
+                                options: Some(proto::commit::CommitOptions {
+                                    amend: options.amend,
+                                    signoff: options.signoff,
+                                    allow_empty: options.allow_empty,
+                                }),
+                                askpass_id,
+                                paths,
+                            })
+                            .await?;
 
-                    Ok(())
+                        Ok(())
+                    }
+                };
+
+                if result.is_ok() && is_fossil_commit {
+                    this.update(&mut cx, |this, cx| {
+                        this.clear_fossil_included_paths(cx);
+                    })
+                    .ok();
                 }
-            }
-        })
+
+                result
+            },
+        )
     }
 
     pub fn fetch(
@@ -7770,6 +7894,16 @@ impl Repository {
         self.snapshot.linked_worktrees = new_linked_worktrees;
         self.snapshot.remote_upstream_url = update.remote_upstream_url;
         self.snapshot.remote_origin_url = update.remote_origin_url;
+        let new_fossil_included_paths = update
+            .fossil_included_paths
+            .iter()
+            .filter_map(|path| RepoPath::from_proto(path).log_err())
+            .collect::<HashSet<_>>();
+        let fossil_selection_changed = new_fossil_included_paths != self.fossil_included_paths;
+        if fossil_selection_changed {
+            self.fossil_included_paths = new_fossil_included_paths;
+            self.sync_fossil_included_paths_snapshot();
+        }
 
         let edits = update
             .removed_statuses
@@ -7790,8 +7924,12 @@ impl Repository {
             .collect::<Vec<_>>();
         let statuses_changed = !edits.is_empty();
         self.snapshot.statuses_by_path.edit(edits, ());
-        let fossil_selection_changed = self.prune_fossil_included_paths();
-        if conflicts_changed || statuses_changed || fossil_selection_changed {
+        let pruned_fossil_selection = self.prune_fossil_included_paths();
+        if conflicts_changed
+            || statuses_changed
+            || fossil_selection_changed
+            || pruned_fossil_selection
+        {
             cx.emit(RepositoryEvent::StatusesChanged);
         }
 
@@ -8914,6 +9052,36 @@ mod tests {
         assert_eq!(
             path,
             PathBuf::from("/home/user/dev/worktrees/lsp-tests/nimble-sky/lsp-tests")
+        );
+    }
+
+    #[test]
+    fn test_fossil_included_paths_are_sent_in_repository_updates() {
+        let mut old_snapshot = RepositorySnapshot::empty(
+            RepositoryId(1),
+            RepositoryKind::Fossil,
+            Path::new("/repo").into(),
+            None,
+            None,
+            PathStyle::Posix,
+        );
+        old_snapshot.fossil_included_paths = Arc::from([RepoPath::new("a.txt").unwrap()]);
+
+        let mut new_snapshot = old_snapshot.clone();
+        new_snapshot.fossil_included_paths = Arc::from([
+            RepoPath::new("a.txt").unwrap(),
+            RepoPath::new("b.txt").unwrap(),
+        ]);
+
+        assert_eq!(
+            old_snapshot.initial_update(7).fossil_included_paths,
+            vec!["a.txt"]
+        );
+        assert_eq!(
+            new_snapshot
+                .build_update(&old_snapshot, 7)
+                .fossil_included_paths,
+            vec!["a.txt", "b.txt"]
         );
     }
 
