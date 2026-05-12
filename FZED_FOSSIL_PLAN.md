@@ -43,6 +43,8 @@ Validation so far:
 - Phase 2 file-selection/check-in slice compiles:
   - `cargo check -p git -p project -p git_ui -p proto`
   - `cargo test -p git fossil`
+  - `cargo test -p project test_fossil_repository`
+  - `cargo test -p fs fake_git_repo`
   - `cargo test -p worktree --features test-support fossil_repository_detection`
   - `cargo test -p proto split_repository_update`
 
@@ -226,6 +228,13 @@ Initial implementation status:
 
 Phase 2 is implemented for local file-level selection and check-in.
 
+Phase 2.1 coverage status:
+
+- Added project integration tests for Fossil repository include/exclude state, including single-file include, include-all, single-file exclude, and exclude-all.
+- Added a project integration test proving a Fossil check-in only moves selected paths into the fake repository HEAD.
+- Extended the fake repository backend so `.fslckout` and `_FOSSIL_` fixtures report `RepositoryKind::Fossil` and can simulate `commit_paths`.
+- Re-ran focused Fossil, project, fs fake-git, and `git_ui` compile checks.
+
 Known Phase 2 gaps:
 
 - Autosync visibility is not implemented yet; `fossil commit` currently honors Fossil's configured autosync behavior without surfacing it in the UI.
@@ -238,7 +247,7 @@ Known Phase 2 gaps:
 - Verify whether a real collab database migration is needed for existing `project_repositories.repository_kind` rows beyond the updated table model/test schemas.
 - Add Fossil autosync state and last-sync diagnostics to the check-in UI before encouraging daily use.
 - Rename more user-facing "Git" surfaces only where they are visible in Fossil repositories; avoid a broad internal rename until the Fossil path is stable.
-- Add tests around the UI-level Fossil include list once there is a small-enough `git_ui` test harness for panel selection.
+- Add direct `git_ui` panel tests for Fossil labels and toolbar button states once there is a small-enough panel-selection harness; current coverage is at the UI-facing repository state layer.
 - Decide whether selected Fossil paths should be shared in collaborative sessions or remain local editor state.
 
 ### Phase 3: Fossil-First Branch, Sync, and Checkout UX

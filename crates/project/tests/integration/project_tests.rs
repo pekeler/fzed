@@ -31,7 +31,7 @@ use fs::{FakeFs, PathEventKind};
 use futures::{StreamExt, future};
 use git::{
     GitHostingProviderRegistry,
-    repository::{RepoPath, repo_path},
+    repository::{AskPassDelegate, CommitOptions, RepoPath, RepositoryKind, repo_path},
     status::{DiffStat, FileStatus, StatusCode, TrackedStatus},
 };
 use git2::RepositoryInitOptions;
@@ -10932,6 +10932,175 @@ async fn test_repository_pending_ops_stage_all(
             ]
         );
     });
+}
+
+#[gpui::test]
+async fn test_fossil_repository_file_selection_state(
+    executor: gpui::BackgroundExecutor,
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "my-repo": {
+                ".fslckout": {},
+                "tracked.txt": "tracked changed",
+                "other-tracked.txt": "other changed",
+                "extra.txt": "extra",
+            }
+        }),
+    )
+    .await;
+
+    fs.set_head_and_index_for_repo(
+        path!("/root/my-repo/.fslckout").as_ref(),
+        &[
+            ("tracked.txt", "tracked initial".into()),
+            ("other-tracked.txt", "other initial".into()),
+        ],
+    );
+
+    let project = Project::test(fs.clone(), [path!("/root/my-repo").as_ref()], cx).await;
+    project
+        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .await;
+    cx.run_until_parked();
+
+    let repo = project.read_with(cx, |project, cx| {
+        project.repositories(cx).values().next().unwrap().clone()
+    });
+
+    repo.read_with(cx, |repo, _cx| {
+        assert_eq!(repo.kind(), RepositoryKind::Fossil);
+        assert!(repo.pending_ops().next().is_none());
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("tracked.txt")));
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("other-tracked.txt")));
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("extra.txt")));
+    });
+
+    repo.update(cx, |repo, cx| {
+        repo.stage_entries(vec![repo_path("extra.txt")], cx)
+    })
+    .await
+    .unwrap();
+
+    repo.read_with(cx, |repo, _cx| {
+        assert!(repo.pending_ops().next().is_none());
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("tracked.txt")));
+        assert!(repo.fossil_path_included_for_check_in(&repo_path("extra.txt")));
+    });
+
+    repo.update(cx, |repo, cx| repo.stage_all(cx))
+        .await
+        .unwrap();
+
+    repo.read_with(cx, |repo, _cx| {
+        assert!(repo.fossil_path_included_for_check_in(&repo_path("tracked.txt")));
+        assert!(repo.fossil_path_included_for_check_in(&repo_path("other-tracked.txt")));
+        assert!(repo.fossil_path_included_for_check_in(&repo_path("extra.txt")));
+    });
+
+    repo.update(cx, |repo, cx| {
+        repo.unstage_entries(vec![repo_path("tracked.txt")], cx)
+    })
+    .await
+    .unwrap();
+
+    repo.read_with(cx, |repo, _cx| {
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("tracked.txt")));
+        assert!(repo.fossil_path_included_for_check_in(&repo_path("other-tracked.txt")));
+        assert!(repo.fossil_path_included_for_check_in(&repo_path("extra.txt")));
+    });
+
+    repo.update(cx, |repo, cx| repo.unstage_all(cx))
+        .await
+        .unwrap();
+
+    repo.read_with(cx, |repo, _cx| {
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("tracked.txt")));
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("other-tracked.txt")));
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("extra.txt")));
+    });
+}
+
+#[gpui::test]
+async fn test_fossil_repository_check_in_uses_selected_paths(
+    executor: gpui::BackgroundExecutor,
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "my-repo": {
+                ".fslckout": {},
+                "tracked.txt": "tracked changed",
+                "other-tracked.txt": "other changed",
+                "extra.txt": "extra",
+                "other-extra.txt": "other extra",
+            }
+        }),
+    )
+    .await;
+
+    fs.set_head_and_index_for_repo(
+        path!("/root/my-repo/.fslckout").as_ref(),
+        &[
+            ("tracked.txt", "tracked initial".into()),
+            ("other-tracked.txt", "other initial".into()),
+        ],
+    );
+
+    let project = Project::test(fs.clone(), [path!("/root/my-repo").as_ref()], cx).await;
+    project
+        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .await;
+    cx.run_until_parked();
+
+    let repo = project.read_with(cx, |project, cx| {
+        project.repositories(cx).values().next().unwrap().clone()
+    });
+
+    repo.update(cx, |repo, cx| {
+        repo.stage_entries(vec![repo_path("tracked.txt"), repo_path("extra.txt")], cx)
+    })
+    .await
+    .unwrap();
+
+    repo.update(cx, |repo, cx| {
+        repo.commit(
+            "selected check-in".into(),
+            None,
+            CommitOptions::default(),
+            AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+            cx,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+
+    fs.with_git_state(path!("/root/my-repo/.fslckout").as_ref(), false, |state| {
+        assert_eq!(
+            state.head_contents.get(&repo_path("tracked.txt")),
+            Some(&"tracked changed".to_string())
+        );
+        assert_eq!(
+            state.head_contents.get(&repo_path("other-tracked.txt")),
+            Some(&"other initial".to_string())
+        );
+        assert_eq!(
+            state.head_contents.get(&repo_path("extra.txt")),
+            Some(&"extra".to_string())
+        );
+        assert_eq!(state.head_contents.get(&repo_path("other-extra.txt")), None);
+    })
+    .unwrap();
 }
 
 #[gpui::test]

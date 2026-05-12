@@ -8,13 +8,13 @@ use futures::FutureExt as _;
 use futures::future::{self, BoxFuture, join_all};
 use git::repository::GitCommitTemplate;
 use git::{
-    Oid, RunHook,
+    DOT_FOSSIL, FOSSIL_CHECKOUT, Oid, RunHook,
     blame::Blame,
     repository::{
         AskPassDelegate, Branch, CommitData, CommitDataReader, CommitDetails, CommitOptions,
         CreateWorktreeTarget, FetchOptions, GRAPH_CHUNK_SIZE, GitRepository,
         GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, RefEdit,
-        Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree,
+        Remote, RepoPath, RepositoryKind, ResetMode, SearchCommitArgs, Worktree,
     },
     stash::GitStash,
     status::{
@@ -157,6 +157,18 @@ impl FakeGitRepository {
 }
 
 impl GitRepository for FakeGitRepository {
+    fn kind(&self) -> RepositoryKind {
+        if self
+            .dot_git_path
+            .file_name()
+            .is_some_and(|file_name| file_name == DOT_FOSSIL || file_name == FOSSIL_CHECKOUT)
+        {
+            RepositoryKind::Fossil
+        } else {
+            RepositoryKind::Git
+        }
+    }
+
     fn reload_index(&self) {}
 
     fn load_index_text(&self, path: RepoPath) -> BoxFuture<'_, Option<String>> {
@@ -1020,6 +1032,71 @@ impl GitRepository for FakeGitRepository {
 
             Ok(())
         })
+    }
+
+    fn commit_paths(
+        &self,
+        message: gpui::SharedString,
+        name_and_email: Option<(gpui::SharedString, gpui::SharedString)>,
+        options: CommitOptions,
+        askpass: AskPassDelegate,
+        env: Arc<HashMap<String, String>>,
+        paths: Vec<RepoPath>,
+    ) -> BoxFuture<'_, Result<()>> {
+        if !self.kind().is_fossil() {
+            return self.commit(message, name_and_email, options, askpass, env);
+        }
+
+        let fs = self.fs.clone();
+        let dot_git_path = self.dot_git_path.clone();
+        let executor = self.executor.clone();
+        async move {
+            let workdir_path = dot_git_path.parent().unwrap().to_path_buf();
+            let paths = if paths.is_empty() {
+                fs.with_git_state(&dot_git_path, false, |state| {
+                    state.head_contents.keys().cloned().collect::<Vec<_>>()
+                })?
+            } else {
+                paths
+            };
+            let worktree_contents = join_all(paths.into_iter().map(|path| {
+                let fs = fs.clone();
+                let abs_path = workdir_path.join(path.as_std_path());
+                async move { (path, fs.load(&abs_path).await.ok()) }
+            }))
+            .await;
+
+            executor.simulate_random_delay().await;
+            fs.with_git_state(&dot_git_path, true, |state| {
+                let previous_head = state.head_contents.clone();
+                for (path, content) in worktree_contents {
+                    if let Some(content) = content {
+                        state.head_contents.insert(path, content);
+                    } else {
+                        state.head_contents.remove(&path);
+                    }
+                }
+
+                if !options.allow_empty && state.head_contents == previous_head {
+                    anyhow::bail!("nothing to commit (use allow_empty to create an empty commit)");
+                }
+
+                let old_sha = state.refs.get("HEAD").cloned().unwrap_or_default();
+                state.commit_history.push(FakeCommitSnapshot {
+                    head_contents: previous_head,
+                    index_contents: state.index_contents.clone(),
+                    sha: old_sha,
+                });
+
+                state.index_contents = state.head_contents.clone();
+
+                let new_sha = format!("fake-commit-{}", state.commit_history.len());
+                state.refs.insert("HEAD".into(), new_sha);
+
+                Ok(())
+            })?
+        }
+        .boxed()
     }
 
     fn run_hook(
