@@ -20,7 +20,7 @@ cargo build -p zed
 Run the latest local debug build with:
 
 ```sh
-/Users/pekeler/Projects/FZed/target/debug/fzed
+target/debug/fzed
 ```
 
 ### Settings And Data
@@ -58,14 +58,6 @@ expected during local development:
 - `Minidump endpoint not set`: no crash-upload endpoint is configured
 - `Couldn't find any enabled panel for the Left dock`: harmless layout state
 - extension installation/index rebuild messages: normal first-run extension setup
-
-### License
-
-fzed keeps Zed's upstream license structure. The main application crates,
-including `crates/zed`, are `GPL-3.0-or-later`; some workspace crates are
-`AGPL-3.0-or-later` or `Apache-2.0` as declared in their `Cargo.toml` files.
-Forking and distributing fzed is allowed as long as those license terms and
-notices are preserved. See `LICENSE-GPL`, `LICENSE-AGPL`, and `LICENSE-APACHE`.
 
 ---
 
