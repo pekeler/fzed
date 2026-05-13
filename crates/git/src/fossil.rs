@@ -121,7 +121,7 @@ impl GitRepository for FossilRepository {
         self.executor
             .spawn(async move {
                 fossil
-                    .run(&[
+                    .run_raw(&[
                         OsString::from("cat"),
                         path.as_std_path().as_os_str().to_owned(),
                     ])
@@ -2240,8 +2240,10 @@ mod tests {
             &["open", repo_db.to_str().unwrap()],
         );
 
-        std::fs::write(checkout.join("tracked.txt"), "initial").unwrap();
+        std::fs::write(checkout.join("tracked.txt"), "initial\n").unwrap();
+        std::fs::write(checkout.join("no-newline.txt"), "no newline").unwrap();
         run_fossil(&fossil_home, &checkout, &["add", "tracked.txt"]);
+        run_fossil(&fossil_home, &checkout, &["add", "no-newline.txt"]);
         run_fossil(
             &fossil_home,
             &checkout,
@@ -2256,7 +2258,7 @@ mod tests {
             ],
         );
 
-        std::fs::write(checkout.join("tracked.txt"), "modified").unwrap();
+        std::fs::write(checkout.join("tracked.txt"), "modified\n").unwrap();
         std::fs::write(checkout.join("extra.txt"), "extra").unwrap();
 
         let repository = FossilRepository::new_for_test(
@@ -2298,7 +2300,13 @@ mod tests {
             repository
                 .load_committed_text(RepoPath::new("tracked.txt").unwrap())
                 .await,
-            Some("initial".to_string())
+            Some("initial\n".to_string())
+        );
+        assert_eq!(
+            repository
+                .load_committed_text(RepoPath::new("no-newline.txt").unwrap())
+                .await,
+            Some("no newline".to_string())
         );
 
         repository
@@ -2311,9 +2319,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(checkout.join("tracked.txt")).unwrap(),
-            "initial"
+            "initial\n"
         );
-        std::fs::write(checkout.join("tracked.txt"), "modified").unwrap();
+        std::fs::write(checkout.join("tracked.txt"), "modified\n").unwrap();
 
         assert!(repository.head_sha().await.is_some());
         assert!(
