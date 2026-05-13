@@ -1644,10 +1644,26 @@ mod tests {
         auto_update: bool,
     }
 
+    #[derive(Debug, PartialEq)]
+    struct TelemetrySetting {
+        diagnostics: bool,
+        metrics: bool,
+    }
+
     impl Settings for AutoUpdateSetting {
         fn from_settings(content: &SettingsContent) -> Self {
             AutoUpdateSetting {
                 auto_update: content.auto_update.unwrap(),
+            }
+        }
+    }
+
+    impl Settings for TelemetrySetting {
+        fn from_settings(content: &SettingsContent) -> Self {
+            let telemetry = content.telemetry.as_ref().unwrap();
+            TelemetrySetting {
+                diagnostics: telemetry.diagnostics.unwrap(),
+                metrics: telemetry.metrics.unwrap(),
             }
         }
     }
@@ -1814,12 +1830,20 @@ mod tests {
     fn test_settings_store_basic(cx: &mut App) {
         let mut store = SettingsStore::new(cx, &default_settings());
         store.register_setting::<AutoUpdateSetting>();
+        store.register_setting::<TelemetrySetting>();
         store.register_setting::<ItemSettings>();
         store.register_setting::<DefaultLanguageSettings>();
 
         assert_eq!(
             store.get::<AutoUpdateSetting>(None),
             &AutoUpdateSetting { auto_update: true }
+        );
+        assert_eq!(
+            store.get::<TelemetrySetting>(None),
+            &TelemetrySetting {
+                diagnostics: false,
+                metrics: false,
+            }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,
