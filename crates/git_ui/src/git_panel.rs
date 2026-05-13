@@ -1498,7 +1498,7 @@ impl GitPanel {
         });
     }
 
-    fn revert_selected(
+    pub(crate) fn revert_selected(
         &mut self,
         action: &git::RestoreFile,
         window: &mut Window,
@@ -1712,7 +1712,7 @@ impl GitPanel {
         .detach();
     }
 
-    fn restore_tracked_files(
+    pub(crate) fn restore_tracked_files(
         &mut self,
         _: &RestoreTrackedFiles,
         window: &mut Window,
@@ -1763,7 +1763,12 @@ impl GitPanel {
         .detach();
     }
 
-    fn clean_all(&mut self, _: &TrashUntrackedFiles, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn clean_all(
+        &mut self,
+        _: &TrashUntrackedFiles,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let workspace = self.workspace.clone();
         let Some(active_repo) = self.active_repository.clone() else {
             return;
@@ -2196,7 +2201,7 @@ impl GitPanel {
             .unwrap()
     }
 
-    fn toggle_staged_for_selected(
+    pub(crate) fn toggle_staged_for_selected(
         &mut self,
         _: &git::ToggleStaged,
         window: &mut Window,
@@ -2207,14 +2212,24 @@ impl GitPanel {
         }
     }
 
-    fn stage_range(&mut self, _: &git::StageRange, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn stage_range(
+        &mut self,
+        _: &git::StageRange,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(index) = self.selected_entry else {
             return;
         };
         self.stage_bulk(index, cx);
     }
 
-    fn stage_selected(&mut self, _: &git::StageFile, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn stage_selected(
+        &mut self,
+        _: &git::StageFile,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(selected_entry) = self.get_selected_entry() else {
             return;
         };
@@ -2226,7 +2241,7 @@ impl GitPanel {
         }
     }
 
-    fn unstage_selected(
+    pub(crate) fn unstage_selected(
         &mut self,
         _: &git::UnstageFile,
         _window: &mut Window,

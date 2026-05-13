@@ -18,8 +18,8 @@ use git::{
     status::{FileStatus, StatusCode, UnmergedStatus, UnmergedStatusCode},
 };
 use gpui::{
-    App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    SharedString, Subscription, Task, TaskExt, Window,
+    Action, App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, SharedString, Subscription, Task, TaskExt, Window,
 };
 use menu::{Cancel, Confirm};
 use project::git_store::Repository;
@@ -78,6 +78,25 @@ fn with_fossil_panel(
     });
 }
 
+fn open_worktree_picker(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let focused_dock = workspace.focused_dock_position(window, cx);
+    let project = workspace.project().clone();
+    let workspace_handle = workspace.weak_handle();
+    workspace.toggle_modal(window, cx, |window, cx| {
+        worktree_picker::WorktreePicker::new_modal(
+            project,
+            workspace_handle,
+            focused_dock,
+            window,
+            cx,
+        )
+    });
+}
+
 pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
@@ -110,6 +129,41 @@ pub fn init(cx: &mut App) {
             }
         });
         workspace.register_action(
+            |workspace, _: &git::fossil_actions::GenerateCheckInMessage, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, _window, cx| {
+                    panel.generate_commit_message(cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::IncludeFile, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.stage_selected(&git::StageFile, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::ExcludeFile, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.unstage_selected(&git::UnstageFile, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::ToggleIncluded, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.toggle_staged_for_selected(&git::ToggleStaged, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::IncludeRange, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.stage_range(&git::StageRange, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
             |workspace, _: &git::fossil_actions::IncludeAll, window, cx| {
                 with_fossil_panel(workspace, window, cx, |panel, window, cx| {
                     panel.stage_all(&git::StageAll, window, cx);
@@ -124,6 +178,75 @@ pub fn init(cx: &mut App) {
             },
         );
         workspace.register_action(
+            |workspace, _: &git::fossil_actions::ViewStash, window, cx| {
+                if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                    git_picker::open_stash(workspace, &zed_actions::git::ViewStash, window, cx);
+                }
+            },
+        );
+        workspace.register_action(|workspace, _: &git::fossil_actions::Timeline, window, cx| {
+            if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                window.dispatch_action(git_panel::Open.boxed_clone(), cx);
+            }
+        });
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::FileTimeline, window, cx| {
+                if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                    window.dispatch_action(git::FileHistory.boxed_clone(), cx);
+                }
+            },
+        );
+        workspace.register_action(|workspace, _: &git::fossil_actions::Annotate, window, cx| {
+            if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                window.dispatch_action(git::Blame.boxed_clone(), cx);
+            }
+        });
+        workspace.register_action(|workspace, _: &git::fossil_actions::Blame, window, cx| {
+            if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                window.dispatch_action(git::Blame.boxed_clone(), cx);
+            }
+        });
+        workspace.register_action(|workspace, _: &git::fossil_actions::Branch, window, cx| {
+            if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                git_picker::open_branches(workspace, &zed_actions::git::Branch, window, cx);
+            }
+        });
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::SwitchBranch, window, cx| {
+                if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                    git_picker::open_branches(workspace, &zed_actions::git::Branch, window, cx);
+                }
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::Checkouts, window, cx| {
+                if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                    open_worktree_picker(workspace, window, cx);
+                }
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::SelectRepo, window, cx| {
+                if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                    repository_selector::open(workspace, &zed_actions::git::SelectRepo, window, cx);
+                }
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::OpenModifiedFiles, window, cx| {
+                if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                    open_modified_files(workspace, window, cx);
+                }
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::CopyBranchName, _, cx| {
+                if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                    copy_branch_name(workspace, cx);
+                }
+            },
+        );
+        workspace.register_action(
             |workspace, _: &git::fossil_actions::ViewCheckIn, window, cx| {
                 if workspace_active_repository_kind(workspace, cx).is_fossil() {
                     show_ref_picker(workspace, &git::ViewCommit, window, cx);
@@ -132,18 +255,7 @@ pub fn init(cx: &mut App) {
         );
 
         workspace.register_action(|workspace, _: &zed_actions::git::Worktree, window, cx| {
-            let focused_dock = workspace.focused_dock_position(window, cx);
-            let project = workspace.project().clone();
-            let workspace_handle = workspace.weak_handle();
-            workspace.toggle_modal(window, cx, |window, cx| {
-                worktree_picker::WorktreePicker::new_modal(
-                    project,
-                    workspace_handle,
-                    focused_dock,
-                    window,
-                    cx,
-                )
-            });
+            open_worktree_picker(workspace, window, cx);
         });
 
         workspace.register_action(
@@ -259,6 +371,46 @@ pub fn init(cx: &mut App) {
                 });
             });
         }
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::StashTracked, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.stash_all(&git::StashAll, window, cx);
+                });
+            },
+        );
+        workspace.register_action(|workspace, _: &git::fossil_actions::PopStash, window, cx| {
+            with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                panel.stash_pop(&git::StashPop, window, cx);
+            });
+        });
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::ApplyStash, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.stash_apply(&git::StashApply, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::RevertFile, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.revert_selected(&git::RestoreFile::default(), window, cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::RevertTrackedFiles, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.restore_tracked_files(&git::RestoreTrackedFiles, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::CleanExtras, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.clean_all(&git::TrashUntrackedFiles, window, cx);
+                });
+            },
+        );
         workspace.register_action(|workspace, action: &git::StashAll, window, cx| {
             let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
                 return;

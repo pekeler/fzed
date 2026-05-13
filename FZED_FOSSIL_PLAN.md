@@ -387,7 +387,14 @@ Phase 6 first slice is in progress:
 
 - Fossil-visible history surfaces now use timeline/check-in wording in the panel tab, loading state, entry tooltip, file context menu, graph/timeline button, commit/check-in view toolbar, blame/commit tooltip hash copy actions, and "View Commit" modal.
 - Commit message generation copy now switches to "check-in message" for Fossil repositories.
-- Added first-class `fossil::CheckIn`, `fossil::IncludeAll`, `fossil::ExcludeAll`, `fossil::Sync`, `fossil::Update`, and `fossil::ViewCheckIn` actions that route to the existing Fossil-aware panel behavior while leaving Git actions intact.
+- Added first-class Fossil command aliases that route to existing Fossil-aware behavior while leaving Git actions intact:
+  - check-in: `fossil::CheckIn`, `fossil::GenerateCheckInMessage`, `fossil::ViewCheckIn`
+  - file selection: `fossil::IncludeFile`, `fossil::ExcludeFile`, `fossil::ToggleIncluded`, `fossil::IncludeRange`, `fossil::IncludeAll`, `fossil::ExcludeAll`
+  - checkout maintenance: `fossil::RevertFile`, `fossil::RevertTrackedFiles`, `fossil::CleanExtras`
+  - sync/history: `fossil::Sync`, `fossil::Update`, `fossil::Timeline`, `fossil::FileTimeline`, `fossil::Annotate`, `fossil::Blame`
+  - navigation and repository state: `fossil::Branch`, `fossil::SwitchBranch`, `fossil::Checkouts`, `fossil::SelectRepo`, `fossil::OpenModifiedFiles`, `fossil::CopyBranchName`
+  - stash: `fossil::StashTracked`, `fossil::PopStash`, `fossil::ApplyStash`, `fossil::ViewStash`
+- Intentionally did not add Fossil aliases for Git hunk staging, amend, signoff, rebase, force-push, GitHub pull requests, `.gitignore`, or `fossil ui`. Those either conflict with Fossil's model or are already deferred for explicit product design.
 - Added focused unit tests for the Fossil/Git label split.
 
 Remaining Phase 6 work should be split into small patches:

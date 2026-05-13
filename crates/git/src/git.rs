@@ -124,14 +124,58 @@ pub mod fossil_actions {
         [
             /// Opens the Fossil check-in modal for the active checkout.
             CheckIn,
+            /// Generates a Fossil check-in message using AI.
+            GenerateCheckInMessage,
+            /// Includes the selected path in the next Fossil check-in.
+            IncludeFile,
+            /// Excludes the selected path from the next Fossil check-in.
+            ExcludeFile,
+            /// Toggles whether the selected path is included in the next Fossil check-in.
+            ToggleIncluded,
+            /// Includes changed paths between the anchor path and the selected path.
+            IncludeRange,
             /// Includes all changed paths in the next Fossil check-in.
             IncludeAll,
             /// Excludes all selected paths from the next Fossil check-in.
             ExcludeAll,
+            /// Stashes tracked changes in the active Fossil checkout.
+            StashTracked,
+            /// Pops the most recent Fossil stash.
+            PopStash,
+            /// Applies the most recent Fossil stash.
+            ApplyStash,
+            /// Opens the Fossil stash selector.
+            ViewStash,
+            /// Reverts the selected path in the active Fossil checkout.
+            RevertFile,
+            /// Reverts tracked checkout changes in the active Fossil checkout.
+            RevertTrackedFiles,
+            /// Moves Fossil extra files to trash.
+            CleanExtras,
             /// Synchronizes the active Fossil checkout with its remote.
             Sync,
             /// Updates the active Fossil checkout.
             Update,
+            /// Opens the Fossil timeline for the active checkout.
+            Timeline,
+            /// Opens the Fossil timeline for the selected path.
+            FileTimeline,
+            /// Shows Fossil annotation information for the current file.
+            Annotate,
+            /// Shows Fossil blame information for the current file.
+            Blame,
+            /// Opens the Fossil branch selector.
+            Branch,
+            /// Switches the active Fossil checkout to a different branch.
+            SwitchBranch,
+            /// Opens the Fossil checkout selector.
+            Checkouts,
+            /// Selects a different repository.
+            SelectRepo,
+            /// Opens all modified files in the active Fossil checkout.
+            OpenModifiedFiles,
+            /// Copies the current branch name to the clipboard.
+            CopyBranchName,
             /// Opens a Fossil check-in by hash.
             ViewCheckIn,
         ]
@@ -305,6 +349,26 @@ mod tests {
     fn fossil_action_names_are_first_class() {
         assert_eq!(fossil_actions::CheckIn::name_for_type(), "fossil::CheckIn");
         assert_eq!(
+            fossil_actions::GenerateCheckInMessage::name_for_type(),
+            "fossil::GenerateCheckInMessage"
+        );
+        assert_eq!(
+            fossil_actions::IncludeFile::name_for_type(),
+            "fossil::IncludeFile"
+        );
+        assert_eq!(
+            fossil_actions::ExcludeFile::name_for_type(),
+            "fossil::ExcludeFile"
+        );
+        assert_eq!(
+            fossil_actions::ToggleIncluded::name_for_type(),
+            "fossil::ToggleIncluded"
+        );
+        assert_eq!(
+            fossil_actions::IncludeRange::name_for_type(),
+            "fossil::IncludeRange"
+        );
+        assert_eq!(
             fossil_actions::IncludeAll::name_for_type(),
             "fossil::IncludeAll"
         );
@@ -312,8 +376,70 @@ mod tests {
             fossil_actions::ExcludeAll::name_for_type(),
             "fossil::ExcludeAll"
         );
+        assert_eq!(
+            fossil_actions::StashTracked::name_for_type(),
+            "fossil::StashTracked"
+        );
+        assert_eq!(
+            fossil_actions::PopStash::name_for_type(),
+            "fossil::PopStash"
+        );
+        assert_eq!(
+            fossil_actions::ApplyStash::name_for_type(),
+            "fossil::ApplyStash"
+        );
+        assert_eq!(
+            fossil_actions::ViewStash::name_for_type(),
+            "fossil::ViewStash"
+        );
+        assert_eq!(
+            fossil_actions::RevertFile::name_for_type(),
+            "fossil::RevertFile"
+        );
+        assert_eq!(
+            fossil_actions::RevertTrackedFiles::name_for_type(),
+            "fossil::RevertTrackedFiles"
+        );
+        assert_eq!(
+            fossil_actions::CleanExtras::name_for_type(),
+            "fossil::CleanExtras"
+        );
         assert_eq!(fossil_actions::Sync::name_for_type(), "fossil::Sync");
         assert_eq!(fossil_actions::Update::name_for_type(), "fossil::Update");
+        assert_eq!(
+            fossil_actions::Timeline::name_for_type(),
+            "fossil::Timeline"
+        );
+        assert_eq!(
+            fossil_actions::FileTimeline::name_for_type(),
+            "fossil::FileTimeline"
+        );
+        assert_eq!(
+            fossil_actions::Annotate::name_for_type(),
+            "fossil::Annotate"
+        );
+        assert_eq!(fossil_actions::Blame::name_for_type(), "fossil::Blame");
+        assert_eq!(fossil_actions::Branch::name_for_type(), "fossil::Branch");
+        assert_eq!(
+            fossil_actions::SwitchBranch::name_for_type(),
+            "fossil::SwitchBranch"
+        );
+        assert_eq!(
+            fossil_actions::Checkouts::name_for_type(),
+            "fossil::Checkouts"
+        );
+        assert_eq!(
+            fossil_actions::SelectRepo::name_for_type(),
+            "fossil::SelectRepo"
+        );
+        assert_eq!(
+            fossil_actions::OpenModifiedFiles::name_for_type(),
+            "fossil::OpenModifiedFiles"
+        );
+        assert_eq!(
+            fossil_actions::CopyBranchName::name_for_type(),
+            "fossil::CopyBranchName"
+        );
         assert_eq!(
             fossil_actions::ViewCheckIn::name_for_type(),
             "fossil::ViewCheckIn"
