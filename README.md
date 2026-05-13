@@ -23,6 +23,28 @@ Run the latest local debug build with:
 target/debug/fzed
 ```
 
+Build an optimized local binary with:
+
+```sh
+CARGO_INCREMENTAL=0 cargo build -p zed --release
+```
+
+Run the optimized binary with:
+
+```sh
+target/release/fzed
+```
+
+On macOS, build a distributable `.app` bundle and `.dmg` with:
+
+```sh
+script/bundle-mac
+```
+
+The bundled app/DMG is written under `target/<target-triple>/release/`. Local
+builds are ad-hoc signed unless the Apple signing and notarization environment
+variables expected by `script/bundle-mac` are configured.
+
 ### Settings And Data
 
 FZed uses separate global/user settings and application data from upstream Zed:
