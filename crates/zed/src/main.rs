@@ -304,7 +304,7 @@ fn main() {
             client::telemetry::os_name(),
             client::telemetry::os_version(),
         );
-        println!("fzed System Specs (from CLI):\n{}", system_specs);
+        println!("FZed System Specs (from CLI):\n{}", system_specs);
         return;
     }
 
@@ -1721,14 +1721,14 @@ struct Args {
     #[arg(long)]
     dev_container: bool,
 
-    /// Instructs fzed to run as a dev server on this machine. (not implemented)
+    /// Instructs FZed to run as a dev server on this machine. (not implemented)
     #[arg(long)]
     dev_server_token: Option<String>,
 
     /// Prints system specs.
     ///
     /// Useful for submitting issues on GitHub when encountering a bug that
-    /// prevents fzed from starting, so you can't run `fzed: copy system specs to
+    /// prevents FZed from starting, so you can't run `fzed: copy system specs to
     /// clipboard`
     #[arg(long)]
     system_specs: bool,

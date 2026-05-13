@@ -1,6 +1,6 @@
-# fzed
+# FZed
 
-fzed is a fork of [Zed](https://zed.dev) focused on adding first-class
+FZed is a fork of [Zed](https://zed.dev) focused on adding first-class
 [Fossil SCM](https://fossil-scm.org/) support while keeping the fork close
 enough to upstream Zed to continue merging upstream changes.
 
@@ -25,7 +25,7 @@ target/debug/fzed
 
 ### Settings And Data
 
-fzed uses separate global/user settings and application data from upstream Zed:
+FZed uses separate global/user settings and application data from upstream Zed:
 
 - user settings: `~/.config/fzed/settings.json`
 - global settings: `~/.config/fzed/global_settings.json`
@@ -43,9 +43,9 @@ Project settings are intentionally still shared with Zed for now:
 
 This keeps repository-local editor metadata compatible with upstream Zed and
 with existing projects. A future `.fzed/` project settings layer can be added if
-fzed-only project configuration becomes necessary.
+FZed-only project configuration becomes necessary.
 
-The `--user-data-dir <DIR>` CLI option overrides the default fzed user data
+The `--user-data-dir <DIR>` CLI option overrides the default FZed user data
 locations for a single run.
 
 ### Expected First-Run Debug Logs
