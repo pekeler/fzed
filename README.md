@@ -1,3 +1,76 @@
+# fzed
+
+fzed is a fork of [Zed](https://zed.dev) focused on adding first-class
+[Fossil SCM](https://fossil-scm.org/) support while keeping the fork close
+enough to upstream Zed to continue merging upstream changes.
+
+## Fork-Specific Documentation
+
+### Current Development Build
+
+The Cargo package is still named `zed` to reduce upstream merge churn, but the
+fork's local development binary is named `fzed`.
+
+Build it with:
+
+```sh
+cargo build -p zed
+```
+
+Run the latest local debug build with:
+
+```sh
+/Users/pekeler/Projects/FZed/target/debug/fzed
+```
+
+### Settings And Data
+
+fzed uses separate global/user settings and application data from upstream Zed:
+
+- user settings: `~/.config/fzed/settings.json`
+- global settings: `~/.config/fzed/global_settings.json`
+- keymap, tasks, and themes: under `~/.config/fzed/`
+- data, database, extensions, languages, and debug adapters:
+  `~/Library/Application Support/fzed/`
+- logs: `~/Library/Logs/fzed/fzed.log`
+- cache/temp data: `~/Library/Caches/fzed/`
+
+Project settings are intentionally still shared with Zed for now:
+
+- project settings: `.zed/settings.json`
+- project tasks: `.zed/tasks.json`
+- project debug config: `.zed/debug.json`
+
+This keeps repository-local editor metadata compatible with upstream Zed and
+with existing projects. A future `.fzed/` project settings layer can be added if
+fzed-only project configuration becomes necessary.
+
+The `--user-data-dir <DIR>` CLI option overrides the default fzed user data
+locations for a single run.
+
+### Expected First-Run Debug Logs
+
+Debug builds are more verbose than packaged release builds. These messages are
+expected during local development:
+
+- `sqlez::migrations ...`: local database setup or schema checks
+- `Debug assertions enabled, skipping hang monitoring`: normal debug build
+- `Minidump endpoint not set`: no crash-upload endpoint is configured
+- `Couldn't find any enabled panel for the Left dock`: harmless layout state
+- extension installation/index rebuild messages: normal first-run extension setup
+
+### License
+
+fzed keeps Zed's upstream license structure. The main application crates,
+including `crates/zed`, are `GPL-3.0-or-later`; some workspace crates are
+`AGPL-3.0-or-later` or `Apache-2.0` as declared in their `Cargo.toml` files.
+Forking and distributing fzed is allowed as long as those license terms and
+notices are preserved. See `LICENSE-GPL`, `LICENSE-AGPL`, and `LICENSE-APACHE`.
+
+---
+
+# Original Zed README
+
 # Zed
 
 [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
