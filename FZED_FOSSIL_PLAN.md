@@ -137,6 +137,7 @@ Additional UX implications from Fossil's own "Fossil Versus Git" comparison:
 - Fossil stores state in SQLite databases, making project history and descendant/timeline queries first-class product opportunities rather than bolt-ons.
 - Fossil emphasizes the entire DAG and all branches, not a single currently-pushed branch.
 - Fossil separates repository databases from working checkouts and encourages multiple checkouts where they fit the work.
+- Fossil is commonly used as a purely local repository, without a central host. fzed must not assume that sync targets or GitHub-style hosting exist.
 - Fossil records what actually happened and avoids most history rewriting. UI should not center Git-like rebase, squash, force-push, or reset workflows.
 - Fossil's default autosync means commit is closer to a public commitment; the editor should help users inspect and test before commit.
 - Fossil merge/cherrypick/backout applies changes to the working checkout first and expects an explicit commit after testing.
@@ -271,6 +272,8 @@ Known Phase 2 deferrals:
 - Remaining visible Git naming in Fossil views: Phase 5, then broader internal naming in Phase 6.
 - Direct `git_ui` Fossil panel tests: Phase 5.
 - Shared selected Fossil paths: implemented. This matches Git's shared staging behavior and does not conflict with Fossil, because it is editor session state that becomes Fossil-native selected file arguments at check-in time.
+- Fossil tickets/wiki/forum/notes/chat are out of scope for the SCM integration unless a comparable built-in Zed surface appears for GitHub issues/wiki-style workflows.
+- `fossil ui` command: deferred. A future `fossil::Ui` action should account for port conflicts when multiple Fossil repositories are open, and should define explicit process lifetime semantics instead of leaving a hidden server running.
 
 ### Phase 3: Fossil-First Branch, Sync, and Checkout UX
 
@@ -345,7 +348,7 @@ Phase 4 is implemented for existing Zed history, stash, commit-diff, search, and
 
 Known Phase 4 deferrals:
 
-- Fossil-managed tickets, wiki, forum, notes, and event timeline items are not surfaced yet; the first pass is check-in history only.
+- Fossil-managed tickets, wiki, forum, notes, chat, and non-SCM timeline items are intentionally out of scope unless fzed later grows a comparable hosted-project surface.
 - Merge/cherrypick/backout do not have dedicated Fossil UI yet. They should be exposed later as working-checkout changes followed by explicit check-in.
 - Fossil stash does not include unmanaged extra files. fzed follows Fossil here instead of adding extras behind the user's back.
 - Blame currently reflects Fossil's checked-out file state; unsaved editor-buffer blame would require a temporary checkout or another Fossil-specific overlay.
