@@ -73,7 +73,7 @@ Validation so far:
   - `cargo test -p worktree --features test-support fossil_repository_detection`
   - `cargo test -p proto split_repository_update`
   - `cargo build -p zed`
-  - Debug binary: `/Users/pekeler/Projects/FZed/target/debug/zed`
+  - Debug binary: `/Users/pekeler/Projects/FZed/target/debug/fzed`
 
 ## Goal
 
