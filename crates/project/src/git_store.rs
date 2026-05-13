@@ -5109,6 +5109,11 @@ impl Repository {
     ) -> Task<Result<()>> {
         let commit = commit.to_string();
         let id = self.id;
+        let status_message: SharedString = if self.snapshot.kind.is_fossil() {
+            "fossil revert".into()
+        } else {
+            format!("git checkout {}", commit).into()
+        };
 
         self.spawn_job_with_tracking(
             paths.clone(),
@@ -5117,7 +5122,7 @@ impl Repository {
             async move |this, cx| {
                 this.update(cx, |this, _cx| {
                     this.send_job(
-                        Some(format!("git checkout {}", commit).into()),
+                        Some(status_message),
                         move |git_repo, _| async move {
                             match git_repo {
                                 RepositoryState::Local(LocalRepositoryState {
@@ -6341,7 +6346,16 @@ impl Repository {
     }
 
     pub fn stash_all(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
-        let to_stash = self.cached_status().map(|entry| entry.repo_path).collect();
+        let is_fossil = self.snapshot.kind.is_fossil();
+        let to_stash = self
+            .cached_status()
+            .filter(|entry| !is_fossil || !entry.status.is_created())
+            .map(|entry| entry.repo_path)
+            .collect::<Vec<_>>();
+
+        if to_stash.is_empty() {
+            return Task::ready(Ok(()));
+        }
 
         self.stash_entries(to_stash, cx)
     }
@@ -9138,9 +9152,12 @@ mod tests {
     use super::*;
     use crate::Project;
     use fs::FakeFs;
+    use futures::future::BoxFuture;
     use gpui::TestAppContext;
     use gpui::proptest::prelude::*;
+    use parking_lot::Mutex;
     use rand::{SeedableRng, rngs::StdRng};
+    use rpc::ProtoClient;
     use serde_json::json;
     use settings::SettingsStore;
     use std::path::{Path, PathBuf};
@@ -9150,6 +9167,48 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
         });
+    }
+
+    #[derive(Default)]
+    struct NoopProtoClient {
+        handlers: Mutex<rpc::ProtoMessageHandlerSet>,
+    }
+
+    impl ProtoClient for NoopProtoClient {
+        fn request(
+            &self,
+            envelope: proto::Envelope,
+            request_type: &'static str,
+        ) -> BoxFuture<'static, Result<proto::Envelope>> {
+            async move {
+                anyhow::bail!("unexpected {request_type} request: {:?}", envelope.payload)
+            }
+            .boxed()
+        }
+
+        fn send(&self, _envelope: proto::Envelope, message_type: &'static str) -> Result<()> {
+            anyhow::bail!("unexpected {message_type} message")
+        }
+
+        fn send_response(
+            &self,
+            _envelope: proto::Envelope,
+            message_type: &'static str,
+        ) -> Result<()> {
+            anyhow::bail!("unexpected {message_type} response")
+        }
+
+        fn message_handler_set(&self) -> &Mutex<rpc::ProtoMessageHandlerSet> {
+            &self.handlers
+        }
+
+        fn is_via_collab(&self) -> bool {
+            true
+        }
+
+        fn has_wsl_interop(&self) -> bool {
+            false
+        }
     }
 
     #[test]
@@ -9210,6 +9269,58 @@ mod tests {
                 .fossil_included_paths,
             vec!["a.txt", "b.txt"]
         );
+    }
+
+    #[gpui::test]
+    async fn test_fossil_included_paths_apply_to_remote_repository_updates(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let project_id = ProjectId(7);
+        let client = AnyProtoClient::new(Arc::new(NoopProtoClient::default()));
+        let repository = cx.new(|cx| {
+            Repository::remote(
+                RepositoryId(1),
+                RepositoryKind::Fossil,
+                Path::new("/repo").into(),
+                None,
+                None,
+                PathStyle::Posix,
+                project_id,
+                client,
+                WeakEntity::new_invalid(),
+                cx,
+            )
+        });
+
+        let included_path = RepoPath::new("a.txt").unwrap();
+        let mut snapshot = RepositorySnapshot::empty(
+            RepositoryId(1),
+            RepositoryKind::Fossil,
+            Path::new("/repo").into(),
+            None,
+            None,
+            PathStyle::Posix,
+        );
+        snapshot.statuses_by_path = SumTree::from_iter(
+            [StatusEntry {
+                repo_path: included_path.clone(),
+                status: StatusCode::Modified.worktree(),
+                diff_stat: None,
+            }],
+            (),
+        );
+        snapshot.fossil_included_paths = Arc::from([included_path.clone()]);
+
+        let update = snapshot.initial_update(project_id.0);
+        repository.update(cx, |repository, cx| {
+            repository.apply_remote_update(update, cx).unwrap();
+            assert!(repository.fossil_path_included_for_check_in(&included_path));
+            assert_eq!(
+                repository.snapshot.fossil_included_paths.as_ref(),
+                &[included_path]
+            );
+        });
     }
 
     fn verify_invariants(repository: &Repository) -> anyhow::Result<()> {

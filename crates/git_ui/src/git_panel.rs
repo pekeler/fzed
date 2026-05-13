@@ -157,7 +157,8 @@ enum TrashCancel {
 }
 
 struct GitMenuState {
-    can_mutate: bool,
+    can_restore: bool,
+    can_stash: bool,
     can_select_files: bool,
     is_fossil: bool,
     has_tracked_changes: bool,
@@ -167,6 +168,36 @@ struct GitMenuState {
     sort_by_path: bool,
     has_stash_items: bool,
     tree_view: bool,
+}
+
+impl GitMenuState {
+    fn can_stash_changes(&self) -> bool {
+        if self.is_fossil {
+            self.has_tracked_changes
+        } else {
+            self.has_new_changes || self.has_tracked_changes
+        }
+    }
+
+    fn stash_all_label(&self) -> &'static str {
+        if self.is_fossil {
+            "Stash Tracked"
+        } else {
+            "Stash All"
+        }
+    }
+}
+
+fn stage_file_action_title(repository_kind: RepositoryKind, staging: StageStatus) -> &'static str {
+    if repository_kind.is_fossil() && staging.is_fully_staged() {
+        "Exclude File"
+    } else if repository_kind.is_fossil() {
+        "Include File"
+    } else if staging.is_fully_staged() {
+        "Unstage File"
+    } else {
+        "Stage File"
+    }
 }
 
 fn git_panel_context_menu(
@@ -198,13 +229,13 @@ fn git_panel_context_menu(
             )
             .separator()
             .action_disabled_when(
-                !state.can_mutate || !(state.has_new_changes || state.has_tracked_changes),
-                "Stash All",
+                !state.can_stash || !state.can_stash_changes(),
+                state.stash_all_label(),
                 StashAll.boxed_clone(),
             )
             .action_disabled_when(
-                !state.can_mutate || !state.has_stash_items,
-                "Stash Pop",
+                !state.can_stash || !state.has_stash_items,
+                "Pop Stash",
                 StashPop.boxed_clone(),
             )
             .action("View Stash", zed_actions::git::ViewStash.boxed_clone())
@@ -212,12 +243,12 @@ fn git_panel_context_menu(
             .action("Open Diff", project_diff::Diff.boxed_clone())
             .separator()
             .action_disabled_when(
-                !state.can_mutate || !state.has_tracked_changes,
+                !state.can_restore || !state.has_tracked_changes,
                 "Discard Tracked Changes",
                 RestoreTrackedFiles.boxed_clone(),
             )
             .action_disabled_when(
-                !state.can_mutate || !state.has_new_changes,
+                !state.can_restore || !state.has_new_changes,
                 "Trash Untracked Files",
                 TrashUntrackedFiles.boxed_clone(),
             )
@@ -1547,6 +1578,11 @@ impl GitPanel {
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
+        let operation = if active_repository.read(cx).kind().is_fossil() {
+            "revert"
+        } else {
+            "checkout"
+        };
 
         let task = cx.spawn_in(window, async move |this, cx| {
             let tasks: Vec<_> = workspace.update(cx, |workspace, cx| {
@@ -1604,7 +1640,7 @@ impl GitPanel {
             this.update_in(cx, |this, window, cx| {
                 if let Err(err) = result {
                     this.update_visible_entries(window, cx);
-                    this.show_error_toast("checkout", err, cx);
+                    this.show_error_toast(operation, err, cx);
                 }
             })
             .ok();
@@ -4169,8 +4205,10 @@ impl GitPanel {
     fn render_overflow_menu(&self, id: impl Into<ElementId>, cx: &App) -> impl IntoElement {
         let focus_handle = self.focus_handle.clone();
         let repository_kind = self.active_repository_kind(cx);
-        let can_mutate = self.has_write_access(cx) && !repository_kind.is_fossil();
-        let can_select_files = self.has_write_access(cx);
+        let can_restore = self.has_write_access(cx);
+        let can_stash = self.has_write_access(cx);
+        let can_select_files =
+            self.has_write_access(cx) && self.can_select_files_for_active_repository(cx);
         let has_tracked_changes = self.has_tracked_changes();
         let has_staged_changes = self.has_staged_changes();
         let has_unstaged_changes = self.has_unstaged_changes();
@@ -4187,7 +4225,8 @@ impl GitPanel {
                 Some(git_panel_context_menu(
                     focus_handle.clone(),
                     GitMenuState {
-                        can_mutate,
+                        can_restore,
+                        can_stash,
                         can_select_files,
                         is_fossil: repository_kind.is_fossil(),
                         has_tracked_changes,
@@ -4415,6 +4454,14 @@ impl GitPanel {
 
     fn can_mutate_active_repository(&self, cx: &App) -> bool {
         !self.active_repository_kind(cx).is_fossil()
+    }
+
+    fn can_restore_active_repository(&self, _cx: &App) -> bool {
+        true
+    }
+
+    fn can_stash_active_repository(&self, _cx: &App) -> bool {
+        true
     }
 
     fn can_select_files_for_active_repository(&self, _cx: &App) -> bool {
@@ -5496,11 +5543,9 @@ impl GitPanel {
         let Some(entry) = self.entries.get(ix).and_then(|e| e.status_entry()) else {
             return;
         };
-        let stage_title = if entry.status.staging().is_fully_staged() {
-            "Unstage File"
-        } else {
-            "Stage File"
-        };
+        let repository_kind = self.active_repository_kind(cx);
+        let is_fossil = repository_kind.is_fossil();
+        let stage_title = stage_file_action_title(repository_kind, entry.staging);
         let restore_title = if entry.status.is_created() {
             "Trash File"
         } else {
@@ -5512,11 +5557,13 @@ impl GitPanel {
                 .context(self.focus_handle.clone())
                 .action(stage_title, ToggleStaged.boxed_clone())
                 .action(restore_title, git::RestoreFile::default().boxed_clone())
-                .action_disabled_when(
-                    !is_created,
-                    "Add to .gitignore",
-                    git::AddToGitignore.boxed_clone(),
-                )
+                .when(!is_fossil, |context_menu| {
+                    context_menu.action_disabled_when(
+                        !is_created,
+                        "Add to .gitignore",
+                        git::AddToGitignore.boxed_clone(),
+                    )
+                })
                 .separator()
                 .action("Open Diff", menu::Confirm.boxed_clone())
                 .action("Open File", menu::SecondaryConfirm.boxed_clone())
@@ -5536,13 +5583,15 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let can_mutate = self.has_write_access(cx) && self.can_mutate_active_repository(cx);
+        let can_restore = self.has_write_access(cx) && self.can_restore_active_repository(cx);
+        let can_stash = self.has_write_access(cx) && self.can_stash_active_repository(cx);
         let can_select_files =
             self.has_write_access(cx) && self.can_select_files_for_active_repository(cx);
         let context_menu = git_panel_context_menu(
             self.focus_handle.clone(),
             GitMenuState {
-                can_mutate,
+                can_restore,
+                can_stash,
                 can_select_files,
                 is_fossil: self.active_repository_kind(cx).is_fossil(),
                 has_tracked_changes: self.has_tracked_changes(),
@@ -6231,6 +6280,8 @@ impl Render for GitPanel {
         let has_file_selection_access =
             has_write_access && self.can_select_files_for_active_repository(cx);
         let has_mutation_access = has_write_access && self.can_mutate_active_repository(cx);
+        let has_restore_access = has_write_access && self.can_restore_active_repository(cx);
+        let has_stash_access = has_write_access && self.can_stash_active_repository(cx);
 
         let has_co_authors = room.is_some_and(|room| {
             self.load_local_committer(cx);
@@ -6260,11 +6311,15 @@ impl Render for GitPanel {
             .when(has_mutation_access && !project.is_read_only(cx), |this| {
                 this.on_action(cx.listener(GitPanel::on_amend))
                     .on_action(cx.listener(GitPanel::toggle_signoff_enabled))
-                    .on_action(cx.listener(Self::restore_tracked_files))
-                    .on_action(cx.listener(Self::revert_selected))
                     .on_action(cx.listener(Self::add_to_gitignore))
+            })
+            .when(has_restore_access && !project.is_read_only(cx), |this| {
+                this.on_action(cx.listener(Self::restore_tracked_files))
+                    .on_action(cx.listener(Self::revert_selected))
                     .on_action(cx.listener(Self::clean_all))
-                    .on_action(cx.listener(Self::stash_all))
+            })
+            .when(has_stash_access && !project.is_read_only(cx), |this| {
+                this.on_action(cx.listener(Self::stash_all))
                     .on_action(cx.listener(Self::stash_pop))
             })
             .on_action(cx.listener(Self::collapse_selected_entry))
@@ -7131,7 +7186,7 @@ fn format_git_error_toast_message(error: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use git::{
-        repository::repo_path,
+        repository::{RepositoryKind, repo_path},
         status::{StatusCode, UnmergedStatus, UnmergedStatusCode},
     };
     use gpui::{TestAppContext, UpdateGlobal, VisualTestContext, px};
@@ -7198,6 +7253,52 @@ mod tests {
             message,
             "Your local changes to the following files would be overwritten by merge"
         );
+    }
+
+    #[test]
+    fn test_fossil_menu_labels_and_stash_policy() {
+        assert_eq!(
+            stage_file_action_title(RepositoryKind::Fossil, StageStatus::Unstaged),
+            "Include File"
+        );
+        assert_eq!(
+            stage_file_action_title(RepositoryKind::Fossil, StageStatus::Staged),
+            "Exclude File"
+        );
+        assert_eq!(
+            stage_file_action_title(RepositoryKind::Git, StageStatus::Unstaged),
+            "Stage File"
+        );
+        assert_eq!(
+            stage_file_action_title(RepositoryKind::Git, StageStatus::Staged),
+            "Unstage File"
+        );
+
+        let fossil_with_tracked_changes = GitMenuState {
+            can_restore: true,
+            can_stash: true,
+            can_select_files: true,
+            is_fossil: true,
+            has_tracked_changes: true,
+            has_staged_changes: false,
+            has_unstaged_changes: true,
+            has_new_changes: false,
+            sort_by_path: true,
+            has_stash_items: false,
+            tree_view: false,
+        };
+        assert_eq!(
+            fossil_with_tracked_changes.stash_all_label(),
+            "Stash Tracked"
+        );
+        assert!(fossil_with_tracked_changes.can_stash_changes());
+
+        let fossil_with_only_extra_files = GitMenuState {
+            has_tracked_changes: false,
+            has_new_changes: true,
+            ..fossil_with_tracked_changes
+        };
+        assert!(!fossil_with_only_extra_files.can_stash_changes());
     }
 
     #[gpui::test]
@@ -7321,6 +7422,199 @@ mod tests {
                     }),
                 },),
             ],
+        );
+    }
+
+    #[gpui::test]
+    async fn test_discard_prompt_escapes_markdown_in_file_name(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({
+                "project": {
+                    ".git": {},
+                    "__somefile__": "modified\n",
+                },
+            }),
+        )
+        .await;
+
+        fs.set_status_for_repo(
+            Path::new(path!("/root/project/.git")),
+            &[("__somefile__", StatusCode::Modified.worktree())],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.selected_entry = Some(1);
+            panel.revert_selected(&git::RestoreFile::default(), window, cx);
+        });
+
+        let (message, _detail) = cx
+            .pending_prompt()
+            .expect("discard should show a confirmation prompt");
+
+        assert_eq!(
+            message,
+            "Are you sure you want to discard changes to `__somefile__`?"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_fossil_panel_file_selection_and_check_in_state(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({
+                "project": {
+                    ".fslckout": {},
+                    "tracked": "tracked\n",
+                    "extra": "extra\n",
+                },
+            }),
+        )
+        .await;
+
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/root/project/.fslckout")),
+            &[("tracked", "old tracked\n".into())],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.active_repository_kind(cx), RepositoryKind::Fossil);
+            assert_eq!(panel.commit_button_title(cx), "Check In Tracked");
+        });
+        assert_eq!(
+            panel.update(cx, |panel, cx| panel.configure_commit_button(cx)),
+            (true, "Check In Tracked")
+        );
+
+        let entries = panel.read_with(cx, |panel, _| panel.entries.clone());
+        #[rustfmt::skip]
+        pretty_assertions::assert_matches!(
+            entries.as_slice(),
+            &[
+                GitListEntry::Header(GitHeaderEntry { header: Section::Tracked }),
+                GitListEntry::Status(GitStatusEntry { repo_path: ref path, staging: StageStatus::Unstaged, .. }),
+                GitListEntry::Header(GitHeaderEntry { header: Section::New }),
+                GitListEntry::Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
+            ] if path == &repo_path("tracked"),
+        );
+
+        panel.update(cx, |panel, cx| {
+            panel.commit_message_buffer(cx).update(cx, |buffer, cx| {
+                buffer.set_text("check in selected", cx);
+            });
+        });
+        assert_eq!(
+            panel.update(cx, |panel, cx| panel.configure_commit_button(cx)),
+            (true, "Check In Tracked")
+        );
+
+        let tracked_entry = entries[1].clone();
+        panel.update_in(cx, |panel, window, cx| {
+            panel.toggle_staged_for_entry(&tracked_entry, window, cx);
+        });
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+        cx.executor().run_until_parked();
+
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        panel.read_with(cx, |panel, cx| {
+            let repository = panel.active_repository().unwrap().read(cx);
+            assert!(repository.fossil_path_included_for_check_in(&repo_path("tracked")));
+        });
+        let entries = panel.read_with(cx, |panel, _| panel.entries.clone());
+        #[rustfmt::skip]
+        pretty_assertions::assert_matches!(
+            entries.as_slice(),
+            &[
+                GitListEntry::Header(GitHeaderEntry { header: Section::Tracked }),
+                GitListEntry::Status(GitStatusEntry { repo_path: ref path, staging: StageStatus::Staged, .. }),
+                GitListEntry::Header(GitHeaderEntry { header: Section::New }),
+                GitListEntry::Status(GitStatusEntry { staging: StageStatus::Unstaged, .. }),
+            ] if path == &repo_path("tracked"),
+        );
+        assert_eq!(
+            panel.update(cx, |panel, cx| panel.configure_commit_button(cx)),
+            (true, "Check In")
         );
     }
 

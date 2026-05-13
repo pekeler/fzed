@@ -360,6 +360,15 @@ Known Phase 4 deferrals:
 
 Expected result: Fossil users should not have to mentally translate Git terms for the file-level check-in workflow.
 
+Phase 5 is implemented for the current file-level Fossil workflow:
+
+- File context menus now say "Include File" / "Exclude File" for Fossil selections and no longer show `.gitignore` actions in Fossil repositories.
+- Panel overflow actions now expose Fossil stash as "Stash Tracked", matching Fossil's behavior of not stashing unmanaged extra files.
+- Fossil repositories can discard tracked checkout edits through native `fossil revert`, and the fake repository backend now supports checkout/revert operations for UI tests.
+- Project diff hunk stage/unstage buttons are hidden for Fossil instead of showing disabled Git hunk-staging copy.
+- Direct `git_ui` tests now cover Fossil include/exclude labels, stash policy, check-in button state, and project diff toolbar behavior.
+- Project tests now cover Fossil selected-path propagation into remote repository updates, in addition to the existing proto update coverage.
+
 ### Phase 6: Generalize Names and UI
 
 Once Fossil works:

@@ -1414,6 +1414,12 @@ struct ButtonStates {
     repository_kind: RepositoryKind,
 }
 
+impl ButtonStates {
+    fn show_hunk_stage_controls(&self) -> bool {
+        !self.repository_kind.is_fossil()
+    }
+}
+
 impl Render for ProjectDiffToolbar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(project_diff) = self.project_diff(cx) else {
@@ -1430,26 +1436,19 @@ impl Render for ProjectDiffToolbar {
             .flex_wrap()
             .justify_between()
             .child(
-                h_group_sm()
-                    .when(button_states.selection, |el| {
+                h_group_sm().when(button_states.show_hunk_stage_controls(), |el| {
+                    el.when(button_states.selection, |el| {
                         el.child(
                             Button::new("stage", "Toggle Staged")
                                 .tooltip({
                                     let focus_handle = focus_handle.clone();
                                     move |_window, cx| {
-                                        if button_states.repository_kind.is_fossil() {
-                                            Tooltip::simple(
-                                                "Fossil hunk selection is not implemented yet",
-                                                cx,
-                                            )
-                                        } else {
-                                            Tooltip::for_action_in(
-                                                "Toggle Staged",
-                                                &ToggleStaged,
-                                                &focus_handle,
-                                                cx,
-                                            )
-                                        }
+                                        Tooltip::for_action_in(
+                                            "Toggle Staged",
+                                            &ToggleStaged,
+                                            &focus_handle,
+                                            cx,
+                                        )
                                     }
                                 })
                                 .disabled(!button_states.stage && !button_states.unstage)
@@ -1464,26 +1463,18 @@ impl Render for ProjectDiffToolbar {
                                 .tooltip({
                                     let focus_handle = focus_handle.clone();
                                     move |_window, cx| {
-                                        if button_states.repository_kind.is_fossil() {
-                                            Tooltip::simple(
-                                                "Fossil hunk selection is not implemented yet",
-                                                cx,
-                                            )
-                                        } else {
-                                            Tooltip::for_action_in(
-                                                "Stage and go to next hunk",
-                                                &StageAndNext,
-                                                &focus_handle,
-                                                cx,
-                                            )
-                                        }
+                                        Tooltip::for_action_in(
+                                            "Stage and go to next hunk",
+                                            &StageAndNext,
+                                            &focus_handle,
+                                            cx,
+                                        )
                                     }
                                 })
                                 .disabled(
-                                    button_states.repository_kind.is_fossil()
-                                        || !button_states.prev_next
-                                            && !button_states.stage_all
-                                            && !button_states.unstage_all,
+                                    !button_states.prev_next
+                                        && !button_states.stage_all
+                                        && !button_states.unstage_all,
                                 )
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.dispatch_action(&StageAndNext, window, cx)
@@ -1494,32 +1485,25 @@ impl Render for ProjectDiffToolbar {
                                 .tooltip({
                                     let focus_handle = focus_handle.clone();
                                     move |_window, cx| {
-                                        if button_states.repository_kind.is_fossil() {
-                                            Tooltip::simple(
-                                                "Fossil hunk selection is not implemented yet",
-                                                cx,
-                                            )
-                                        } else {
-                                            Tooltip::for_action_in(
-                                                "Unstage and go to next hunk",
-                                                &UnstageAndNext,
-                                                &focus_handle,
-                                                cx,
-                                            )
-                                        }
+                                        Tooltip::for_action_in(
+                                            "Unstage and go to next hunk",
+                                            &UnstageAndNext,
+                                            &focus_handle,
+                                            cx,
+                                        )
                                     }
                                 })
                                 .disabled(
-                                    button_states.repository_kind.is_fossil()
-                                        || !button_states.prev_next
-                                            && !button_states.stage_all
-                                            && !button_states.unstage_all,
+                                    !button_states.prev_next
+                                        && !button_states.stage_all
+                                        && !button_states.unstage_all,
                                 )
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.dispatch_action(&UnstageAndNext, window, cx)
                                 })),
                         )
-                    }),
+                    })
+                }),
             )
             // n.b. the only reason these arrows are here is because we don't
             // support "undo" for staging so we need a way to go back.
@@ -1865,6 +1849,27 @@ mod tests {
             editor::init(cx);
             crate::init(cx);
         });
+    }
+
+    #[test]
+    fn fossil_project_diff_hides_hunk_stage_controls() {
+        let button_states = ButtonStates {
+            stage: true,
+            unstage: true,
+            prev_next: true,
+            selection: false,
+            stage_all: true,
+            unstage_all: true,
+            can_commit: true,
+            repository_kind: RepositoryKind::Fossil,
+        };
+        assert!(!button_states.show_hunk_stage_controls());
+
+        let button_states = ButtonStates {
+            repository_kind: RepositoryKind::Git,
+            ..button_states
+        };
+        assert!(button_states.show_hunk_stage_controls());
     }
 
     #[gpui::test]

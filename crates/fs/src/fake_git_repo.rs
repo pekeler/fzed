@@ -344,10 +344,61 @@ impl GitRepository for FakeGitRepository {
     fn checkout_files(
         &self,
         _commit: String,
-        _paths: Vec<RepoPath>,
+        paths: Vec<RepoPath>,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
-        unimplemented!()
+        let fs = self.fs.clone();
+        let dot_git_path = self.dot_git_path.clone();
+        let executor = self.executor.clone();
+        async move {
+            if paths.is_empty() {
+                return Ok(());
+            }
+
+            let workdir_path = dot_git_path
+                .parent()
+                .context("repository has no working directory")?
+                .to_path_buf();
+            let checkout_contents = fs.with_git_state(&dot_git_path, false, |state| {
+                paths
+                    .iter()
+                    .cloned()
+                    .map(|path| {
+                        let content = state.head_contents.get(&path).cloned();
+                        (path, content)
+                    })
+                    .collect::<Vec<_>>()
+            })?;
+
+            for (path, content) in checkout_contents.clone() {
+                let abs_path = workdir_path.join(path.as_std_path());
+                if let Some(content) = content {
+                    fs.insert_file(abs_path, content.into_bytes()).await;
+                } else {
+                    fs.remove_file(
+                        &abs_path,
+                        RemoveOptions {
+                            ignore_if_not_exists: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                }
+            }
+
+            executor.simulate_random_delay().await;
+            fs.with_git_state(&dot_git_path, true, |state| {
+                for (path, content) in checkout_contents {
+                    if let Some(content) = content {
+                        state.index_contents.insert(path, content);
+                    } else {
+                        state.index_contents.remove(&path);
+                    }
+                }
+                Ok(())
+            })?
+        }
+        .boxed()
     }
 
     fn path(&self) -> PathBuf {
