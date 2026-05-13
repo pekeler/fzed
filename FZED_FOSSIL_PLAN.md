@@ -263,7 +263,7 @@ Known Phase 2 deferrals:
 - Autosync visibility belongs in Phase 3 with Fossil sync/update UX. The Phase 3 slice now surfaces autosync/default remote metadata in check-in command tooltips.
 - The include list remains in-memory and intentionally non-persistent across restarts, like a transient check-in selection.
 - Direct `git_ui` panel tests for Fossil labels and toolbar button states are deferred to Phase 5; current coverage is at the UI-facing repository state layer.
-- Hunk-level selection is out of scope for the main Fossil UX because Fossil has no native hunk commit mechanism. Optional emulation is moved to Phase 7.
+- Hunk-level selection is out of scope for fzed's Fossil integration because Fossil has no native hunk commit mechanism.
 
 ## Resolved Or Deferred TODOs
 
@@ -273,7 +273,7 @@ Known Phase 2 deferrals:
 - Direct `git_ui` Fossil panel tests: Phase 5.
 - Shared selected Fossil paths: implemented. This matches Git's shared staging behavior and does not conflict with Fossil, because it is editor session state that becomes Fossil-native selected file arguments at check-in time.
 - Fossil tickets/wiki/forum/notes/chat are out of scope for the SCM integration unless a comparable built-in Zed surface appears for GitHub issues/wiki-style workflows.
-- `fossil ui` command: deferred. A future `fossil::Ui` action should account for port conflicts when multiple Fossil repositories are open, and should define explicit process lifetime semantics instead of leaving a hidden server running.
+- `fossil ui` command: out of scope. Fossil's web UI remains available from a terminal, but fzed will not manage hidden `fossil ui` server processes.
 
 ### Phase 3: Fossil-First Branch, Sync, and Checkout UX
 
@@ -394,7 +394,7 @@ Phase 6 first slice is in progress:
   - sync/history: `fossil::Sync`, `fossil::Update`, `fossil::Timeline`, `fossil::FileTimeline`, `fossil::Annotate`, `fossil::Blame`
   - navigation and repository state: `fossil::Branch`, `fossil::SwitchBranch`, `fossil::Checkouts`, `fossil::SelectRepo`, `fossil::OpenModifiedFiles`, `fossil::CopyBranchName`
   - stash: `fossil::StashTracked`, `fossil::PopStash`, `fossil::ApplyStash`, `fossil::ViewStash`
-- Intentionally did not add Fossil aliases for Git hunk staging, amend, signoff, rebase, force-push, GitHub pull requests, `.gitignore`, or `fossil ui`. Those either conflict with Fossil's model or are already deferred for explicit product design.
+- Intentionally did not add Fossil aliases for Git hunk staging, amend, signoff, rebase, force-push, GitHub pull requests, `.gitignore`, or `fossil ui`. Those either conflict with Fossil's model or are out of scope for fzed's Fossil integration.
 - Added focused unit tests for the Fossil/Git label split.
 
 Remaining Phase 6 work should be split into small patches:
@@ -402,33 +402,13 @@ Remaining Phase 6 work should be split into small patches:
 - Internal `GitRepository`/`GitStore` boundary renames are still deferred until the Fossil behavior stabilizes across more UI paths.
 - Settings names still need an explicit audit before introducing `fossil.*` settings or any shared `version_control.*` settings.
 
-### Phase 7: Optional Hunk Emulation
+### Explicitly Out Of Scope
 
-Hunk selection is not part of the main Fossil UX because Fossil has no native hunk commit mechanism. Do not support it unless file-level check-ins are solid and users still need it.
-
-If implemented, it would need an fzed-managed overlay, because Fossil has no index:
-
-- Baseline text: loaded from the current Fossil check-in
-- Worktree text: loaded from disk
-- Selected text: generated from baseline plus selected hunks
-- Unselected text: derived as worktree minus selected overlay
-
-Commit algorithm candidate:
-
-1. Resolve the Fossil repository path and current check-in with `fossil info`.
-2. Create a temporary checkout of the same repository at the same check-in.
-3. Write the staged overlay files into the temporary checkout.
-4. Run `fossil add`/`rm` as needed in the temporary checkout.
-5. Run `fossil commit -m MESSAGE FILE...` there.
-6. Update the user's checkout to the new check-in, allowing Fossil to merge the still-uncommitted local edits.
-7. Detect conflicts and surface them in the existing conflict UI.
-
-This needs careful tests for overlapping hunks, binary files, renames, deleted files, and local edits that happen while the commit is running.
+- Hunk-level include/exclude or hunk-level check-in emulation. Fossil commits named files or all eligible changes; fzed should preserve that model rather than adding a synthetic index.
+- Managed `fossil ui` process control. Fossil's web UI can still be launched outside fzed, but fzed will not own server lifetimes or port allocation.
 
 ## Main Risks
 
-- Optional hunk emulation is the main technical risk because Fossil has no staging area.
-- Temporary-checkout commits for optional hunk emulation must be robust against concurrent user edits.
 - Fossil rename/copy metadata may not map cleanly to Git-oriented status codes.
 - Upstream Zed may keep changing `crates/git` rapidly, so broad renames should wait.
 - Shelling out is simplest and safest initially, but performance should be measured on large Fossil checkouts.
