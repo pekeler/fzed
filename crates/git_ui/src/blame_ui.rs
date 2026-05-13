@@ -3,7 +3,11 @@ use crate::{
     commit_view::CommitView,
 };
 use editor::{BlameRenderer, Editor, hover_markdown_style};
-use git::{blame::BlameEntry, commit::ParsedCommitMessage, repository::CommitSummary};
+use git::{
+    blame::BlameEntry,
+    commit::ParsedCommitMessage,
+    repository::{CommitSummary, RepositoryKind},
+};
 use gpui::{
     ClipboardItem, Entity, Hsla, MouseButton, ScrollHandle, Subscription, TextStyle,
     TextStyleRefinement, UnderlineStyle, WeakEntity, prelude::*,
@@ -19,6 +23,14 @@ use workspace::Workspace;
 const GIT_BLAME_MAX_AUTHOR_CHARS_DISPLAYED: usize = 20;
 
 pub struct GitBlameRenderer;
+
+fn copy_blame_hash_label(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Copy Check-in Hash"
+    } else {
+        "Copy Commit SHA"
+    }
+}
 
 impl BlameRenderer for GitBlameRenderer {
     fn max_author_length(&self) -> usize {
@@ -42,6 +54,7 @@ impl BlameRenderer for GitBlameRenderer {
         let short_commit_id = blame_entry.sha.display_short();
         let author_name = blame_entry.author.as_deref().unwrap_or("<no name>");
         let name = util::truncate_and_trailoff(author_name, GIT_BLAME_MAX_AUTHOR_CHARS_DISPLAYED);
+        let repository_kind = repository.read(cx).kind();
 
         let avatar = if ProjectSettings::get_global(cx).git.blame.show_avatar {
             let author_email = blame_entry.author_mail.as_ref().map(|email| {
@@ -96,6 +109,7 @@ impl BlameRenderer for GitBlameRenderer {
                                 deploy_blame_entry_context_menu(
                                     &blame_entry,
                                     details.as_ref(),
+                                    repository_kind,
                                     editor.clone(),
                                     event.position,
                                     window,
@@ -187,6 +201,7 @@ impl BlameRenderer for GitBlameRenderer {
             .committer_time
             .and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok())
             .unwrap_or(OffsetDateTime::now_utc());
+        let repository_kind = repository.read(cx).kind();
 
         let sha = blame.sha.to_string().into();
         let author: SharedString = blame
@@ -361,7 +376,9 @@ impl BlameRenderer for GitBlameRenderer {
                                             .child(Divider::vertical())
                                             .child(
                                                 CopyButton::new("copy-blame-sha", sha.to_string())
-                                                    .tooltip_label("Copy SHA"),
+                                                    .tooltip_label(copy_blame_hash_label(
+                                                        repository_kind,
+                                                    )),
                                             ),
                                     ),
                             ),
@@ -394,6 +411,7 @@ impl BlameRenderer for GitBlameRenderer {
 fn deploy_blame_entry_context_menu(
     blame_entry: &BlameEntry,
     details: Option<&ParsedCommitMessage>,
+    repository_kind: RepositoryKind,
     editor: Entity<Editor>,
     position: gpui::Point<Pixels>,
     window: &mut Window,
@@ -402,9 +420,13 @@ fn deploy_blame_entry_context_menu(
     let context_menu = ContextMenu::build(window, cx, move |menu, _, _| {
         let sha = format!("{}", blame_entry.sha);
         menu.on_blur_subscription(Subscription::new(|| {}))
-            .entry("Copy Commit SHA", None, move |_, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
-            })
+            .entry(
+                copy_blame_hash_label(repository_kind),
+                None,
+                move |_, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
+                },
+            )
             .when_some(
                 details.and_then(|details| details.permalink.clone()),
                 |this, url| {
@@ -435,5 +457,22 @@ fn blame_entry_relative_timestamp(blame_entry: &BlameEntry) -> String {
             )
         }
         Err(_) => "Error parsing date".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fossil_blame_hash_label() {
+        assert_eq!(
+            copy_blame_hash_label(RepositoryKind::Fossil),
+            "Copy Check-in Hash"
+        );
+        assert_eq!(
+            copy_blame_hash_label(RepositoryKind::Git),
+            "Copy Commit SHA"
+        );
     }
 }

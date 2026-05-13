@@ -200,6 +200,70 @@ fn stage_file_action_title(repository_kind: RepositoryKind, staging: StageStatus
     }
 }
 
+fn history_tab_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Timeline"
+    } else {
+        "History"
+    }
+}
+
+fn history_loading_label(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Loading Timeline…"
+    } else {
+        "Loading Commit History…"
+    }
+}
+
+fn history_entry_tooltip_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "View Check-in"
+    } else {
+        "View Commit"
+    }
+}
+
+fn file_history_action_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "View File Timeline"
+    } else {
+        "View File History"
+    }
+}
+
+fn graph_action_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Open Timeline"
+    } else {
+        "Open Git Graph"
+    }
+}
+
+fn generate_commit_message_action_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Generate Check-in Message"
+    } else {
+        "Generate Commit Message"
+    }
+}
+
+fn generating_commit_message_label(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Generating Check-in Message…"
+    } else {
+        "Generating Commit…"
+    }
+}
+
+fn cancel_commit_message_generation_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Cancel Check-in Message Generation"
+    } else {
+        "Cancel Commit Message Generation"
+    }
+}
+
 fn git_panel_context_menu(
     focus_handle: FocusHandle,
     state: GitMenuState,
@@ -4252,6 +4316,8 @@ impl GitPanel {
             return None;
         }
 
+        let repository_kind = self.active_repository_kind(cx);
+
         if self.generate_commit_message_task.is_some() {
             return Some(
                 h_flex()
@@ -4261,14 +4327,16 @@ impl GitPanel {
                             .icon_color(Color::Error)
                             .icon_size(IconSize::Small)
                             .style(ButtonStyle::Tinted(TintColor::Error))
-                            .tooltip(Tooltip::text("Cancel Commit Message Generation"))
+                            .tooltip(Tooltip::text(cancel_commit_message_generation_title(
+                                repository_kind,
+                            )))
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.generate_commit_message_task.take();
                                 cx.notify();
                             })),
                     )
                     .child(
-                        Label::new("Generating Commit…")
+                        Label::new(generating_commit_message_label(repository_kind))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     )
@@ -4281,7 +4349,7 @@ impl GitPanel {
             .configuration_error(model_registry.commit_message_model(cx), cx)
             .is_some();
         let can_commit = self.can_commit(cx);
-        let repository_kind = self.active_repository_kind(cx);
+        let generate_message_title = generate_commit_message_action_title(repository_kind);
 
         let editor_focus_handle = self.commit_editor.focus_handle(cx);
 
@@ -4307,7 +4375,7 @@ impl GitPanel {
                         Tooltip::simple("Configure an LLM provider to generate commit messages", cx)
                     } else {
                         Tooltip::for_action_in(
-                            "Generate Commit Message",
+                            generate_message_title,
                             &git::GenerateCommitMessage,
                             &editor_focus_handle,
                             cx,
@@ -5014,6 +5082,7 @@ impl GitPanel {
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         let active_repository = self.active_repository.as_ref()?;
+        let repository_kind = self.active_repository_kind(cx);
         let branch = active_repository.read(cx).branch.as_ref()?;
         let commit = branch.most_recent_commit.as_ref()?.clone();
         let workspace = self.workspace.clone();
@@ -5098,8 +5167,12 @@ impl GitPanel {
                         .child(
                             panel_icon_button("git-graph-button", IconName::GitGraph)
                                 .icon_size(IconSize::Small)
-                                .tooltip(|_window, cx| {
-                                    Tooltip::for_action("Open Git Graph", &Open, cx)
+                                .tooltip(move |_window, cx| {
+                                    Tooltip::for_action(
+                                        graph_action_title(repository_kind),
+                                        &Open,
+                                        cx,
+                                    )
                                 })
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(Open.boxed_clone(), cx)
@@ -5568,9 +5641,10 @@ impl GitPanel {
                 .action("Open Diff", menu::Confirm.boxed_clone())
                 .action("Open File", menu::SecondaryConfirm.boxed_clone())
                 .when(!is_created, |context_menu| {
-                    context_menu
-                        .separator()
-                        .action("View File History", Box::new(git::FileHistory))
+                    context_menu.separator().action(
+                        file_history_action_title(repository_kind),
+                        Box::new(git::FileHistory),
+                    )
                 })
         });
         self.selected_entry = Some(ix);
@@ -7272,6 +7346,32 @@ mod tests {
         assert_eq!(
             stage_file_action_title(RepositoryKind::Git, StageStatus::Staged),
             "Unstage File"
+        );
+        assert_eq!(history_tab_title(RepositoryKind::Fossil), "Timeline");
+        assert_eq!(
+            history_loading_label(RepositoryKind::Fossil),
+            "Loading Timeline…"
+        );
+        assert_eq!(
+            history_entry_tooltip_title(RepositoryKind::Fossil),
+            "View Check-in"
+        );
+        assert_eq!(
+            file_history_action_title(RepositoryKind::Fossil),
+            "View File Timeline"
+        );
+        assert_eq!(graph_action_title(RepositoryKind::Fossil), "Open Timeline");
+        assert_eq!(
+            generate_commit_message_action_title(RepositoryKind::Fossil),
+            "Generate Check-in Message"
+        );
+        assert_eq!(
+            generating_commit_message_label(RepositoryKind::Fossil),
+            "Generating Check-in Message…"
+        );
+        assert_eq!(
+            cancel_commit_message_generation_title(RepositoryKind::Fossil),
+            "Cancel Check-in Message Generation"
         );
 
         let fossil_with_tracked_changes = GitMenuState {

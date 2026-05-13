@@ -2,7 +2,7 @@ use crate::commit_view::CommitView;
 use editor::hover_markdown_style;
 use futures::Future;
 use git::blame::BlameEntry;
-use git::repository::CommitSummary;
+use git::repository::{CommitSummary, RepositoryKind};
 use git::{GitRemote, commit::ParsedCommitMessage};
 use gpui::{
     AbsoluteLength, App, Asset, Element, Entity, MouseButton, ParentElement, Render, ScrollHandle,
@@ -16,6 +16,14 @@ use theme_settings::ThemeSettings;
 use time::{OffsetDateTime, UtcOffset};
 use ui::{Avatar, CopyButton, Divider, prelude::*, tooltip_container};
 use workspace::Workspace;
+
+fn copy_commit_hash_label(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Copy Check-in Hash"
+    } else {
+        "Copy Commit SHA"
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CommitDetails {
@@ -260,6 +268,7 @@ impl Render for CommitTooltip {
 
         let ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
         let message_max_height = window.line_height() * 12 + (ui_font_size / 0.4);
+        let repository_kind = self.repository.read(cx).kind();
         let repo = self.repository.clone();
         let workspace = self.workspace.clone();
         let commit_summary = CommitSummary {
@@ -376,7 +385,9 @@ impl Render for CommitTooltip {
                                         .child(Divider::vertical())
                                         .child(
                                             CopyButton::new("copy-commit-sha", full_sha)
-                                                .tooltip_label("Copy SHA"),
+                                                .tooltip_label(copy_commit_hash_label(
+                                                    repository_kind,
+                                                )),
                                         ),
                                 ),
                         ),
@@ -402,4 +413,21 @@ fn blame_entry_timestamp(blame_entry: &BlameEntry, format: time_format::Timestam
 
 pub fn blame_entry_relative_timestamp(blame_entry: &BlameEntry) -> String {
     blame_entry_timestamp(blame_entry, time_format::TimestampFormat::Relative)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fossil_commit_tooltip_hash_label() {
+        assert_eq!(
+            copy_commit_hash_label(RepositoryKind::Fossil),
+            "Copy Check-in Hash"
+        );
+        assert_eq!(
+            copy_commit_hash_label(RepositoryKind::Git),
+            "Copy Commit SHA"
+        );
+    }
 }

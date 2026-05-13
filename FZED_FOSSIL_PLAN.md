@@ -380,6 +380,17 @@ Once Fossil works:
   - add `fossil.*` settings
   - consider future `version_control.*` shared settings only where semantics are genuinely shared
 
+Phase 6 first slice is in progress:
+
+- Fossil-visible history surfaces now use timeline/check-in wording in the panel tab, loading state, entry tooltip, file context menu, graph/timeline button, commit/check-in view toolbar, blame/commit tooltip hash copy actions, and "View Commit" modal.
+- Commit message generation copy now switches to "check-in message" for Fossil repositories.
+- Added focused unit tests for the Fossil/Git label split.
+
+Remaining Phase 6 work should be split into small patches:
+
+- Internal `GitRepository`/`GitStore` boundary renames are still deferred until the Fossil behavior stabilizes across more UI paths.
+- Settings names still need an explicit audit before introducing `fossil.*` settings or any shared `version_control.*` settings.
+
 ### Phase 7: Optional Hunk Emulation
 
 Hunk selection is not part of the main Fossil UX because Fossil has no native hunk commit mechanism. Do not support it unless file-level check-ins are solid and users still need it.

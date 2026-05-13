@@ -3,7 +3,7 @@ use buffer_diff::BufferDiff;
 use collections::HashMap;
 use editor::display_map::{BlockPlacement, BlockProperties, BlockStyle};
 use editor::{Addon, Editor, EditorEvent, ExcerptRange, MultiBuffer, multibuffer_context_lines};
-use git::repository::{CommitDetails, CommitDiff, RepoPath, is_binary_content};
+use git::repository::{CommitDetails, CommitDiff, RepoPath, RepositoryKind, is_binary_content};
 use git::status::{FileStatus, StatusCode, TrackedStatus};
 use git::{
     BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, ParsedGitRemote,
@@ -88,6 +88,30 @@ struct GitBlob {
 struct CommitDiffAddon {
     file_statuses: HashMap<language::BufferId, FileStatus>,
     commit_view: WeakEntity<CommitView>,
+}
+
+fn commit_hash_button_label(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Check-in Hash"
+    } else {
+        "Commit SHA"
+    }
+}
+
+fn copy_commit_hash_tooltip_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Copy Check-in Hash"
+    } else {
+        "Copy Commit SHA"
+    }
+}
+
+fn graph_location_tooltip_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Show in Timeline"
+    } else {
+        "Show in Git Graph"
+    }
 }
 
 impl Addon for CommitDiffAddon {
@@ -537,6 +561,7 @@ impl CommitView {
 
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let commit = &self.commit;
+        let repository_kind = self.repository.read(cx).kind();
         let author_name = commit.author_name.clone();
         let author_email = commit.author_email.clone();
         let commit_sha = commit.sha.clone();
@@ -610,7 +635,7 @@ impl CommitView {
             )
             .when(self.stash.is_none(), |this| {
                 this.child(
-                    Button::new("sha", "Commit SHA")
+                    Button::new("sha", commit_hash_button_label(repository_kind))
                         .start_icon(
                             Icon::new(copy_icon)
                                 .size(IconSize::Small)
@@ -619,7 +644,12 @@ impl CommitView {
                         .tooltip({
                             let commit_sha = commit_sha.clone();
                             move |_, cx| {
-                                Tooltip::with_meta("Copy Commit SHA", None, commit_sha.clone(), cx)
+                                Tooltip::with_meta(
+                                    copy_commit_hash_tooltip_title(repository_kind),
+                                    None,
+                                    commit_sha.clone(),
+                                    cx,
+                                )
                             }
                         })
                         .on_click(move |_, _, cx| {
@@ -1113,6 +1143,7 @@ impl Render for CommitViewToolbar {
 
         let commit_view_ref = commit_view.read(cx);
         let is_stash = commit_view_ref.stash.is_some();
+        let repository_kind = commit_view_ref.repository.read(cx).kind();
 
         let (additions, deletions) = commit_view_ref.calculate_changed_lines(cx);
 
@@ -1169,7 +1200,7 @@ impl Render for CommitViewToolbar {
                 this.child(
                     IconButton::new("show-in-git-graph", IconName::GitGraph)
                         .icon_size(IconSize::Small)
-                        .tooltip(Tooltip::text("Show in Git Graph"))
+                        .tooltip(Tooltip::text(graph_location_tooltip_title(repository_kind)))
                         .on_click(move |_, window, cx| {
                             window.dispatch_action(
                                 Box::new(crate::git_panel::OpenAtCommit {
@@ -1225,4 +1256,35 @@ fn stash_matches_index(sha: &str, stash_index: usize, repo: &Repository) -> bool
         .find(|entry| entry.index == stash_index)
         .map(|entry| entry.oid.to_string() == sha)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fossil_commit_view_labels() {
+        assert_eq!(
+            commit_hash_button_label(RepositoryKind::Fossil),
+            "Check-in Hash"
+        );
+        assert_eq!(
+            copy_commit_hash_tooltip_title(RepositoryKind::Fossil),
+            "Copy Check-in Hash"
+        );
+        assert_eq!(
+            graph_location_tooltip_title(RepositoryKind::Fossil),
+            "Show in Timeline"
+        );
+
+        assert_eq!(commit_hash_button_label(RepositoryKind::Git), "Commit SHA");
+        assert_eq!(
+            copy_commit_hash_tooltip_title(RepositoryKind::Git),
+            "Copy Commit SHA"
+        );
+        assert_eq!(
+            graph_location_tooltip_title(RepositoryKind::Git),
+            "Show in Git Graph"
+        );
+    }
 }

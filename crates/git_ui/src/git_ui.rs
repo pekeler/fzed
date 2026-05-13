@@ -456,6 +456,30 @@ struct RefPickerModal {
     _editor_subscription: Subscription,
 }
 
+fn ref_picker_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "View Check-in"
+    } else {
+        "View Commit"
+    }
+}
+
+fn ref_picker_placeholder(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Enter check-in hash..."
+    } else {
+        "Enter git ref..."
+    }
+}
+
+fn ref_picker_error_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "View check-in failed"
+    } else {
+        "View commit failed"
+    }
+}
+
 impl RefPickerModal {
     fn new(
         repo: Entity<Repository>,
@@ -463,9 +487,10 @@ impl RefPickerModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let repository_kind = repo.read(cx).kind();
         let editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Enter git ref...", window, cx);
+            editor.set_placeholder_text(ref_picker_placeholder(repository_kind), window, cx);
             editor
         });
 
@@ -545,6 +570,7 @@ impl RefPickerModal {
 
         let repo = self.repo.clone();
         let workspace = self.workspace.clone();
+        let repository_kind = self.repo.read(cx).kind();
 
         window
             .spawn(cx, async move |cx| -> anyhow::Result<()> {
@@ -567,7 +593,7 @@ impl RefPickerModal {
                     }
                     Ok(Err(_)) | Err(_) => {
                         workspace.update(cx, |workspace, cx| {
-                            let error = anyhow::anyhow!("View commit failed");
+                            let error = anyhow::anyhow!(ref_picker_error_title(repository_kind));
                             Self::show_git_error_toast(&git_ref_string, error, workspace, cx);
                         });
                     }
@@ -600,6 +626,7 @@ impl Focusable for RefPickerModal {
 
 impl Render for RefPickerModal {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let repository_kind = self.repo.read(cx).kind();
         let has_commit_details = self.commit_details.is_some();
         let commit_preview = self.commit_details.as_ref().map(|details| {
             let commit_time = OffsetDateTime::from_unix_timestamp(details.commit_timestamp)
@@ -650,7 +677,9 @@ impl Render for RefPickerModal {
                     .w_full()
                     .gap_1p5()
                     .child(Icon::new(IconName::Hash).size(IconSize::XSmall))
-                    .child(Headline::new("View Commit").size(HeadlineSize::XSmall)),
+                    .child(
+                        Headline::new(ref_picker_title(repository_kind)).size(HeadlineSize::XSmall),
+                    ),
             )
             .child(div().px_3().w_full().child(self.editor.clone()))
             .when_some(commit_preview, |el, preview| {
@@ -1230,6 +1259,29 @@ mod view_commit_tests {
             WorktreeSettings::register(cx);
             WorkspaceSettings::register(cx);
         });
+    }
+
+    #[test]
+    fn test_fossil_ref_picker_labels() {
+        assert_eq!(ref_picker_title(RepositoryKind::Fossil), "View Check-in");
+        assert_eq!(
+            ref_picker_placeholder(RepositoryKind::Fossil),
+            "Enter check-in hash..."
+        );
+        assert_eq!(
+            ref_picker_error_title(RepositoryKind::Fossil),
+            "View check-in failed"
+        );
+
+        assert_eq!(ref_picker_title(RepositoryKind::Git), "View Commit");
+        assert_eq!(
+            ref_picker_placeholder(RepositoryKind::Git),
+            "Enter git ref..."
+        );
+        assert_eq!(
+            ref_picker_error_title(RepositoryKind::Git),
+            "View commit failed"
+        );
     }
 
     async fn setup_git_repo(cx: &mut TestAppContext) -> Arc<FakeFs> {
