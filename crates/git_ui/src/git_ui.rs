@@ -38,6 +38,7 @@ pub mod commit_tooltip;
 pub mod commit_view;
 mod conflict_view;
 pub mod file_diff_view;
+pub mod fossil_setup;
 pub mod git_panel;
 mod git_panel_settings;
 pub mod git_picker;
@@ -112,6 +113,21 @@ pub fn init(cx: &mut App) {
         git_panel::register(workspace);
         repository_selector::register(workspace);
         git_picker::register(workspace);
+
+        workspace.register_action(|workspace, _: &git::fossil_actions::Init, window, cx| {
+            fossil_setup::init_repository(workspace.weak_handle(), window, cx);
+        });
+        workspace.register_action(|workspace, _: &git::fossil_actions::Clone, window, cx| {
+            let workspace_handle = workspace.weak_handle();
+            workspace.toggle_modal(window, cx, |window, cx| {
+                fossil_setup::FossilCloneModal::show(workspace_handle, window, cx)
+            });
+        });
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::OpenRepository, window, cx| {
+                fossil_setup::open_existing_repository(workspace.weak_handle(), window, cx);
+            },
+        );
 
         workspace.register_action(
             |workspace, action: &zed_actions::CreateWorktree, window, cx| {

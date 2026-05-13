@@ -122,6 +122,12 @@ pub mod fossil_actions {
     actions!(
         fossil,
         [
+            /// Initializes a new Fossil repository and opens a checkout.
+            Init,
+            /// Clones a remote Fossil repository and opens a checkout.
+            Clone,
+            /// Opens an existing Fossil repository database into a checkout.
+            OpenRepository,
             /// Opens the Fossil check-in modal for the active checkout.
             CheckIn,
             /// Generates a Fossil check-in message using AI.
@@ -403,6 +409,12 @@ mod tests {
         assert_eq!(
             fossil_actions::CleanExtras::name_for_type(),
             "fossil::CleanExtras"
+        );
+        assert_eq!(fossil_actions::Init::name_for_type(), "fossil::Init");
+        assert_eq!(fossil_actions::Clone::name_for_type(), "fossil::Clone");
+        assert_eq!(
+            fossil_actions::OpenRepository::name_for_type(),
+            "fossil::OpenRepository"
         );
         assert_eq!(fossil_actions::Sync::name_for_type(), "fossil::Sync");
         assert_eq!(fossil_actions::Update::name_for_type(), "fossil::Update");
