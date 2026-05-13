@@ -22,7 +22,7 @@ Installed or verified on 2026-05-12:
 - Rust targets: `aarch64-apple-darwin`, `wasm32-wasip2`, `wasm32-unknown-unknown`, `x86_64-unknown-linux-musl`
 - Fossil: `2.27 [99675884a9] 2025-09-30`
 - Xcode: `26.5`, selected at `/Applications/Xcode.app/Contents/Developer`
-- Metal compiler: available via `xcrun --find metal`
+- Metal compiler: Xcode reports the Metal toolchain component installed, and the mounted toolchain binary runs directly. The default `xcrun metal` wrapper still reports a missing Metal Toolchain on this machine, so app builds should currently use the runtime shader fallback.
 - CMake: `4.3.2`, installed via Homebrew
 
 Validation so far:
@@ -66,6 +66,14 @@ Validation so far:
   - `cargo test -p worktree --features test-support fossil_repository_detection`
   - `cargo test -p proto split_repository_update`
   - `git diff --check`
+- Phase 6 command alias/scope slice compiles:
+  - `cargo test -p git fossil --lib`
+  - `cargo test -p project fossil --lib`
+  - `cargo test -p git_ui fossil --lib`
+  - `cargo test -p worktree --features test-support fossil_repository_detection`
+  - `cargo test -p proto split_repository_update`
+  - `cargo build -p zed --features gpui_platform/runtime_shaders`
+  - Debug binary: `/Users/pekeler/Projects/FZed/target/debug/zed`
 
 ## Goal
 
