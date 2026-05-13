@@ -384,6 +384,7 @@ Phase 6 first slice is in progress:
 
 - Fossil-visible history surfaces now use timeline/check-in wording in the panel tab, loading state, entry tooltip, file context menu, graph/timeline button, commit/check-in view toolbar, blame/commit tooltip hash copy actions, and "View Commit" modal.
 - Commit message generation copy now switches to "check-in message" for Fossil repositories.
+- Added first-class `fossil::CheckIn`, `fossil::IncludeAll`, `fossil::ExcludeAll`, `fossil::Sync`, `fossil::Update`, and `fossil::ViewCheckIn` actions that route to the existing Fossil-aware panel behavior while leaving Git actions intact.
 - Added focused unit tests for the Fossil/Git label split.
 
 Remaining Phase 6 work should be split into small patches:

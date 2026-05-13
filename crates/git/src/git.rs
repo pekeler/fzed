@@ -116,6 +116,28 @@ actions!(
     ]
 );
 
+pub mod fossil_actions {
+    use gpui::actions;
+
+    actions!(
+        fossil,
+        [
+            /// Opens the Fossil check-in modal for the active checkout.
+            CheckIn,
+            /// Includes all changed paths in the next Fossil check-in.
+            IncludeAll,
+            /// Excludes all selected paths from the next Fossil check-in.
+            ExcludeAll,
+            /// Synchronizes the active Fossil checkout with its remote.
+            Sync,
+            /// Updates the active Fossil checkout.
+            Update,
+            /// Opens a Fossil check-in by hash.
+            ViewCheckIn,
+        ]
+    );
+}
+
 /// Renames a git branch.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = git)]
@@ -271,5 +293,30 @@ impl RunHook {
             0 => Some(Self::PreCommit),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::Action;
+
+    #[test]
+    fn fossil_action_names_are_first_class() {
+        assert_eq!(fossil_actions::CheckIn::name_for_type(), "fossil::CheckIn");
+        assert_eq!(
+            fossil_actions::IncludeAll::name_for_type(),
+            "fossil::IncludeAll"
+        );
+        assert_eq!(
+            fossil_actions::ExcludeAll::name_for_type(),
+            "fossil::ExcludeAll"
+        );
+        assert_eq!(fossil_actions::Sync::name_for_type(), "fossil::Sync");
+        assert_eq!(fossil_actions::Update::name_for_type(), "fossil::Update");
+        assert_eq!(
+            fossil_actions::ViewCheckIn::name_for_type(),
+            "fossil::ViewCheckIn"
+        );
     }
 }

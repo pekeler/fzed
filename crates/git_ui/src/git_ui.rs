@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use commit_modal::CommitModal;
+use commit_modal::{CommitModal, ForceMode};
 use editor::{Editor, actions::DiffClipboardWithSelectionData};
 
 use ui::{
@@ -54,6 +54,30 @@ pub mod worktree_service;
 
 pub use conflict_view::MergeConflictIndicator;
 
+fn workspace_active_repository_kind(workspace: &Workspace, cx: &App) -> RepositoryKind {
+    workspace
+        .panel::<GitPanel>(cx)
+        .map(|panel| panel.read(cx).active_repository_kind(cx))
+        .unwrap_or_default()
+}
+
+fn with_fossil_panel(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    update: impl FnOnce(&mut GitPanel, &mut Window, &mut Context<GitPanel>),
+) {
+    let Some(panel) = workspace.panel::<GitPanel>(cx) else {
+        return;
+    };
+
+    panel.update(cx, |panel, cx| {
+        if panel.active_repository_kind(cx).is_fossil() {
+            update(panel, window, cx);
+        }
+    });
+}
+
 pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
@@ -78,6 +102,32 @@ pub fn init(cx: &mut App) {
         workspace.register_action(
             |workspace, action: &zed_actions::SwitchWorktree, window, cx| {
                 worktree_service::handle_switch_worktree(workspace, action, window, None, cx);
+            },
+        );
+        workspace.register_action(|workspace, _: &git::fossil_actions::CheckIn, window, cx| {
+            if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                CommitModal::toggle(workspace, Some(ForceMode::Commit), window, cx);
+            }
+        });
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::IncludeAll, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.stage_all(&git::StageAll, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::ExcludeAll, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.unstage_all(&git::UnstageAll, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::ViewCheckIn, window, cx| {
+                if workspace_active_repository_kind(workspace, cx).is_fossil() {
+                    show_ref_picker(workspace, &git::ViewCommit, window, cx);
+                }
             },
         );
 
@@ -196,6 +246,16 @@ pub fn init(cx: &mut App) {
                 };
                 panel.update(cx, |panel, cx| {
                     panel.pull(true, window, cx);
+                });
+            });
+            workspace.register_action(|workspace, _: &git::fossil_actions::Sync, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.push(false, false, window, cx);
+                });
+            });
+            workspace.register_action(|workspace, _: &git::fossil_actions::Update, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.pull(false, window, cx);
                 });
             });
         }
