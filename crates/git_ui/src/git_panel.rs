@@ -2915,8 +2915,17 @@ impl GitPanel {
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
+        let repository_kind = repo.read(cx).kind();
         telemetry::event!("Git Fetched");
-        let askpass = self.askpass_delegate("git fetch", window, cx);
+        let askpass = self.askpass_delegate(
+            if repository_kind.is_fossil() {
+                "fossil sync"
+            } else {
+                "git fetch"
+            },
+            window,
+            cx,
+        );
         let this = cx.weak_entity();
 
         let fetch_options = if is_fetch_all {
@@ -2936,9 +2945,19 @@ impl GitPanel {
 
                 let remote_message = fetch.await?;
                 this.update(cx, |this, cx| {
-                    let action = match fetch_options {
-                        FetchOptions::All => RemoteAction::Fetch(None),
-                        FetchOptions::Remote(remote) => RemoteAction::Fetch(Some(remote)),
+                    let action = if repository_kind.is_fossil() {
+                        RemoteAction::FossilSync(match fetch_options {
+                            FetchOptions::All => repo
+                                .read(cx)
+                                .fossil_sync_state()
+                                .and_then(|state| state.default_remote.clone()),
+                            FetchOptions::Remote(remote) => Some(remote.name.clone()),
+                        })
+                    } else {
+                        match fetch_options {
+                            FetchOptions::All => RemoteAction::Fetch(None),
+                            FetchOptions::Remote(remote) => RemoteAction::Fetch(Some(remote)),
+                        }
                     };
                     match remote_message {
                         Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
@@ -3057,6 +3076,33 @@ impl GitPanel {
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
+        let repository_kind = repo.read(cx).kind();
+        if repository_kind.is_fossil() {
+            telemetry::event!("Git Pulled");
+            cx.spawn_in(window, async move |this, cx| {
+                let askpass = this.update_in(cx, |this, window, cx| {
+                    this.askpass_delegate("fossil update", window, cx)
+                })?;
+
+                let update = repo.update(cx, |repo, cx| {
+                    repo.pull(None, "default".into(), false, askpass, cx)
+                });
+                let remote_message = update.await?;
+                let action = RemoteAction::FossilUpdate;
+                this.update(cx, |this, cx| match remote_message {
+                    Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
+                    Err(e) => {
+                        log::error!("Error while updating Fossil checkout {:?}", e);
+                        this.show_error_toast(action.name(), e, cx)
+                    }
+                })
+                .ok();
+
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+            return;
+        }
         let Some(branch) = repo.read(cx).branch.as_ref() else {
             return;
         };
@@ -3120,6 +3166,18 @@ impl GitPanel {
         let Some(repo) = self.active_repository.clone() else {
             return;
         };
+        if repo.read(cx).kind().is_fossil() {
+            if force_push {
+                self.show_error_toast(
+                    "sync",
+                    anyhow::anyhow!("Fossil sync does not support force-push"),
+                    cx,
+                );
+                return;
+            }
+            self.fetch(true, window, cx);
+            return;
+        }
         let Some(branch) = repo.read(cx).branch.as_ref() else {
             return;
         };
@@ -4345,6 +4403,16 @@ impl GitPanel {
             .unwrap_or_default()
     }
 
+    pub(crate) fn fossil_commit_command(&self, cx: &App) -> String {
+        fossil_command_with_sync_state(
+            "fossil commit",
+            self.active_repository
+                .as_ref()
+                .and_then(|repository| repository.read(cx).fossil_sync_state().cloned())
+                .as_ref(),
+        )
+    }
+
     fn can_mutate_active_repository(&self, cx: &App) -> bool {
         !self.active_repository_kind(cx).is_fossil()
     }
@@ -4552,7 +4620,10 @@ impl GitPanel {
     }
 
     pub(crate) fn render_remote_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let branch = self.active_repository.as_ref()?.read(cx).branch.clone();
+        let (branch, repository_kind) = {
+            let repository = self.active_repository.as_ref()?.read(cx);
+            (repository.branch.clone(), repository.kind())
+        };
         if !self.can_push_and_pull(cx) {
             return None;
         }
@@ -4566,6 +4637,7 @@ impl GitPanel {
                     this.children(render_remote_button(
                         "remote-button",
                         &branch,
+                        repository_kind,
                         focus_handle,
                         true,
                     ))
@@ -4778,6 +4850,7 @@ impl GitPanel {
         let amend = self.amend_pending();
         let signoff = self.signoff_enabled;
         let repository_kind = self.active_repository_kind(cx);
+        let fossil_commit_command = self.fossil_commit_command(cx);
 
         let label_color = if self.pending_commit.is_some() {
             Color::Disabled
@@ -4829,7 +4902,7 @@ impl GitPanel {
                     move |_window, cx| {
                         if can_commit {
                             let command = if repository_kind.is_fossil() {
-                                "fossil commit".to_string()
+                                fossil_commit_command.clone()
                             } else {
                                 format!(
                                     "git commit{}{}",
@@ -6405,6 +6478,28 @@ pub(crate) fn panel_editor_style(monospace: bool, window: &Window, cx: &App) -> 
         syntax: cx.theme().syntax().clone(),
         ..Default::default()
     }
+}
+
+pub(crate) fn fossil_command_with_sync_state(
+    command: &str,
+    sync_state: Option<&FossilSyncState>,
+) -> String {
+    let Some(sync_state) = sync_state else {
+        return command.to_string();
+    };
+
+    let autosync = sync_state
+        .autosync
+        .as_ref()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let remote = sync_state
+        .default_remote
+        .as_ref()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "off".to_string());
+
+    format!("{command}  |  autosync: {autosync}; remote: {remote}")
 }
 
 struct GitPanelMessageTooltip {

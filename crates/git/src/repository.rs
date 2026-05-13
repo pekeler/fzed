@@ -523,6 +523,13 @@ pub struct Remote {
     pub name: SharedString,
 }
 
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+pub struct FossilSyncState {
+    pub autosync: Option<SharedString>,
+    pub default_remote: Option<SharedString>,
+    pub repository: Option<SharedString>,
+}
+
 pub enum ResetMode {
     /// Reset the branch pointer, leave index and worktree unchanged (this will make it look like things that were
     /// committed are now staged).
@@ -778,6 +785,10 @@ pub trait GitRepository: Send + Sync {
 
     /// Returns the URL of the remote with the given name.
     fn remote_url(&self, name: &str) -> BoxFuture<'_, Option<String>>;
+
+    fn fossil_sync_state(&self) -> BoxFuture<'_, Result<Option<FossilSyncState>>> {
+        async move { Ok(None) }.boxed()
+    }
 
     /// Resolve a list of refs to SHAs.
     fn revparse_batch(&self, revs: Vec<String>) -> BoxFuture<'_, Result<Vec<Option<String>>>>;

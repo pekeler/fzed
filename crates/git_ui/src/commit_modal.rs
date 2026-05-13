@@ -1,5 +1,7 @@
 use crate::branch_picker::{self, BranchList};
-use crate::git_panel::{GitPanel, commit_message_editor, panel_editor_style};
+use crate::git_panel::{
+    GitPanel, commit_message_editor, fossil_command_with_sync_state, panel_editor_style,
+};
 use crate::git_panel_settings::GitPanelSettings;
 use git::repository::CommitOptions;
 use git::{Amend, Commit, GenerateCommitMessage, Signoff};
@@ -376,6 +378,13 @@ impl CommitModal {
             .as_ref()
             .map(|repo| repo.read(cx).kind())
             .unwrap_or_default();
+        let fossil_commit_command = active_repo
+            .as_ref()
+            .map(|repo| {
+                let repo = repo.read(cx);
+                fossil_command_with_sync_state("fossil commit", repo.fossil_sync_state())
+            })
+            .unwrap_or_else(|| "fossil commit".to_string());
 
         let branch_picker_button = panel_button(branch)
             .start_icon(
@@ -479,7 +488,7 @@ impl CommitModal {
                             move |_window, cx| {
                                 if can_commit {
                                     let command = if repository_kind.is_fossil() {
-                                        "fossil commit".to_string()
+                                        fossil_commit_command.clone()
                                     } else {
                                         format!(
                                             "git commit{}{}",

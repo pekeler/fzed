@@ -34,10 +34,10 @@ use git::{
     parse_git_remote_url,
     repository::{
         Branch, CommitData, CommitDetails, CommitDiff, CommitFile, CommitOptions,
-        CreateWorktreeTarget, DiffType, FetchOptions, GitCommitTemplate, GitRepository,
-        GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote,
-        RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode, SearchCommitArgs,
-        UpstreamTrackingStatus, Worktree as GitWorktree, delete_branch_flag,
+        CreateWorktreeTarget, DiffType, FetchOptions, FossilSyncState, GitCommitTemplate,
+        GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
+        PushOptions, Remote, RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode,
+        SearchCommitArgs, UpstreamTrackingStatus, Worktree as GitWorktree, delete_branch_flag,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -325,6 +325,7 @@ pub struct RepositorySnapshot {
     pub stash_entries: GitStash,
     pub linked_worktrees: Arc<[GitWorktree]>,
     pub fossil_included_paths: Arc<[RepoPath]>,
+    pub fossil_sync_state: Option<FossilSyncState>,
 }
 
 type JobId = u64;
@@ -4171,6 +4172,7 @@ impl RepositorySnapshot {
             stash_entries: Default::default(),
             linked_worktrees: Arc::from([]),
             fossil_included_paths: Arc::from([]),
+            fossil_sync_state: None,
             path_style,
         }
     }
@@ -4222,6 +4224,10 @@ impl RepositorySnapshot {
                 .iter()
                 .map(|path| path.to_proto())
                 .collect(),
+            fossil_sync_state: self
+                .fossil_sync_state
+                .as_ref()
+                .map(fossil_sync_state_to_proto),
         }
     }
 
@@ -4311,6 +4317,10 @@ impl RepositorySnapshot {
                 .iter()
                 .map(|path| path.to_proto())
                 .collect(),
+            fossil_sync_state: self
+                .fossil_sync_state
+                .as_ref()
+                .map(fossil_sync_state_to_proto),
         }
     }
 
@@ -4527,6 +4537,10 @@ impl Repository {
 
     pub fn fossil_path_included_for_check_in(&self, path: &RepoPath) -> bool {
         self.snapshot.kind.is_fossil() && self.fossil_included_paths.contains(path)
+    }
+
+    pub fn fossil_sync_state(&self) -> Option<&FossilSyncState> {
+        self.snapshot.fossil_sync_state.as_ref()
     }
 
     fn sync_fossil_included_paths_snapshot(&mut self) {
@@ -6712,14 +6726,28 @@ impl Repository {
         let askpass_delegates = self.askpass_delegates.clone();
         let askpass_id = util::post_inc(&mut self.latest_askpass_id);
         let id = self.id;
+        let this = self.this.clone();
+        let status = if self.snapshot.kind.is_fossil() {
+            "fossil sync"
+        } else {
+            "git fetch"
+        };
 
-        self.send_job(Some("git fetch".into()), move |git_repo, cx| async move {
+        self.send_job(Some(status.into()), move |git_repo, mut cx| async move {
             match git_repo {
                 RepositoryState::Local(LocalRepositoryState {
                     backend,
                     environment,
                     ..
-                }) => backend.fetch(fetch_options, askpass, environment, cx).await,
+                }) => {
+                    let result = backend
+                        .fetch(fetch_options, askpass, environment, cx.clone())
+                        .await;
+                    if result.is_ok() {
+                        refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
+                    }
+                    result
+                }
                 RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                     askpass_delegates.lock().insert(askpass_id, askpass);
                     let _defer = util::defer(|| {
@@ -6757,6 +6785,7 @@ impl Repository {
         let askpass_delegates = self.askpass_delegates.clone();
         let askpass_id = util::post_inc(&mut self.latest_askpass_id);
         let id = self.id;
+        let is_fossil = self.snapshot.kind.is_fossil();
 
         let args = options
             .map(|option| match option {
@@ -6776,7 +6805,14 @@ impl Repository {
 
         let this = cx.weak_entity();
         self.send_job(
-            Some(format!("git push {} {} {}:{}", args, remote, branch, remote_branch).into()),
+            Some(
+                if is_fossil {
+                    "fossil sync".to_string()
+                } else {
+                    format!("git push {} {} {}:{}", args, remote, branch, remote_branch)
+                }
+                .into(),
+            ),
             move |git_repo, mut cx| async move {
                 match git_repo {
                     RepositoryState::Local(LocalRepositoryState {
@@ -6810,6 +6846,9 @@ impl Repository {
                                     .unbounded_send(DownstreamUpdate::UpdateRepository(snapshot))
                                     .ok();
                             }
+                        }
+                        if result.is_ok() {
+                            refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
                         }
                         result
                     }
@@ -6858,33 +6897,47 @@ impl Repository {
         let askpass_delegates = self.askpass_delegates.clone();
         let askpass_id = util::post_inc(&mut self.latest_askpass_id);
         let id = self.id;
+        let is_fossil = self.snapshot.kind.is_fossil();
+        let this = self.this.clone();
 
-        let mut status = "git pull".to_string();
-        if rebase {
-            status.push_str(" --rebase");
-        }
-        status.push_str(&format!(" {}", remote));
-        if let Some(b) = &branch {
-            status.push_str(&format!(" {}", b));
-        }
+        let status = if is_fossil {
+            branch
+                .as_ref()
+                .map(|branch| format!("fossil update {}", branch))
+                .unwrap_or_else(|| "fossil update".to_string())
+        } else {
+            let mut status = "git pull".to_string();
+            if rebase {
+                status.push_str(" --rebase");
+            }
+            status.push_str(&format!(" {}", remote));
+            if let Some(b) = &branch {
+                status.push_str(&format!(" {}", b));
+            }
+            status
+        };
 
-        self.send_job(Some(status.into()), move |git_repo, cx| async move {
+        self.send_job(Some(status.into()), move |git_repo, mut cx| async move {
             match git_repo {
                 RepositoryState::Local(LocalRepositoryState {
                     backend,
                     environment,
                     ..
                 }) => {
-                    backend
+                    let result = backend
                         .pull(
                             branch.as_ref().map(|b| b.to_string()),
                             remote.to_string(),
                             rebase,
                             askpass,
                             environment.clone(),
-                            cx,
+                            cx.clone(),
                         )
-                        .await
+                        .await;
+                    if result.is_ok() {
+                        refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
+                    }
+                    result
                 }
                 RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                     askpass_delegates.lock().insert(askpass_id, askpass);
@@ -7186,14 +7239,22 @@ impl Repository {
         path: PathBuf,
     ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        let is_fossil = self.snapshot.kind.is_fossil();
+        let this = self.this.clone();
         let job_description = match target.branch_name() {
+            Some(branch_name) if is_fossil => format!("fossil open: {branch_name}"),
             Some(branch_name) => format!("git worktree add: {branch_name}"),
+            None if is_fossil => "fossil open".to_string(),
             None => "git worktree add (detached)".to_string(),
         };
-        self.send_job(Some(job_description.into()), move |repo, _cx| async move {
+        self.send_job(Some(job_description.into()), move |repo, mut cx| async move {
             match repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    backend.create_worktree(target, path).await
+                    let result = backend.create_worktree(target, path).await;
+                    if result.is_ok() {
+                        refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
+                    }
+                    result
                 }
                 RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                     let (name, commit, use_existing_branch) = match target {
@@ -7243,17 +7304,25 @@ impl Repository {
         worktree_path: PathBuf,
         create: bool,
     ) -> oneshot::Receiver<Result<()>> {
-        let description = if create {
+        let is_fossil = self.snapshot.kind.is_fossil();
+        let this = self.this.clone();
+        let description = if is_fossil {
+            format!("fossil update {branch_name}")
+        } else if create {
             format!("git checkout -b {branch_name}")
         } else {
             format!("git checkout {branch_name}")
         };
-        self.send_job(Some(description.into()), move |repo, _cx| async move {
+        self.send_job(Some(description.into()), move |repo, mut cx| async move {
             match repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    backend
+                    let result = backend
                         .checkout_branch_in_worktree(branch_name, worktree_path, create)
-                        .await
+                        .await;
+                    if result.is_ok() {
+                        refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
+                    }
+                    result
                 }
                 RepositoryState::Remote(_) => {
                     log::warn!("checkout_branch_in_worktree not supported for remote repositories");
@@ -7637,15 +7706,28 @@ impl Repository {
         base_branch: Option<String>,
     ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
-        let status_msg = if let Some(ref base) = base_branch {
+        let is_fossil = self.snapshot.kind.is_fossil();
+        let this = self.this.clone();
+        let status_msg = if is_fossil {
+            if let Some(ref base) = base_branch {
+                format!("fossil branch new {branch_name} {base}")
+            } else {
+                format!("fossil branch new {branch_name} current")
+            }
+            .into()
+        } else if let Some(ref base) = base_branch {
             format!("git switch -c {branch_name} {base}").into()
         } else {
             format!("git switch -c {branch_name}").into()
         };
-        self.send_job(Some(status_msg), move |repo, _cx| async move {
+        self.send_job(Some(status_msg), move |repo, mut cx| async move {
             match repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    backend.create_branch(branch_name, base_branch).await
+                    let result = backend.create_branch(branch_name, base_branch).await;
+                    if result.is_ok() {
+                        refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
+                    }
+                    result
                 }
                 RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                     client
@@ -7665,12 +7747,25 @@ impl Repository {
 
     pub fn change_branch(&mut self, branch_name: String) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        let is_fossil = self.snapshot.kind.is_fossil();
+        let this = self.this.clone();
         self.send_job(
-            Some(format!("git switch {branch_name}").into()),
-            move |repo, _cx| async move {
+            Some(
+                if is_fossil {
+                    format!("fossil update {branch_name}")
+                } else {
+                    format!("git switch {branch_name}")
+                }
+                .into(),
+            ),
+            move |repo, mut cx| async move {
                 match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        backend.change_branch(branch_name).await
+                        let result = backend.change_branch(branch_name).await;
+                        if result.is_ok() {
+                            refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
+                        }
+                        result
                     }
                     RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                         client
@@ -7894,6 +7989,8 @@ impl Repository {
         self.snapshot.linked_worktrees = new_linked_worktrees;
         self.snapshot.remote_upstream_url = update.remote_upstream_url;
         self.snapshot.remote_origin_url = update.remote_origin_url;
+        self.snapshot.fossil_sync_state =
+            update.fossil_sync_state.map(fossil_sync_state_from_proto);
         let new_fossil_included_paths = update
             .fossil_included_paths
             .iter()
@@ -8833,6 +8930,22 @@ fn repository_kind_from_proto(kind: Option<i32>) -> RepositoryKind {
     }
 }
 
+fn fossil_sync_state_to_proto(state: &FossilSyncState) -> proto::FossilSyncState {
+    proto::FossilSyncState {
+        autosync: state.autosync.as_ref().map(|value| value.to_string()),
+        default_remote: state.default_remote.as_ref().map(|value| value.to_string()),
+        repository: state.repository.as_ref().map(|value| value.to_string()),
+    }
+}
+
+fn fossil_sync_state_from_proto(state: proto::FossilSyncState) -> FossilSyncState {
+    FossilSyncState {
+        autosync: state.autosync.map(SharedString::from),
+        default_remote: state.default_remote.map(SharedString::from),
+        repository: state.repository.map(SharedString::from),
+    }
+}
+
 fn initial_graph_commit_to_proto(commit: &InitialGraphCommitData) -> proto::InitialGraphCommit {
     proto::InitialGraphCommit {
         sha: commit.sha.to_string(),
@@ -9066,6 +9179,11 @@ mod tests {
             PathStyle::Posix,
         );
         old_snapshot.fossil_included_paths = Arc::from([RepoPath::new("a.txt").unwrap()]);
+        old_snapshot.fossil_sync_state = Some(FossilSyncState {
+            autosync: Some("on".into()),
+            default_remote: Some("https://example.com/repo".into()),
+            repository: Some("/repo/repo.fossil".into()),
+        });
 
         let mut new_snapshot = old_snapshot.clone();
         new_snapshot.fossil_included_paths = Arc::from([
@@ -9076,6 +9194,15 @@ mod tests {
         assert_eq!(
             old_snapshot.initial_update(7).fossil_included_paths,
             vec!["a.txt"]
+        );
+        assert_eq!(
+            old_snapshot
+                .initial_update(7)
+                .fossil_sync_state
+                .unwrap()
+                .default_remote
+                .as_deref(),
+            Some("https://example.com/repo")
         );
         assert_eq!(
             new_snapshot
@@ -9450,17 +9577,20 @@ async fn compute_snapshot(
         .filter(|wt| wt.path != *work_directory_abs_path)
         .collect();
 
-    let (remote_origin_url, remote_upstream_url) = cx
+    let (remote_origin_url, remote_upstream_url, fossil_sync_state) = cx
         .background_spawn({
             let backend = backend.clone();
             async move {
-                Ok::<_, anyhow::Error>(
+                let (remote_urls, fossil_sync_state) = futures::future::join(
                     futures::future::join(
                         backend.remote_url("origin"),
                         backend.remote_url("upstream"),
-                    )
-                    .await,
+                    ),
+                    backend.fossil_sync_state(),
                 )
+                .await;
+                let (remote_origin_url, remote_upstream_url) = remote_urls;
+                Ok::<_, anyhow::Error>((remote_origin_url, remote_upstream_url, fossil_sync_state?))
             }
         })
         .await?;
@@ -9480,6 +9610,7 @@ async fn compute_snapshot(
             head_commit,
             remote_origin_url,
             remote_upstream_url,
+            fossil_sync_state,
             linked_worktrees,
             scan_id: prev_snapshot.scan_id + 1,
             ..prev_snapshot
@@ -9574,6 +9705,35 @@ async fn compute_snapshot(
 
         this.snapshot.clone()
     }))
+}
+
+async fn refresh_fossil_snapshot_after_command(
+    this: WeakEntity<Repository>,
+    backend: Arc<dyn GitRepository>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    if !backend.kind().is_fossil() {
+        return Ok(());
+    }
+
+    let Some(this) = this.upgrade() else {
+        return Ok(());
+    };
+
+    let snapshot = compute_snapshot(this.clone(), backend, cx).await?;
+    let updates_tx = this.update(cx, |this, cx| {
+        this.git_store
+            .upgrade()
+            .and_then(|git_store| git_store.read(cx).downstream_update_sender())
+    });
+
+    if let Some(updates_tx) = updates_tx {
+        updates_tx
+            .unbounded_send(DownstreamUpdate::UpdateRepository(snapshot))
+            .ok();
+    }
+
+    Ok(())
 }
 
 fn status_from_proto(

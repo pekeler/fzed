@@ -10,6 +10,8 @@ pub enum RemoteAction {
     Fetch(Option<Remote>),
     Pull(Remote),
     Push(SharedString, Remote),
+    FossilSync(Option<SharedString>),
+    FossilUpdate,
 }
 
 impl RemoteAction {
@@ -18,6 +20,8 @@ impl RemoteAction {
             RemoteAction::Fetch(_) => "fetch",
             RemoteAction::Pull(_) => "pull",
             RemoteAction::Push(_, _) => "push",
+            RemoteAction::FossilSync(_) => "sync",
+            RemoteAction::FossilUpdate => "update",
         }
     }
 }
@@ -50,6 +54,43 @@ pub fn format_output(action: &RemoteAction, output: RemoteCommandOutput) -> Succ
                     message,
                     style: SuccessStyle::ToastWithLog { output },
                 }
+            }
+        }
+        RemoteAction::FossilSync(target) => {
+            let target = target
+                .as_ref()
+                .map(|target| target.to_string())
+                .unwrap_or_else(|| "default remote".to_string());
+            let message = if output.is_empty() {
+                format!("Sync: Already up to date with {target}")
+            } else {
+                format!("Synced with {target}")
+            };
+            SuccessMessage {
+                message,
+                style: if output.is_empty() {
+                    SuccessStyle::Toast
+                } else {
+                    SuccessStyle::ToastWithLog { output }
+                },
+            }
+        }
+        RemoteAction::FossilUpdate => {
+            let combined_output = format!("{}{}", output.stdout, output.stderr);
+            let already_current = combined_output.contains("Already up-to-date")
+                || combined_output.contains("Already up to date")
+                || combined_output.contains("None. Already up-to-date");
+            SuccessMessage {
+                message: if already_current || output.is_empty() {
+                    "Update: Already up to date".into()
+                } else {
+                    "Updated checkout".into()
+                },
+                style: if output.is_empty() {
+                    SuccessStyle::Toast
+                } else {
+                    SuccessStyle::ToastWithLog { output }
+                },
             }
         }
         RemoteAction::Pull(remote_ref) => {

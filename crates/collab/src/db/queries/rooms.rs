@@ -803,6 +803,8 @@ impl Database {
                             repository_dir_abs_path: db_repository.repository_dir_abs_path,
                             common_dir_abs_path: db_repository.common_dir_abs_path,
                             repository_kind: db_repository.repository_kind,
+                            fossil_included_paths: Vec::new(),
+                            fossil_sync_state: None,
                             linked_worktrees: db_repository
                                 .linked_worktrees
                                 .as_deref()

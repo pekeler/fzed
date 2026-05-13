@@ -47,6 +47,16 @@ Validation so far:
   - `cargo test -p fs fake_git_repo`
   - `cargo test -p worktree --features test-support fossil_repository_detection`
   - `cargo test -p proto split_repository_update`
+- Phase 3 branch/sync/checkout slice compiles:
+  - `cargo check -p git -p fs -p project -p git_ui -p proto`
+  - `cargo check -p collab`
+  - `cargo test -p git fossil`
+  - `cargo test -p project test_fossil_repository`
+  - `cargo test -p project fossil_included_paths`
+  - `cargo test -p fs fake_git_repo`
+  - `cargo test -p worktree --features test-support fossil_repository_detection`
+  - `cargo test -p proto split_repository_update`
+  - `git diff --check`
 
 ## Goal
 
@@ -240,7 +250,7 @@ Phase 2.1 coverage status:
 
 Known Phase 2 deferrals:
 
-- Autosync visibility belongs in Phase 3 with Fossil sync/update UX. `fossil commit` currently honors Fossil's configured autosync behavior without surfacing it in the UI.
+- Autosync visibility belongs in Phase 3 with Fossil sync/update UX. The Phase 3 slice now surfaces autosync/default remote metadata in check-in command tooltips.
 - The include list remains in-memory and intentionally non-persistent across restarts, like a transient check-in selection.
 - Direct `git_ui` panel tests for Fossil labels and toolbar button states are deferred to Phase 5; current coverage is at the UI-facing repository state layer.
 - Hunk-level selection is out of scope for the main Fossil UX because Fossil has no native hunk commit mechanism. Optional emulation is moved to Phase 7.
@@ -248,7 +258,7 @@ Known Phase 2 deferrals:
 ## Resolved Or Deferred TODOs
 
 - Real collab database migration: this checkout has schema snapshots, not a forward migration chain; `repository_kind` is already in the table model and both schema snapshots.
-- Autosync state and last-sync diagnostics: deferred to Phase 3.
+- Autosync state/default remote visibility: implemented in Phase 3. Richer last-sync diagnostics remain a later polish item.
 - Remaining visible Git naming in Fossil views: Phase 5, then broader internal naming in Phase 6.
 - Direct `git_ui` Fossil panel tests: Phase 5.
 - Shared selected Fossil paths: implemented. This matches Git's shared staging behavior and does not conflict with Fossil, because it is editor session state that becomes Fossil-native selected file arguments at check-in time.
@@ -271,6 +281,28 @@ Known Phase 2 deferrals:
 - Show "test before check-in" affordances where useful, such as running configured tasks from the check-in panel before committing.
 
 Expected result: fzed behaves like a Fossil client rather than a Git client using Fossil commands.
+
+Initial implementation status:
+
+- `fossil sync` is wired through the existing remote-operation path used by the panel, with Fossil-specific success/error text and a "Sync" button in Fossil repositories.
+- `fossil update` is wired as the checkout-forward action, separate from sync, with a Fossil "Update" button.
+- Fossil branch switching uses `fossil update BRANCH`, so changing branches keeps Fossil's working-checkout semantics.
+- Advanced branch creation uses `fossil branch new NAME BASIS` followed by `fossil update NAME`. This keeps the existing branch picker usable while the preferred create-branch-at-check-in workflow remains a later UI refinement.
+- Fossil sync metadata is captured in repository snapshots and shared through collaboration updates:
+  - autosync setting value
+  - default remote URL
+  - repository database path
+- Check-in tooltips include autosync/default-remote metadata when available, so users can see whether check-in may also sync.
+- Fossil sibling checkouts are listed via `fossil info --verbose REPOSITORY`; creating another checkout uses `fossil open REPOSITORY VERSION --workdir PATH`.
+- Repository snapshots are refreshed after Fossil sync/update/branch/checkout commands so branch, head, checkout list, and sync metadata stay current.
+
+Phase 3 is implemented for backend behavior and panel-level sync/update UX.
+
+Known Phase 3 deferrals:
+
+- The preferred `fossil commit --branch NAME` create-branch-at-check-in UI is deferred to Phase 5 polish. The advanced `fossil branch new` path works now.
+- The existing worktree picker can create/open Fossil sibling checkouts through the backend, but its copy still says "worktree" in several places. Fossil-specific checkout wording belongs in Phase 5.
+- "Test before check-in" task affordances need task-runner UX work and are deferred until the check-in panel polish pass.
 
 ### Phase 4: History, Timeline, Stash, and Merge Surfaces
 

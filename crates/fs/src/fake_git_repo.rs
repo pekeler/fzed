@@ -1117,19 +1117,32 @@ impl GitRepository for FakeGitRepository {
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<git::repository::RemoteCommandOutput>> {
-        unimplemented!()
+        future::ready(Ok(git::repository::RemoteCommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+        }))
+        .boxed()
     }
 
     fn pull(
         &self,
-        _branch: Option<String>,
+        branch: Option<String>,
         _remote: String,
         _rebase: bool,
         _askpass: AskPassDelegate,
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<git::repository::RemoteCommandOutput>> {
-        unimplemented!()
+        let is_fossil = self.kind().is_fossil();
+        self.with_state_async(true, move |state| {
+            if is_fossil && let Some(branch) = branch {
+                state.current_branch_name = Some(branch);
+            }
+            Ok(git::repository::RemoteCommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        })
     }
 
     fn fetch(
@@ -1139,7 +1152,11 @@ impl GitRepository for FakeGitRepository {
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<git::repository::RemoteCommandOutput>> {
-        unimplemented!()
+        future::ready(Ok(git::repository::RemoteCommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+        }))
+        .boxed()
     }
 
     fn get_all_remotes(&self) -> BoxFuture<'_, Result<Vec<Remote>>> {

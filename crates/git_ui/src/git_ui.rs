@@ -12,7 +12,9 @@ mod blame_ui;
 pub mod clone;
 
 use git::{
-    repository::{Branch, CommitDetails, Upstream, UpstreamTracking, UpstreamTrackingStatus},
+    repository::{
+        Branch, CommitDetails, RepositoryKind, Upstream, UpstreamTracking, UpstreamTrackingStatus,
+    },
     status::{FileStatus, StatusCode, UnmergedStatus, UnmergedStatusCode},
 };
 use gpui::{
@@ -677,10 +679,27 @@ fn show_ref_picker(
 fn render_remote_button(
     id: impl Into<SharedString>,
     branch: &Branch,
+    repository_kind: RepositoryKind,
     keybinding_target: Option<FocusHandle>,
     show_fetch_button: bool,
-) -> Option<impl IntoElement> {
+) -> Option<AnyElement> {
     let id = id.into();
+    if repository_kind.is_fossil() {
+        return Some(
+            h_flex()
+                .gap_1()
+                .child(remote_button::render_fossil_sync_button(
+                    format!("{id}-sync"),
+                    keybinding_target.clone(),
+                ))
+                .child(remote_button::render_fossil_update_button(
+                    format!("{id}-update"),
+                    keybinding_target,
+                ))
+                .into_any_element(),
+        );
+    }
+
     let upstream = branch.upstream.as_ref();
     match upstream {
         Some(Upstream {
@@ -688,38 +707,36 @@ fn render_remote_button(
             ..
         }) => match (*ahead, *behind) {
             (0, 0) if show_fetch_button => {
-                Some(remote_button::render_fetch_button(keybinding_target, id))
+                Some(remote_button::render_fetch_button(keybinding_target, id).into_any_element())
             }
             (0, 0) => None,
-            (ahead, 0) => Some(remote_button::render_push_button(
-                keybinding_target,
-                id,
-                ahead,
-            )),
-            (ahead, behind) => Some(remote_button::render_pull_button(
-                keybinding_target,
-                id,
-                ahead,
-                behind,
-            )),
+            (ahead, 0) => Some(
+                remote_button::render_push_button(keybinding_target, id, ahead).into_any_element(),
+            ),
+            (ahead, behind) => Some(
+                remote_button::render_pull_button(keybinding_target, id, ahead, behind)
+                    .into_any_element(),
+            ),
         },
         Some(Upstream {
             tracking: UpstreamTracking::Gone,
             ..
-        }) => Some(remote_button::render_republish_button(
-            keybinding_target,
-            id,
-        )),
-        None => Some(remote_button::render_publish_button(keybinding_target, id)),
+        }) => {
+            Some(remote_button::render_republish_button(keybinding_target, id).into_any_element())
+        }
+        None => {
+            Some(remote_button::render_publish_button(keybinding_target, id).into_any_element())
+        }
     }
 }
 
 mod remote_button {
     use gpui::{Action, Anchor, AnyView, ClickEvent, FocusHandle};
     use ui::{
-        App, ButtonCommon, Clickable, ContextMenu, ElementId, FluentBuilder, Icon, IconName,
-        IconSize, IntoElement, Label, LabelCommon, LabelSize, LineHeightStyle, ParentElement,
-        PopoverMenu, SharedString, SplitButton, Styled, Tooltip, Window, div, h_flex, rems,
+        App, Button, ButtonCommon, ButtonSize, ButtonStyle, Clickable, ContextMenu, ElementId,
+        FluentBuilder, Icon, IconName, IconSize, IntoElement, Label, LabelCommon, LabelSize,
+        LineHeightStyle, ParentElement, PopoverMenu, SharedString, SplitButton, Styled, Tooltip,
+        Window, div, h_flex, rems,
     };
 
     pub fn render_fetch_button(
@@ -853,6 +870,49 @@ mod remote_button {
                 )
             },
         )
+    }
+
+    pub fn render_fossil_sync_button(
+        id: impl Into<SharedString>,
+        keybinding_target: Option<FocusHandle>,
+    ) -> impl IntoElement {
+        Button::new(id.into(), "Sync")
+            .size(ButtonSize::Compact)
+            .style(ButtonStyle::Filled)
+            .start_icon(Icon::new(IconName::ArrowCircle).size(IconSize::XSmall))
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(git::Fetch), cx);
+            })
+            .tooltip(move |_window, cx| {
+                git_action_tooltip(
+                    "Synchronize all sharable Fossil changes",
+                    &git::Fetch,
+                    "fossil sync",
+                    keybinding_target.clone(),
+                    cx,
+                )
+            })
+    }
+
+    pub fn render_fossil_update_button(
+        id: impl Into<SharedString>,
+        keybinding_target: Option<FocusHandle>,
+    ) -> impl IntoElement {
+        Button::new(id.into(), "Update")
+            .size(ButtonSize::Compact)
+            .style(ButtonStyle::Subtle)
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(git::Pull), cx);
+            })
+            .tooltip(move |_window, cx| {
+                git_action_tooltip(
+                    "Update this checkout to the current Fossil leaf",
+                    &git::Pull,
+                    "fossil update",
+                    keybinding_target.clone(),
+                    cx,
+                )
+            })
     }
 
     fn git_action_tooltip(

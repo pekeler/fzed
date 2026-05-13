@@ -902,6 +902,8 @@ impl Database {
                         repository_dir_abs_path: db_repository_entry.repository_dir_abs_path,
                         common_dir_abs_path: db_repository_entry.common_dir_abs_path,
                         repository_kind: db_repository_entry.repository_kind,
+                        fossil_included_paths: Vec::new(),
+                        fossil_sync_state: None,
                         linked_worktrees: db_repository_entry
                             .linked_worktrees
                             .as_deref()

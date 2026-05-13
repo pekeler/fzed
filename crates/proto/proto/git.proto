@@ -132,6 +132,7 @@ message UpdateRepository {
   optional string common_dir_abs_path = 20;
   optional RepositoryKind repository_kind = 21;
   repeated string fossil_included_paths = 22;
+  optional FossilSyncState fossil_sync_state = 23;
 }
 
 message RemoveRepository {
@@ -142,6 +143,12 @@ message RemoveRepository {
 enum RepositoryKind {
   Git = 0;
   Fossil = 1;
+}
+
+message FossilSyncState {
+  optional string autosync = 1;
+  optional string default_remote = 2;
+  optional string repository = 3;
 }
 
 enum GitStatus {

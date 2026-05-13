@@ -3,9 +3,9 @@ use crate::{
     blame::Blame,
     repository::{
         Branch, CommitDataReader, CommitDetails, CommitDiff, CommitOptions, CreateWorktreeTarget,
-        DiffType, FetchOptions, GitCommitTemplate, GitRepository, GitRepositoryCheckpoint,
-        InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput,
-        RepoPath, RepositoryKind, ResetMode, SearchCommitArgs, Worktree,
+        DiffType, FetchOptions, FossilSyncState, GitCommitTemplate, GitRepository,
+        GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote,
+        RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode, SearchCommitArgs, Worktree,
     },
     stash::GitStash,
     status::{
@@ -144,8 +144,58 @@ impl GitRepository for FossilRepository {
         Self::unsupported("writing index entries")
     }
 
-    fn remote_url(&self, _name: &str) -> BoxFuture<'_, Option<String>> {
-        async move { None }.boxed()
+    fn remote_url(&self, name: &str) -> BoxFuture<'_, Option<String>> {
+        let fossil = self.fossil_binary();
+        let name = name.to_string();
+        self.executor
+            .spawn(async move {
+                if name == "default" {
+                    return Ok::<Option<String>, anyhow::Error>(parse_fossil_default_remote(
+                        &fossil.run(&["remote"]).await?,
+                    ));
+                }
+
+                let remotes = parse_fossil_remote_list(&fossil.run(&["remote", "list"]).await?);
+                Ok::<Option<String>, anyhow::Error>(
+                    remotes
+                        .into_iter()
+                        .find(|remote| remote.name == name)
+                        .map(|remote| remote.url),
+                )
+            })
+            .map(|result| result.ok().flatten())
+            .boxed()
+    }
+
+    fn fossil_sync_state(&self) -> BoxFuture<'_, Result<Option<FossilSyncState>>> {
+        let this = self.clone_for_task();
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let info = this.info().await?;
+                let autosync = fossil
+                    .run(&["settings", "autosync", "--value"])
+                    .await
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .map(SharedString::from);
+                let default_remote = fossil
+                    .run(&["remote"])
+                    .await
+                    .ok()
+                    .and_then(|output| parse_fossil_default_remote(&output))
+                    .map(SharedString::from);
+
+                Ok(Some(FossilSyncState {
+                    autosync,
+                    default_remote,
+                    repository: info
+                        .repository
+                        .map(|path| SharedString::from(path.to_string_lossy().into_owned())),
+                }))
+            })
+            .boxed()
     }
 
     fn revparse_batch(&self, revs: Vec<String>) -> BoxFuture<'_, Result<Vec<Option<String>>>> {
@@ -231,16 +281,48 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
-    fn change_branch(&self, _name: String) -> BoxFuture<'_, Result<()>> {
-        Self::unsupported("changing branches")
+    fn change_branch(&self, name: String) -> BoxFuture<'_, Result<()>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                fossil
+                    .run(&[
+                        OsString::from("update"),
+                        OsString::from(fossil_branch_name(&name)),
+                    ])
+                    .await?;
+                Ok(())
+            })
+            .boxed()
     }
 
     fn create_branch(
         &self,
-        _name: String,
-        _base_branch: Option<String>,
+        name: String,
+        base_branch: Option<String>,
     ) -> BoxFuture<'_, Result<()>> {
-        Self::unsupported("creating branches")
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let name = fossil_branch_name(&name);
+                let base_branch = base_branch
+                    .as_deref()
+                    .map(fossil_branch_name)
+                    .unwrap_or_else(|| "current".to_string());
+                fossil
+                    .run(&[
+                        OsString::from("branch"),
+                        OsString::from("new"),
+                        OsString::from(name.clone()),
+                        OsString::from(base_branch),
+                    ])
+                    .await?;
+                fossil
+                    .run(&[OsString::from("update"), OsString::from(name)])
+                    .await?;
+                Ok(())
+            })
+            .boxed()
     }
 
     fn rename_branch(&self, _branch: String, _new_name: String) -> BoxFuture<'_, Result<()>> {
@@ -257,28 +339,162 @@ impl GitRepository for FossilRepository {
     }
 
     fn worktrees(&self) -> BoxFuture<'_, Result<Vec<Worktree>>> {
-        async move { Ok(Vec::new()) }.boxed()
+        let this = self.clone_for_task();
+        self.executor
+            .spawn(async move {
+                let info = this.info().await?;
+                let mut checkout_paths = if let Some(repository) = &info.repository {
+                    parse_fossil_verbose_checkouts(
+                        &this
+                            .fossil_binary()
+                            .run(&[
+                                OsString::from("info"),
+                                OsString::from("--verbose"),
+                                repository.as_os_str().to_owned(),
+                            ])
+                            .await
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    Vec::new()
+                };
+
+                if checkout_paths.is_empty() {
+                    checkout_paths.push(this.work_directory.clone());
+                }
+
+                let current_work_directory = normalize_existing_path(this.work_directory.clone());
+                let mut worktrees = Vec::new();
+                for checkout_path in checkout_paths {
+                    let checkout_path = normalize_existing_path(checkout_path);
+                    let checkout_fossil = this
+                        .fossil_binary()
+                        .for_working_directory(checkout_path.clone());
+                    let checkout_info = checkout_fossil
+                        .run(&["info"])
+                        .await
+                        .ok()
+                        .map(|output| parse_fossil_info(&output))
+                        .unwrap_or_default();
+                    let branch = checkout_fossil.run(&["branch", "current"]).await.ok();
+                    let sha = checkout_info
+                        .checkout
+                        .or_else(|| info.checkout.clone())
+                        .unwrap_or_default();
+
+                    worktrees.push(Worktree {
+                        path: checkout_path.clone(),
+                        ref_name: branch
+                            .map(|branch| SharedString::from(format!("refs/heads/{branch}"))),
+                        sha: SharedString::from(sha),
+                        is_main: checkout_path == current_work_directory,
+                        is_bare: false,
+                    });
+                }
+
+                worktrees.sort_by(|left, right| {
+                    right
+                        .is_main
+                        .cmp(&left.is_main)
+                        .then_with(|| left.path.cmp(&right.path))
+                });
+                worktrees.dedup_by(|left, right| left.path == right.path);
+                Ok(worktrees)
+            })
+            .boxed()
     }
 
     fn create_worktree(
         &self,
-        _target: CreateWorktreeTarget,
-        _path: PathBuf,
+        target: CreateWorktreeTarget,
+        path: PathBuf,
     ) -> BoxFuture<'_, Result<()>> {
-        Self::unsupported("creating worktrees")
+        let this = self.clone_for_task();
+        self.executor
+            .spawn(async move {
+                let info = this.info().await?;
+                let repository = info
+                    .repository
+                    .context("Fossil repository path is unavailable")?;
+
+                let version = match target {
+                    CreateWorktreeTarget::ExistingBranch { branch_name } => {
+                        Some(fossil_branch_name(&branch_name))
+                    }
+                    CreateWorktreeTarget::NewBranch {
+                        branch_name,
+                        base_sha,
+                    } => {
+                        let branch_name = fossil_branch_name(&branch_name);
+                        let basis = base_sha.unwrap_or_else(|| "current".to_string());
+                        this.fossil_binary()
+                            .run(&[
+                                OsString::from("branch"),
+                                OsString::from("new"),
+                                OsString::from(branch_name.clone()),
+                                OsString::from(basis),
+                            ])
+                            .await?;
+                        Some(branch_name)
+                    }
+                    CreateWorktreeTarget::Detached { base_sha } => base_sha,
+                };
+
+                let mut args = vec![OsString::from("open"), repository.as_os_str().to_owned()];
+                if let Some(version) = version {
+                    args.push(OsString::from(version));
+                }
+                args.push(OsString::from("--workdir"));
+                args.push(path.as_os_str().to_owned());
+                this.fossil_binary().run(&args).await?;
+                Ok(())
+            })
+            .boxed()
     }
 
     fn checkout_branch_in_worktree(
         &self,
-        _branch_name: String,
-        _worktree_path: PathBuf,
-        _create: bool,
+        branch_name: String,
+        worktree_path: PathBuf,
+        create: bool,
     ) -> BoxFuture<'_, Result<()>> {
-        Self::unsupported("checking out branches in worktrees")
+        let fossil = self.fossil_binary().for_working_directory(worktree_path);
+        self.executor
+            .spawn(async move {
+                let branch_name = fossil_branch_name(&branch_name);
+                if create {
+                    fossil
+                        .run(&[
+                            OsString::from("branch"),
+                            OsString::from("new"),
+                            OsString::from(branch_name.clone()),
+                            OsString::from("current"),
+                        ])
+                        .await?;
+                }
+                fossil
+                    .run(&[OsString::from("update"), OsString::from(branch_name)])
+                    .await?;
+                Ok(())
+            })
+            .boxed()
     }
 
-    fn remove_worktree(&self, _path: PathBuf, _force: bool) -> BoxFuture<'_, Result<()>> {
-        Self::unsupported("removing worktrees")
+    fn remove_worktree(&self, path: PathBuf, force: bool) -> BoxFuture<'_, Result<()>> {
+        let fossil = self.fossil_binary().for_working_directory(path.clone());
+        self.executor
+            .spawn(async move {
+                if !path.exists() && force {
+                    return Ok(());
+                }
+                let mut args = vec![OsString::from("close")];
+                if force {
+                    args.push(OsString::from("--force"));
+                }
+                fossil.run(&args).await?;
+                Ok(())
+            })
+            .boxed()
     }
 
     fn rename_worktree(&self, _old_path: PathBuf, _new_path: PathBuf) -> BoxFuture<'_, Result<()>> {
@@ -490,47 +706,108 @@ impl GitRepository for FossilRepository {
         &self,
         _branch_name: String,
         _remote_branch_name: String,
-        _upstream_name: String,
-        _options: Option<PushOptions>,
+        upstream_name: String,
+        options: Option<PushOptions>,
         _askpass: askpass::AskPassDelegate,
-        _env: Arc<HashMap<String, String>>,
+        env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>> {
-        Self::unsupported("push")
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                anyhow::ensure!(
+                    !matches!(options, Some(PushOptions::Force)),
+                    "Fossil sync does not support force-push"
+                );
+
+                let mut args = vec![OsString::from("sync")];
+                if upstream_name != "default" {
+                    args.push(OsString::from(upstream_name));
+                }
+                fossil.run_output_with_env(&args, env).await
+            })
+            .boxed()
     }
 
     fn pull(
         &self,
-        _branch_name: Option<String>,
+        branch_name: Option<String>,
         _upstream_name: String,
-        _rebase: bool,
+        rebase: bool,
         _askpass: askpass::AskPassDelegate,
-        _env: Arc<HashMap<String, String>>,
+        env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>> {
-        Self::unsupported("pull")
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                anyhow::ensure!(!rebase, "Fossil update does not support rebase");
+                let mut args = vec![OsString::from("update")];
+                if let Some(branch_name) = branch_name {
+                    args.push(OsString::from(fossil_branch_name(&branch_name)));
+                }
+                fossil.run_output_with_env(&args, env).await
+            })
+            .boxed()
     }
 
     fn fetch(
         &self,
-        _fetch_options: FetchOptions,
+        fetch_options: FetchOptions,
         _askpass: askpass::AskPassDelegate,
-        _env: Arc<HashMap<String, String>>,
+        env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>> {
-        Self::unsupported("fetch")
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let mut args = vec![OsString::from("sync")];
+                if let FetchOptions::Remote(remote) = fetch_options
+                    && remote.name != "default"
+                {
+                    args.push(OsString::from(remote.name.to_string()));
+                }
+                fossil.run_output_with_env(&args, env).await
+            })
+            .boxed()
     }
 
     fn get_push_remote(&self, _branch: String) -> BoxFuture<'_, Result<Option<Remote>>> {
-        async move { Ok(None) }.boxed()
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move { Ok(default_fossil_remote(&fossil).await?) })
+            .boxed()
     }
 
     fn get_branch_remote(&self, _branch: String) -> BoxFuture<'_, Result<Option<Remote>>> {
-        async move { Ok(None) }.boxed()
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move { Ok(default_fossil_remote(&fossil).await?) })
+            .boxed()
     }
 
     fn get_all_remotes(&self) -> BoxFuture<'_, Result<Vec<Remote>>> {
-        async move { Ok(Vec::new()) }.boxed()
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let mut remotes = parse_fossil_remote_list(&fossil.run(&["remote", "list"]).await?)
+                    .into_iter()
+                    .map(|remote| Remote {
+                        name: SharedString::from(remote.name),
+                    })
+                    .collect::<Vec<_>>();
+
+                if remotes.is_empty()
+                    && parse_fossil_default_remote(&fossil.run(&["remote"]).await?).is_some()
+                {
+                    remotes.push(Remote {
+                        name: SharedString::from("default"),
+                    });
+                }
+
+                Ok(remotes)
+            })
+            .boxed()
     }
 
     fn remove_remote(&self, _name: String) -> BoxFuture<'_, Result<()>> {
@@ -691,6 +968,8 @@ impl FossilRepository {
 #[derive(Clone, Debug, Default)]
 struct FossilInfo {
     checkout: Option<String>,
+    repository: Option<PathBuf>,
+    local_root: Option<PathBuf>,
 }
 
 fn parse_fossil_info(output: &str) -> FossilInfo {
@@ -699,8 +978,25 @@ fn parse_fossil_info(output: &str) -> FossilInfo {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        if key.trim() == "checkout" {
-            info.checkout = value.split_whitespace().next().map(str::to_owned);
+        match key.trim() {
+            "checkout" => {
+                info.checkout = value.split_whitespace().next().map(str::to_owned);
+            }
+            "repository" => {
+                let value = value.trim();
+                if !value.is_empty() {
+                    info.repository = Some(PathBuf::from(value));
+                }
+            }
+            "local-root" => {
+                let value = value.trim();
+                if !value.is_empty() {
+                    info.local_root = Some(PathBuf::from(
+                        value.trim_end_matches(std::path::MAIN_SEPARATOR),
+                    ));
+                }
+            }
+            _ => {}
         }
     }
     info
@@ -863,6 +1159,57 @@ fn parse_fossil_branch_list_line(line: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FossilRemote {
+    name: String,
+    url: String,
+}
+
+fn parse_fossil_remote_list(output: &str) -> Vec<FossilRemote> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let (name, url) = line.split_once(char::is_whitespace)?;
+            let url = url.trim();
+            (!url.is_empty()).then(|| FossilRemote {
+                name: name.to_string(),
+                url: url.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_fossil_default_remote(output: &str) -> Option<String> {
+    let remote = output.trim();
+    (!remote.is_empty() && remote != "off").then(|| remote.to_string())
+}
+
+fn parse_fossil_verbose_checkouts(output: &str) -> Vec<PathBuf> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            if key.trim() != "check-out" {
+                return None;
+            }
+            let path = value.split_whitespace().next()?;
+            (!path.is_empty()).then(|| PathBuf::from(path.trim_end_matches('/')))
+        })
+        .collect()
+}
+
+fn fossil_branch_name(name: &str) -> String {
+    name.strip_prefix("refs/heads/").unwrap_or(name).to_string()
+}
+
+fn normalize_existing_path(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
 #[derive(Clone)]
 struct FossilBinary {
     fossil_binary_path: PathBuf,
@@ -920,6 +1267,28 @@ impl FossilBinary {
     where
         S: AsRef<OsStr>,
     {
+        Ok(self.run_output_raw_with_env(args, env).await?.stdout)
+    }
+
+    async fn run_output_with_env<S>(
+        &self,
+        args: &[S],
+        env: Arc<HashMap<String, String>>,
+    ) -> Result<RemoteCommandOutput>
+    where
+        S: AsRef<OsStr>,
+    {
+        self.run_output_raw_with_env(args, Some(env)).await
+    }
+
+    async fn run_output_raw_with_env<S>(
+        &self,
+        args: &[S],
+        env: Option<Arc<HashMap<String, String>>>,
+    ) -> Result<RemoteCommandOutput>
+    where
+        S: AsRef<OsStr>,
+    {
         let mut command = self.build_command(args);
         if let Some(env) = env {
             command.envs(env.iter());
@@ -933,7 +1302,10 @@ impl FossilBinary {
                 status: output.status,
             }
         );
-        Ok(String::from_utf8(output.stdout)?)
+        Ok(RemoteCommandOutput {
+            stdout: String::from_utf8(output.stdout)?,
+            stderr: String::from_utf8(output.stderr)?,
+        })
     }
 
     fn build_command<S>(&self, args: &[S]) -> util::command::Command
@@ -945,6 +1317,31 @@ impl FossilBinary {
         command.envs(self.envs.iter());
         command.args(args);
         command
+    }
+
+    fn for_working_directory(&self, working_directory: PathBuf) -> Self {
+        Self {
+            fossil_binary_path: self.fossil_binary_path.clone(),
+            working_directory,
+            envs: self.envs.clone(),
+        }
+    }
+}
+
+async fn default_fossil_remote(fossil: &FossilBinary) -> Result<Option<Remote>> {
+    if parse_fossil_default_remote(&fossil.run(&["remote"]).await?).is_some() {
+        Ok(Some(Remote {
+            name: SharedString::from("default"),
+        }))
+    } else {
+        Ok(
+            parse_fossil_remote_list(&fossil.run(&["remote", "list"]).await?)
+                .into_iter()
+                .next()
+                .map(|remote| Remote {
+                    name: SharedString::from(remote.name),
+                }),
+        )
     }
 }
 
@@ -959,26 +1356,35 @@ struct FossilBinaryCommandError {
 #[cfg(test)]
 mod tests {
     use super::{
-        FossilRepository, parse_fossil_branch_list_line, parse_fossil_changes, parse_fossil_info,
-        parse_fossil_numstat,
+        FossilRepository, parse_fossil_branch_list_line, parse_fossil_changes,
+        parse_fossil_default_remote, parse_fossil_info, parse_fossil_numstat,
+        parse_fossil_remote_list, parse_fossil_verbose_checkouts,
     };
     use crate::{
-        repository::{AskPassDelegate, CommitOptions, GitRepository, RepoPath},
+        repository::{
+            AskPassDelegate, CommitOptions, CreateWorktreeTarget, GitRepository, RepoPath,
+        },
         status::{FileStatus, StatusCode},
     };
     use collections::HashMap;
     use gpui::TestAppContext;
     use std::{
-        path::Path,
+        path::{Path, PathBuf},
         process::{Command, Output},
         sync::Arc,
     };
 
     #[test]
     fn parses_fossil_info_checkout() {
-        let info =
-            parse_fossil_info("project-name: demo\ncheckout:     abc123 2026-05-12 10:00:00 UTC\n");
+        let info = parse_fossil_info(
+            "project-name: demo\nrepository:   /tmp/repo.fossil\nlocal-root:   /tmp/checkout/\ncheckout:     abc123 2026-05-12 10:00:00 UTC\n",
+        );
         assert_eq!(info.checkout.as_deref(), Some("abc123"));
+        assert_eq!(
+            info.repository.as_deref(),
+            Some(Path::new("/tmp/repo.fossil"))
+        );
+        assert_eq!(info.local_root.as_deref(), Some(Path::new("/tmp/checkout")));
     }
 
     #[test]
@@ -1035,6 +1441,33 @@ mod tests {
             Some("private")
         );
         assert_eq!(parse_fossil_branch_list_line("   "), None);
+    }
+
+    #[test]
+    fn parses_fossil_remote_and_checkout_metadata() {
+        let remotes = parse_fossil_remote_list(
+            "default            https://example.com/default\norigin             https://example.com/repo\n",
+        );
+        assert_eq!(remotes[0].name, "default");
+        assert_eq!(remotes[0].url, "https://example.com/default");
+        assert_eq!(remotes[1].name, "origin");
+        assert_eq!(remotes[1].url, "https://example.com/repo");
+        assert_eq!(
+            parse_fossil_default_remote("https://example.com/default\n").as_deref(),
+            Some("https://example.com/default")
+        );
+        assert_eq!(parse_fossil_default_remote("off\n"), None);
+
+        let checkouts = parse_fossil_verbose_checkouts(
+            "check-out:    /tmp/checkout1/           2026-05-13\ncheck-out:    /tmp/checkout2/           2026-05-13\n",
+        );
+        assert_eq!(
+            checkouts,
+            vec![
+                PathBuf::from("/tmp/checkout1"),
+                PathBuf::from("/tmp/checkout2")
+            ]
+        );
     }
 
     #[gpui::test]
@@ -1135,6 +1568,59 @@ mod tests {
         );
 
         repository
+            .create_branch("feature".to_string(), None)
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .branches()
+                .await
+                .unwrap()
+                .iter()
+                .any(|branch| branch.is_head && branch.name() == "feature")
+        );
+
+        let sibling_checkout = temp_dir.path().join("feature-checkout");
+        repository
+            .create_worktree(
+                CreateWorktreeTarget::ExistingBranch {
+                    branch_name: "feature".to_string(),
+                },
+                sibling_checkout.clone(),
+            )
+            .await
+            .unwrap();
+        let worktrees = repository.worktrees().await.unwrap();
+        let checkout = std::fs::canonicalize(&checkout).unwrap();
+        let sibling_checkout = std::fs::canonicalize(&sibling_checkout).unwrap();
+        assert!(worktrees.iter().any(|worktree| worktree.path == checkout));
+        assert!(
+            worktrees
+                .iter()
+                .any(|worktree| worktree.path == sibling_checkout)
+        );
+
+        repository
+            .pull(
+                Some("trunk".to_string()),
+                "default".to_string(),
+                false,
+                AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+                Arc::new(HashMap::default()),
+                cx.to_async(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .branches()
+                .await
+                .unwrap()
+                .iter()
+                .any(|branch| branch.is_head && branch.name() == "trunk")
+        );
+
+        repository
             .commit_paths(
                 "selected extra".into(),
                 Some(("tester".into(), "tester@example.com".into())),
@@ -1187,6 +1673,20 @@ mod tests {
                 .entries
                 .iter()
                 .all(|(repo_path, _)| repo_path != &RepoPath::new("tracked.txt").unwrap())
+        );
+
+        run_fossil(
+            &fossil_home,
+            &checkout,
+            &["remote", "add", "origin", "https://example.com/repo"],
+        );
+        run_fossil(&fossil_home, &checkout, &["remote", "origin"]);
+        run_fossil(&fossil_home, &checkout, &["settings", "autosync", "on"]);
+        let sync_state = repository.fossil_sync_state().await.unwrap().unwrap();
+        assert_eq!(sync_state.autosync.as_deref(), Some("on"));
+        assert_eq!(
+            sync_state.default_remote.as_deref(),
+            Some("https://example.com/repo")
         );
     }
 
