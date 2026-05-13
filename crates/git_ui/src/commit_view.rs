@@ -1221,7 +1221,8 @@ impl ToolbarItemView for CommitViewToolbar {
 fn stash_matches_index(sha: &str, stash_index: usize, repo: &Repository) -> bool {
     repo.stash_entries
         .entries
-        .get(stash_index)
+        .iter()
+        .find(|entry| entry.index == stash_index)
         .map(|entry| entry.oid.to_string() == sha)
         .unwrap_or(false)
 }

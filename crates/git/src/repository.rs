@@ -27,6 +27,7 @@ use std::process::ExitStatus;
 use std::str::FromStr;
 use std::{
     cmp::Ordering,
+    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -116,6 +117,25 @@ impl CommitDataReader {
         response_rx
             .await
             .map_err(|_| anyhow!("commit data reader task dropped response"))?
+    }
+
+    pub(crate) fn from_resolver<F, Fut>(executor: BackgroundExecutor, resolve: F) -> Self
+    where
+        F: 'static + Send + Sync + Fn(Oid) -> Fut,
+        Fut: 'static + Send + Future<Output = Result<CommitData>>,
+    {
+        let (request_tx, request_rx) = async_channel::bounded::<CommitDataRequest>(64);
+        let resolve = Arc::new(resolve);
+        let task = executor.spawn(async move {
+            while let Ok(CommitDataRequest { sha, response_tx }) = request_rx.recv().await {
+                response_tx.send(resolve(sha).await).ok();
+            }
+        });
+
+        Self {
+            request_tx,
+            _task: task,
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]

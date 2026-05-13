@@ -57,6 +57,15 @@ Validation so far:
   - `cargo test -p worktree --features test-support fossil_repository_detection`
   - `cargo test -p proto split_repository_update`
   - `git diff --check`
+- Phase 4 history/stash/blame slice compiles:
+  - `cargo check -p git -p project -p git_ui -p proto`
+  - `cargo check -p collab`
+  - `cargo test -p git fossil`
+  - `cargo test -p project test_fossil_repository`
+  - `cargo test -p fs fake_git_repo`
+  - `cargo test -p worktree --features test-support fossil_repository_detection`
+  - `cargo test -p proto split_repository_update`
+  - `git diff --check`
 
 ## Goal
 
@@ -319,6 +328,28 @@ Known Phase 3 deferrals:
   - avoid implying that merge creates an immediate durable commit
 - Conflict handling:
   - reuse Zed's conflict surface where marker formats and file states map cleanly
+
+Initial implementation status:
+
+- Fossil stash list/show/apply/pop/drop are wired through the existing stash surfaces.
+- Fossil stash entries keep Fossil's checkout-local stash IDs; the commit/stash diff view now matches entries by ID instead of assuming IDs are vector offsets.
+- Fossil stash diffs and check-in diffs are parsed from full-context Fossil unified diffs into Zed's existing commit diff model.
+- Fossil commit details are loaded from `fossil info`, including user, timestamp, comment, parents, and tags where available.
+- Fossil blame is parsed from `fossil blame` output and mapped into Zed's existing blame model.
+- Fossil timeline/search support is backed by `fossil timeline --type ci` with branch/path/source filtering where Fossil maps cleanly.
+- Fossil commit graph data and commit data streaming are implemented without requiring Git object storage.
+- Fossil checkout info is refreshed on each read so head/branch metadata does not go stale after check-ins, updates, or stash operations.
+- Conflict states from Phase 1 continue to reuse Zed's existing conflict marker surface for files reported by Fossil as conflicted.
+
+Phase 4 is implemented for existing Zed history, stash, commit-diff, search, and blame entry points.
+
+Known Phase 4 deferrals:
+
+- Fossil-managed tickets, wiki, forum, notes, and event timeline items are not surfaced yet; the first pass is check-in history only.
+- Merge/cherrypick/backout do not have dedicated Fossil UI yet. They should be exposed later as working-checkout changes followed by explicit check-in.
+- Fossil stash does not include unmanaged extra files. fzed follows Fossil here instead of adding extras behind the user's back.
+- Blame currently reflects Fossil's checked-out file state; unsaved editor-buffer blame would require a temporary checkout or another Fossil-specific overlay.
+- Timeline ordering is Fossil-native reverse chronological for now; custom Git graph ordering modes are not fully emulated.
 
 ### Phase 5: Fossil UI Polish And Coverage
 
