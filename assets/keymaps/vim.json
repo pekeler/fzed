@@ -1067,7 +1067,7 @@
       "g g": "menu::SelectFirst",
       "shift-g": "menu::SelectLast",
       "g f": "menu::Confirm",
-      "i": "git_panel::FocusEditor",
+      "i": "source_control_panel::FocusEditor",
       "x": "git::ToggleStaged",
       "shift-x": "git::StageAll",
       "g x": "git::StageRange",

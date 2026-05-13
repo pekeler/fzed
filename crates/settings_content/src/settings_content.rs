@@ -659,12 +659,12 @@ pub struct GitPanelSettingsContent {
     /// Default: icon
     pub status_style: Option<StatusStyle>,
 
-    /// Whether to show file icons in the git panel.
+    /// Whether to show file icons in the source control panel.
     ///
     /// Default: false
     pub file_icons: Option<bool>,
 
-    /// Whether to show folder icons or chevrons for directories in the git panel.
+    /// Whether to show folder icons or chevrons for directories in the source control panel.
     ///
     /// Default: true
     pub folder_icons: Option<bool>,
@@ -696,17 +696,17 @@ pub struct GitPanelSettingsContent {
     /// Default: false
     pub tree_view: Option<bool>,
 
-    /// Whether to show the addition/deletion change count next to each file in the Git panel.
+    /// Whether to show the addition/deletion change count next to each file in the source control panel.
     ///
     /// Default: true
     pub diff_stats: Option<bool>,
 
-    /// Whether to show a badge on the git panel icon with the count of uncommitted changes.
+    /// Whether to show a badge on the source control panel icon with the count of uncommitted changes.
     ///
     /// Default: false
     pub show_count_badge: Option<bool>,
 
-    /// Whether the git panel should open on startup.
+    /// Whether the source control panel should open on startup.
     ///
     /// Default: false
     pub starts_open: Option<bool>,

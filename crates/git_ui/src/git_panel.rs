@@ -86,37 +86,52 @@ use workspace::{
 };
 
 actions!(
-    git_panel,
+    source_control_panel,
     [
-        /// Closes the git panel.
+        /// Closes the source control panel.
+        #[action(deprecated_aliases = ["git_panel::Close"])]
         Close,
-        /// Toggles the git panel.
+        /// Toggles the source control panel.
+        #[action(deprecated_aliases = ["git_panel::Toggle"])]
         Toggle,
-        /// Toggles focus on the git panel.
+        /// Toggles focus on the source control panel.
+        #[action(deprecated_aliases = ["git_panel::ToggleFocus"])]
         ToggleFocus,
-        /// Opens the git panel menu.
+        /// Opens the source control panel menu.
+        #[action(deprecated_aliases = ["git_panel::OpenMenu"])]
         OpenMenu,
         /// Focuses on the commit message editor.
+        #[action(deprecated_aliases = ["git_panel::FocusEditor"])]
         FocusEditor,
         /// Focuses on the changes list.
+        #[action(deprecated_aliases = ["git_panel::FocusChanges"])]
         FocusChanges,
-        /// Select next git panel menu item, and show it in the diff view
+        /// Select next source control panel item, and show it in the diff view.
+        #[action(deprecated_aliases = ["git_panel::NextEntry"])]
         NextEntry,
-        /// Select previous git panel menu item, and show it in the diff view
+        /// Select previous source control panel item, and show it in the diff view.
+        #[action(deprecated_aliases = ["git_panel::PreviousEntry"])]
         PreviousEntry,
-        /// Select first git panel menu item, and show it in the diff view
+        /// Select first source control panel item, and show it in the diff view.
+        #[action(deprecated_aliases = ["git_panel::FirstEntry"])]
         FirstEntry,
-        /// Select last git panel menu item, and show it in the diff view
+        /// Select last source control panel item, and show it in the diff view.
+        #[action(deprecated_aliases = ["git_panel::LastEntry"])]
         LastEntry,
         /// Toggles automatic co-author suggestions.
+        #[action(deprecated_aliases = ["git_panel::ToggleFillCoAuthors"])]
         ToggleFillCoAuthors,
         /// Toggles sorting entries by path vs status.
+        #[action(deprecated_aliases = ["git_panel::ToggleSortByPath"])]
         ToggleSortByPath,
         /// Toggles showing entries in tree vs flat view.
+        #[action(deprecated_aliases = ["git_panel::ToggleTreeView"])]
         ToggleTreeView,
         /// Expands the selected entry to show its children.
+        #[action(deprecated_aliases = ["git_panel::ExpandSelectedEntry"])]
         ExpandSelectedEntry,
         /// Collapses the selected entry to hide its children.
+        #[action(deprecated_aliases = ["git_panel::CollapseSelectedEntry"])]
         CollapseSelectedEntry,
     ]
 );
@@ -2260,7 +2275,7 @@ impl GitPanel {
 
     fn on_commit(&mut self, _: &git::Commit, window: &mut Window, cx: &mut Context<Self>) {
         if self.commit(&self.commit_editor.focus_handle(cx), window, cx) {
-            telemetry::event!("Git Committed", source = "Git Panel");
+            telemetry::event!("Git Committed", source = "Source Control Panel");
         }
     }
 
@@ -2296,7 +2311,7 @@ impl GitPanel {
 
     fn on_amend(&mut self, _: &git::Amend, window: &mut Window, cx: &mut Context<Self>) {
         if self.amend(&self.commit_editor.focus_handle(cx), window, cx) {
-            telemetry::event!("Git Amended", source = "Git Panel");
+            telemetry::event!("Git Amended", source = "Source Control Panel");
         }
     }
 
@@ -3653,7 +3668,7 @@ impl GitPanel {
             *expanded = !*expanded;
             self.update_visible_entries(window, cx);
         } else {
-            util::debug_panic!("Attempted to toggle directory in flat Git Panel state");
+            util::debug_panic!("Attempted to toggle directory in flat source control panel state");
         }
     }
 
@@ -5010,7 +5025,7 @@ impl GitPanel {
                 .on_click({
                     let git_panel = cx.weak_entity();
                     move |_, window, cx| {
-                        telemetry::event!("Git Committed", source = "Git Panel");
+                        telemetry::event!("Git Committed", source = "Source Control Panel");
                         git_panel
                             .update(cx, |git_panel, cx| {
                                 git_panel.commit_changes(
@@ -6041,7 +6056,7 @@ impl GitPanel {
             self.stage_status_for_directory(entry, repo.read(cx))
         } else {
             util::debug_panic!(
-                "Won't have entries to render without an active repository in Git Panel"
+                "Won't have entries to render without an active repository in source control panel"
             );
             StageStatus::PartiallyStaged
         };
@@ -6263,7 +6278,7 @@ impl GitPanel {
             Some((serialization_key, kvp)) => cx
                 .background_spawn(async move { kvp.read_kvp(&serialization_key) })
                 .await
-                .context("loading git panel")
+                .context("loading source control panel")
                 .log_err()
                 .flatten()
                 .map(|panel| serde_json::from_str::<SerializedGitPanel>(&panel))
@@ -6547,7 +6562,7 @@ impl Panel for GitPanel {
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Git Panel")
+        Some("Source Control Panel")
     }
 
     fn icon_label(&self, _: &Window, cx: &App) -> Option<String> {
@@ -7278,7 +7293,7 @@ mod tests {
         repository::{RepositoryKind, repo_path},
         status::{StatusCode, UnmergedStatus, UnmergedStatusCode},
     };
-    use gpui::{TestAppContext, UpdateGlobal, VisualTestContext, px};
+    use gpui::{Action, TestAppContext, UpdateGlobal, VisualTestContext, px};
     use indoc::indoc;
     use project::FakeFs;
     use serde_json::json;
@@ -7290,6 +7305,15 @@ mod tests {
     use workspace::MultiWorkspace;
 
     use super::*;
+
+    #[test]
+    fn source_control_panel_actions_keep_git_panel_aliases() {
+        assert_eq!(
+            ToggleFocus::name_for_type(),
+            "source_control_panel::ToggleFocus"
+        );
+        assert!(ToggleFocus::deprecated_aliases().contains(&"git_panel::ToggleFocus"));
+    }
 
     fn init_test(cx: &mut gpui::TestAppContext) {
         zlog::init_test();

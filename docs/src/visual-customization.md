@@ -546,11 +546,11 @@ See [Terminal settings](./reference/all-settings.md#terminal) for additional non
 ### Other Panels
 
 ```json [settings]
-  // Git Panel
+  // Source Control Panel
   "git_panel": {
     "button": true,               // Show/hide status bar icon
     "dock": "left",               // Where to dock: left, right
-    "default_width": 360,         // Default width of the git panel.
+    "default_width": 360,         // Default width of the source control panel.
     "status_style": "icon",       // label_color, icon
     "sort_by_path": false,        // Sort by path (false) or status (true)
     "scrollbar": {
@@ -567,7 +567,7 @@ See [Terminal settings](./reference/all-settings.md#terminal) for additional non
   // Outline Panel
   "outline_panel": {
     "button": true,               // Show/hide status bar icon
-    "default_width": 300,         // Default width of the git panel
+    "default_width": 300,         // Default width of the source control panel
     "dock": "left",               // Where to dock: left, right
     "file_icons": true,           // Show/hide file_icons
     "folder_icons": true,         // Show file_icons (true), chevrons (false) for dirs

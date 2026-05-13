@@ -236,7 +236,7 @@ RustRover organizes auxiliary views into numbered tool windows (Project = 1, Car
 | RustRover Tool Window | Zed Equivalent | Shortcut (JetBrains keymap) |
 | --------------------- | -------------- | --------------------------- |
 | Project (1)           | Project Panel  | `Cmd + 1`                   |
-| Git (9 or Cmd+0)      | Git Panel      | `Cmd + 0`                   |
+| Git (9 or Cmd+0)      | Source Control Panel      | `Cmd + 0`                   |
 | Terminal (Alt+F12)    | Terminal Panel | `Alt + F12`                 |
 | Structure (7)         | Outline Panel  | `Cmd + 7`                   |
 | Problems (6)          | Diagnostics    | `Cmd + 6`                   |

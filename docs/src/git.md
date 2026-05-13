@@ -5,15 +5,15 @@ title: Zed Editor Git integration documentation
 
 # Git
 
-Zed has built-in Git support that lets you manage version control without leaving the editor. The Git Panel shows your working tree state, staging area, and branch information. Changes you make on the command line are reflected immediately in Zed.
+Zed has built-in Git support that lets you manage version control without leaving the editor. The Source Control Panel shows your working tree state, staging area, and branch information. Changes you make on the command line are reflected immediately in Zed.
 
 For operations that Zed doesn't support natively, you can use the integrated terminal.
 
-## Git Panel
+## Source Control Panel
 
-The Git Panel shows the state of your working tree and Git's staging area.
+The Source Control Panel shows the state of your working tree and Git's staging area.
 
-You can open the Git Panel using {#action git_panel::ToggleFocus}, or by clicking the Git icon in the status bar.
+You can open the Source Control Panel using {#action source_control_panel::ToggleFocus}, or by clicking the source control icon in the status bar.
 
 In the panel you can see the state of your project at a glance: which repository and branch are active, what files have changed and the current staging state of each file.
 
@@ -23,16 +23,16 @@ Zed monitors your repository so that changes you make on the command line are in
 
 Open the Settings Editor (`Cmd+,` on macOS, `Ctrl+,` on Linux/Windows) to customize Git behavior. Settings are spread across two pages:
 
-- **Panels > Git Panel**: Panel position, tree vs flat view, status display style
+- **Panels > Source Control Panel**: Panel position, tree vs flat view, status display style
 - **Version Control**: Gutter indicators, inline blame, hunk styles
 
-#### Moving the Git Panel
+#### Moving the Source Control Panel
 
-By default, the Git Panel docks on the left. Go to **Panels > Git Panel** and change **Git Panel Dock** to move it to the right or bottom.
+By default, the Source Control Panel docks on the left. Go to **Panels > Source Control Panel** and change **Source Control Panel Dock** to move it to the right or bottom.
 
 #### Switching to Tree View
 
-The Git Panel shows a flat list of changed files by default. To see files organized by folder hierarchy instead, toggle **Tree View** in the panel's context menu, or enable it in **Panels > Git Panel**.
+The Source Control Panel shows a flat list of changed files by default. To see files organized by folder hierarchy instead, toggle **Tree View** in the panel's context menu, or enable it in **Panels > Source Control Panel**.
 
 #### Inline Blame
 
@@ -48,7 +48,7 @@ Zed wraps commit messages at 72 characters (a Git convention). To change this, s
 
 ## Project Diff
 
-You can see all of the changes captured by Git in Zed by opening the Project Diff ({#kb git::Diff}), accessible via the {#action git::Diff} action in the Command Palette or the Git Panel.
+You can see all of the changes captured by Git in Zed by opening the Project Diff ({#kb git::Diff}), accessible via the {#action git::Diff} action in the Command Palette or the Source Control Panel.
 
 All of the changes displayed in the Project Diff behave exactly the same as any other multibuffer: they are all editable excerpts of files.
 
@@ -102,13 +102,13 @@ File History shows the commit history for an individual file. Each entry display
 To view File History:
 
 - Right-click on a file in the Project Panel and select "View File History"
-- Right-click on a file in the Git Panel and select "View File History"
+- Right-click on a file in the Source Control Panel and select "View File History"
 - Right-click on an editor tab and select "View File History"
 - Use the Command Palette and search for "file history"
 
 ## Fetch, Push, and Pull
 
-Fetch, push, or pull from your Git repository in Zed via the buttons available on the Git Panel or via the Command Palette by looking at the respective actions: {#action git::Fetch}, {#action git::Push}, and {#action git::Pull}.
+Fetch, push, or pull from your Git repository in Zed via the buttons available on the Source Control Panel or via the Command Palette by looking at the respective actions: {#action git::Fetch}, {#action git::Push}, and {#action git::Pull}.
 
 ### Push Configuration
 
@@ -122,7 +122,7 @@ This matches Git's standard behavior, so if you've configured `pushRemote` or `p
 
 ## Remotes
 
-When your repository has multiple remotes, Zed shows a remote selector in the Git Panel. Click the remote button next to push/pull to choose which remote to use for that operation.
+When your repository has multiple remotes, Zed shows a remote selector in the Source Control Panel. Click the remote button next to push/pull to choose which remote to use for that operation.
 
 ## Staging Workflow
 
@@ -134,7 +134,7 @@ In the Project Diff view, you can focus on each hunk and stage them individually
 
 Similarly, stage all hunks at the same time with the {#action git::StageAll} ({#kb git::StageAll}) keybinding and then immediately commit with {#action git::Commit} ({#kb git::Commit}).
 
-### Using the Git Panel
+### Using the Source Control Panel
 
 From the panel, you can simply type a commit message and hit the commit button, or {#action git::Commit}. This will automatically stage all tracked files (indicated by a `[·]` in the entry's checkbox) and commit them.
 
@@ -148,12 +148,12 @@ Entries can be staged using each individual entry's checkbox. All changes can be
 
 Zed offers two commit textareas:
 
-1. The first one is available right at the bottom of the Git Panel. Hitting {#kb git::Commit} immediately commits all of your staged changes.
-2. The second is available via the action {#action git::ExpandCommitEditor} or via hitting the {#kb git::ExpandCommitEditor} while focused in the Git Panel commit textarea.
+1. The first one is available right at the bottom of the Source Control Panel. Hitting {#kb git::Commit} immediately commits all of your staged changes.
+2. The second is available via the action {#action git::ExpandCommitEditor} or via hitting the {#kb git::ExpandCommitEditor} while focused in the Source Control Panel commit textarea.
 
 ### Undoing a Commit
 
-As soon as you commit in Zed, in the Git Panel, you'll see a bar right under the commit textarea, which will show the recently submitted commit.
+As soon as you commit in Zed, in the Source Control Panel, you'll see a bar right under the commit textarea, which will show the recently submitted commit.
 In there, you can use the "Uncommit" button, which performs the `git reset HEADˆ--soft` command.
 
 ### Configuring Commit Line Length
@@ -217,7 +217,7 @@ When you encounter merge conflicts after a merge, rebase, or pull, Zed highlight
 
 ### Viewing Conflicts
 
-Conflicting files appear in the Git Panel with a warning icon. You can also see conflicts in the Project Diff view, where each conflict region is highlighted:
+Conflicting files appear in the Source Control Panel with a warning icon. You can also see conflicts in the Project Diff view, where each conflict region is highlighted:
 
 - Changes from your current branch are highlighted in green
 - Changes from the incoming branch are highlighted in blue
@@ -244,7 +244,7 @@ To stash all your current changes, use the {#action git::StashAll} action. This 
 
 ### Managing Stashes
 
-Zed provides a stash picker accessible via {#action git::ViewStash} or from the Git Panel's overflow menu. From the stash picker, you can:
+Zed provides a stash picker accessible via {#action git::ViewStash} or from the Source Control Panel's overflow menu. From the stash picker, you can:
 
 - **View stash list**: Browse all your saved stashes with their descriptions and timestamps
 - **Open diffs**: See exactly what changes are stored in each stash
@@ -272,7 +272,7 @@ To view a stash's contents, select it in the stash picker and press {#kb stash_p
 ## AI Support in Git
 
 Zed currently supports LLM-powered commit message generation.
-You can ask AI to generate a commit message by focusing on the message editor within the Git Panel and either clicking on the pencil icon in the bottom left, or reaching for the {#action git::GenerateCommitMessage} ({#kb git::GenerateCommitMessage}) keybinding.
+You can ask AI to generate a commit message by focusing on the message editor within the Source Control Panel and either clicking on the pencil icon in the bottom left, or reaching for the {#action git::GenerateCommitMessage} ({#kb git::GenerateCommitMessage}) keybinding.
 
 > Note that you need to have an LLM provider configured either via your own API keys or through Zed's hosted AI models.
 > Visit [the AI configuration page](./ai/configuration.md) to learn how to do so.

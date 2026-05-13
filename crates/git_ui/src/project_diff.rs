@@ -199,7 +199,7 @@ impl ProjectDiff {
         telemetry::event!(
             "Git Diff Opened",
             source = if entry.is_some() {
-                "Git Panel"
+                "Source Control Panel"
             } else {
                 "Action"
             }

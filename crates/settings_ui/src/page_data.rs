@@ -5479,10 +5479,10 @@ fn panels_page() -> SettingsPage {
 
     fn git_panel_section() -> [SettingsPageItem; 15] {
         [
-            SettingsPageItem::SectionHeader("Git Panel"),
+            SettingsPageItem::SectionHeader("Source Control Panel"),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Panel Button",
-                description: "Show the Git panel button in the status bar.",
+                title: "Source Control Panel Button",
+                description: "Show the source control panel button in the status bar.",
                 field: Box::new(SettingField {
                     json_path: Some("git_panel.button"),
                     pick: |settings_content| settings_content.git_panel.as_ref()?.button.as_ref(),
@@ -5494,8 +5494,8 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Panel Dock",
-                description: "Where to dock the Git panel.",
+                title: "Source Control Panel Dock",
+                description: "Where to dock the source control panel.",
                 field: Box::new(SettingField {
                     json_path: Some("git_panel.dock"),
                     pick: |settings_content| settings_content.git_panel.as_ref()?.dock.as_ref(),
@@ -5507,8 +5507,8 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Panel Default Width",
-                description: "Default width of the Git panel in pixels.",
+                title: "Source Control Panel Default Width",
+                description: "Default width of the source control panel in pixels.",
                 field: Box::new(SettingField {
                     json_path: Some("git_panel.default_width"),
                     pick: |settings_content| {
@@ -5525,7 +5525,7 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Panel Status Style",
+                title: "Source Control Panel Status Style",
                 description: "How entry statuses are displayed.",
                 field: Box::new(SettingField {
                     json_path: Some("git_panel.status_style"),
@@ -5621,7 +5621,7 @@ fn panels_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Icons",
-                description: "Show file icons next to the Git status icon.",
+                description: "Show file icons next to the status icon.",
                 field: Box::new(SettingField {
                     json_path: Some("git_panel.file_icons"),
                     pick: |settings_content| {
@@ -5639,7 +5639,7 @@ fn panels_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Folder Icons",
-                description: "Whether to show folder icons or chevrons for directories in the git panel.",
+                description: "Whether to show folder icons or chevrons for directories in the source control panel.",
                 field: Box::new(SettingField {
                     json_path: Some("git_panel.folder_icons"),
                     pick: |settings_content| {
@@ -5657,7 +5657,7 @@ fn panels_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Diff Stats",
-                description: "Whether to show the addition/deletion change count next to each file in the Git panel.",
+                description: "Whether to show the addition/deletion change count next to each file in the source control panel.",
                 field: Box::new(SettingField {
                     json_path: Some("git_panel.diff_stats"),
                     pick: |settings_content| {
@@ -5675,7 +5675,7 @@ fn panels_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Count Badge",
-                description: "Whether to show a badge on the git panel icon with the count of uncommitted changes.",
+                description: "Whether to show a badge on the source control panel icon with the count of uncommitted changes.",
                 field: Box::new(SettingField {
                     json_path: Some("git_panel.show_count_badge"),
                     pick: |settings_content| {

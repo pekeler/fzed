@@ -5302,9 +5302,9 @@ Visit [the Configuration page](../ai/configuration.md) under the AI section to l
 
 See the [debugger page](../debugger.md) for more information about debugging support within Zed.
 
-## Git Panel
+## Source Control Panel
 
-- Description: Setting to customize the behavior of the git panel.
+- Description: Setting to customize the behavior of the source control panel.
 - Setting: `git_panel`
 - Default:
 
@@ -5328,15 +5328,15 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 
 **Options**
 
-- `button`: Whether to show the git panel button in the status bar
-- `dock`: Where to dock the git panel. Can be `left` or `right`
-- `default_width`: Default width of the git panel
+- `button`: Whether to show the source control panel button in the status bar
+- `dock`: Where to dock the source control panel. Can be `left` or `right`
+- `default_width`: Default width of the source control panel
 - `status_style`: How to display git status. Can be `label_color` or `icon`
 - `fallback_branch_name`: What branch name to use if `init.defaultBranch` is not set
 - `sort_by_path`: Whether to sort entries in the panel by path or by status (the default)
 - `collapse_untracked_diff`: Whether to collapse untracked files in the diff panel
-- `scrollbar`: When to show the scrollbar in the git panel
-- `starts_open`: Whether the git panel should open on startup
+- `scrollbar`: When to show the scrollbar in the source control panel
+- `starts_open`: Whether the source control panel should open on startup
 
 ## Git Worktree Directory
 

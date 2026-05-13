@@ -230,7 +230,7 @@ WebStorm organizes auxiliary views into numbered tool windows. Zed uses a simila
 | WebStorm Tool Window | Zed Equivalent | Zed Keybinding                             |
 | -------------------- | -------------- | ------------------------------------------ |
 | Project              | Project Panel  | {#kb:jetbrains project_panel::ToggleFocus} |
-| Git                  | Git Panel      | {#kb:jetbrains git_panel::ToggleFocus}     |
+| Git                  | Source Control Panel      | {#kb:jetbrains source_control_panel::ToggleFocus}     |
 | Terminal             | Terminal Panel | {#kb:jetbrains terminal_panel::Toggle}     |
 | Structure            | Outline Panel  | {#kb:jetbrains outline_panel::ToggleFocus} |
 | Problems             | Diagnostics    | {#kb:jetbrains diagnostics::Deploy}        |

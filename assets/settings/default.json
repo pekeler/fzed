@@ -931,22 +931,22 @@
     "default_width": 240,
   },
   "git_panel": {
-    // Whether to show the git panel button in the status bar.
+    // Whether to show the source control panel button in the status bar.
     "button": true,
-    // Where to dock the git panel. Can be 'left' or 'right'.
+    // Where to dock the source control panel. Can be 'left' or 'right'.
     "dock": "right",
-    // Default width of the git panel.
+    // Default width of the source control panel.
     "default_width": 360,
     // Style of the git status indicator in the panel.
     //
     // Choices: label_color, icon
     // Default: icon
     "status_style": "icon",
-    // Whether to show file icons in the git panel.
+    // Whether to show file icons in the source control panel.
     //
     // Default: false
     "file_icons": false,
-    // Whether to show folder icons or chevrons for directories in the git panel.
+    // Whether to show folder icons or chevrons for directories in the source control panel.
     //
     // Default: true
     "folder_icons": true,
@@ -966,22 +966,22 @@
     ///
     /// Default: false
     "tree_view": false,
-    // Whether the git panel should open on startup.
+    // Whether the source control panel should open on startup.
     //
     // Default: false
     "starts_open": false,
-    // Whether to show a badge on the git panel icon with the count of uncommitted changes.
+    // Whether to show a badge on the source control panel icon with the count of uncommitted changes.
     //
     // Default: false
     "show_count_badge": false,
     "scrollbar": {
-      // When to show the scrollbar in the git panel.
+      // When to show the scrollbar in the source control panel.
       //
       // Choices: always, auto, never, system
       // Default: inherits editor scrollbar settings
       // "show": null
     },
-    // Whether to show the addition/deletion change count next to each file in the Git panel.
+    // Whether to show the addition/deletion change count next to each file in the source control panel.
     //
     // Default: true
     "diff_stats": true,

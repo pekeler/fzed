@@ -98,7 +98,7 @@ actions!(
         /// Expands the commit message editor.
         ExpandCommitEditor,
         /// Toggles whether the commit message editor fills all the available
-        /// vertical space within the git panel.
+        /// vertical space within the source control panel.
         ToggleFillCommitEditor,
         /// Generates a commit message using AI.
         GenerateCommitMessage,

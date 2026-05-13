@@ -4764,7 +4764,7 @@ mod tests {
                 weak_workspace,
                 async_window_cx,
             ))
-            .expect("git panel should load");
+            .expect("source control panel should load");
         cx.background_executor.forbid_parking();
 
         workspace_window
