@@ -463,7 +463,7 @@ impl SplittableEditor {
     }
 
     pub fn disable_diff_hunk_controls(&self, cx: &mut Context<Self>) {
-        let empty_controls = Arc::new(|_, _: &_, _, _, _, _: &_, _: &mut _, _: &mut _| {
+        let empty_controls = Arc::new(|_, _, _: &_, _, _, _, _: &_, _: &mut _, _: &mut _| {
             gpui::Empty.into_any_element()
         });
         self.update_editors(cx, |editor, cx| {

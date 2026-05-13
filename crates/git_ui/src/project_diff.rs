@@ -610,8 +610,8 @@ impl ProjectDiff {
             .ok();
 
         ButtonStates {
-            stage: has_unstaged_hunks && !repository_kind.is_fossil(),
-            unstage: has_staged_hunks && !repository_kind.is_fossil(),
+            stage: has_unstaged_hunks && repository_kind.supports_hunk_stage_and_restore(),
+            unstage: has_staged_hunks && repository_kind.supports_hunk_stage_and_restore(),
             prev_next,
             selection,
             stage_all,
@@ -1416,7 +1416,7 @@ struct ButtonStates {
 
 impl ButtonStates {
     fn show_hunk_stage_controls(&self) -> bool {
-        !self.repository_kind.is_fossil()
+        self.repository_kind.supports_hunk_stage_and_restore()
     }
 }
 

@@ -5744,6 +5744,7 @@ impl EditorElement {
 
         for (hunk, _) in display_hunks {
             if let DisplayDiffHunk::Unfolded {
+                buffer_id,
                 display_row_range,
                 multi_buffer_range,
                 status,
@@ -5807,6 +5808,7 @@ impl EditorElement {
 
                     let mut element = render_diff_hunk_controls(
                         display_row_range.start.0,
+                        *buffer_id,
                         status,
                         multi_buffer_range.clone(),
                         *is_created_file,

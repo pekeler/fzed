@@ -775,6 +775,13 @@ impl RepositoryKind {
     pub fn is_fossil(self) -> bool {
         self == Self::Fossil
     }
+
+    pub fn supports_hunk_stage_and_restore(self) -> bool {
+        match self {
+            Self::Git => true,
+            Self::Fossil => false,
+        }
+    }
 }
 
 pub trait GitRepository: Send + Sync {
