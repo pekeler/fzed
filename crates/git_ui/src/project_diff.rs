@@ -38,7 +38,7 @@ use std::any::{Any, TypeId};
 use std::sync::Arc;
 use theme::ActiveTheme;
 use ui::{DiffStat, Divider, KeyBinding, Tooltip, prelude::*, vertical_divider};
-use util::{ResultExt as _, rel_path::RelPath};
+use util::rel_path::RelPath;
 use workspace::{
     CloseActiveItem, ItemNavHistory, SerializableItem, ToolbarItemEvent, ToolbarItemLocation,
     ToolbarItemView, Workspace,
@@ -829,39 +829,55 @@ impl ProjectDiff {
         let mut buffers_to_fold = Vec::new();
 
         for (entry, path_key) in buffers_to_load.into_iter().zip(path_keys) {
-            if let Some((buffer, diff)) = entry.load.await.log_err() {
-                // We might be lagging behind enough that all future entry.load futures are no longer pending.
-                // If that is the case, this task will never yield, starving the foreground thread of execution time.
-                yield_now().await;
-                cx.update(|window, cx| {
-                    this.update(cx, |this, cx| {
-                        let multibuffer = this.multibuffer.read(cx);
-                        let skip = multibuffer.buffer(buffer.read(cx).remote_id()).is_some()
-                            && multibuffer
-                                .diff_for(buffer.read(cx).remote_id())
-                                .is_some_and(|prev_diff| prev_diff.entity_id() == diff.entity_id())
-                            && match reason {
-                                RefreshReason::DiffChanged | RefreshReason::EditorSaved => {
-                                    buffer.read(cx).is_dirty()
-                                }
-                                RefreshReason::StatusesChanged => false,
-                            };
-                        if !skip {
-                            if let Some(buffer_id) = this.register_buffer(
-                                path_key,
-                                entry.file_status,
-                                buffer,
-                                diff,
-                                window,
-                                cx,
-                            ) {
-                                buffers_to_fold.push(buffer_id);
+            let (buffer, diff) = match entry.load.await {
+                Ok(diff) => diff,
+                Err(error) if is_unsupported_binary_file_error(&error) => {
+                    log::debug!(
+                        "Skipping binary file in project diff: {}",
+                        entry.repo_path.as_std_path().display()
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    log::error!(
+                        "failed to load project diff for {}: {error:#}",
+                        entry.repo_path.as_std_path().display()
+                    );
+                    continue;
+                }
+            };
+
+            // We might be lagging behind enough that all future entry.load futures are no longer pending.
+            // If that is the case, this task will never yield, starving the foreground thread of execution time.
+            yield_now().await;
+            cx.update(|window, cx| {
+                this.update(cx, |this, cx| {
+                    let multibuffer = this.multibuffer.read(cx);
+                    let skip = multibuffer.buffer(buffer.read(cx).remote_id()).is_some()
+                        && multibuffer
+                            .diff_for(buffer.read(cx).remote_id())
+                            .is_some_and(|prev_diff| prev_diff.entity_id() == diff.entity_id())
+                        && match reason {
+                            RefreshReason::DiffChanged | RefreshReason::EditorSaved => {
+                                buffer.read(cx).is_dirty()
                             }
+                            RefreshReason::StatusesChanged => false,
+                        };
+                    if !skip {
+                        if let Some(buffer_id) = this.register_buffer(
+                            path_key,
+                            entry.file_status,
+                            buffer,
+                            diff,
+                            window,
+                            cx,
+                        ) {
+                            buffers_to_fold.push(buffer_id);
                         }
-                    })
-                    .ok();
-                })?;
-            }
+                    }
+                })
+                .ok();
+            })?;
         }
         this.update(cx, |this, cx| {
             if !buffers_to_fold.is_empty() {
@@ -899,6 +915,12 @@ impl ProjectDiff {
             })
             .collect()
     }
+}
+
+fn is_unsupported_binary_file_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string() == "Binary files are not supported")
 }
 
 fn sort_prefix(repo: &Repository, repo_path: &RepoPath, status: FileStatus, cx: &App) -> u64 {
@@ -1870,6 +1892,18 @@ mod tests {
             ..button_states
         };
         assert!(button_states.show_hunk_stage_controls());
+    }
+
+    #[test]
+    fn project_diff_treats_binary_file_errors_as_expected() {
+        let error = anyhow::anyhow!("Binary files are not supported");
+        assert!(is_unsupported_binary_file_error(&error));
+
+        let error = anyhow::anyhow!("Binary files are not supported").context("opening image.png");
+        assert!(is_unsupported_binary_file_error(&error));
+
+        let error = anyhow::anyhow!("failed to load buffer");
+        assert!(!is_unsupported_binary_file_error(&error));
     }
 
     #[gpui::test]
