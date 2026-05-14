@@ -526,8 +526,7 @@ impl GitRepository for FossilRepository {
                     args.push(OsString::from(commit));
                 }
                 args.extend(repo_paths_to_args(paths));
-                run_fossil_commit_with_legacy_comment_verification_fallback(&fossil, &args, env)
-                    .await?;
+                fossil.run_with_env(&args, env).await?;
                 Ok(())
             })
             .boxed()
@@ -759,7 +758,8 @@ impl GitRepository for FossilRepository {
                 }
 
                 args.extend(repo_paths_to_args(paths));
-                fossil.run_with_env(&args, env).await?;
+                run_fossil_commit_with_legacy_comment_verification_fallback(&fossil, &args, env)
+                    .await?;
                 Ok(())
             })
             .boxed()
