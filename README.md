@@ -1,5 +1,7 @@
 # FZed
 
+[![CI](https://github.com/pekeler/fzed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/pekeler/fzed/actions/workflows/run_tests.yml)
+
 FZed is a fork of [Zed](https://zed.dev) focused on adding first-class
 [Fossil SCM](https://fossil-scm.org/) support while keeping the fork close
 enough to upstream Zed to continue merging upstream changes.
