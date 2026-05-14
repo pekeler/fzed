@@ -6,6 +6,17 @@ enough to upstream Zed to continue merging upstream changes.
 
 ## Fork-Specific Documentation
 
+### Upstream Tracking Policy
+
+FZed tracks upstream Zed release tags, not upstream `main`.
+
+The fork should be rebased or merged forward when Zed publishes a new release
+tag, then FZed-specific commits should be replayed and tested on top of that
+release. Between upstream releases, avoid pulling daily upstream `main` commits
+unless a specific fix is needed and is intentionally cherry-picked.
+
+Current upstream baseline: `v1.2.3`.
+
 ### Current Development Build
 
 The Cargo package is still named `zed` to reduce upstream merge churn, but the

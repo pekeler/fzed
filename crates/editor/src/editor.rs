@@ -28703,74 +28703,72 @@ fn render_diff_hunk_controls(
             )
         })
         .when(show_navigation_controls, |el| {
-                el.child(
-                    IconButton::new(("next-hunk", row as u64), IconName::ArrowDown)
-                        .shape(IconButtonShape::Square)
-                        .icon_size(IconSize::Small)
-                        // .disabled(!has_multiple_hunks)
-                        .tooltip({
-                            let focus_handle = editor.focus_handle(cx);
-                            move |_window, cx| {
-                                Tooltip::for_action_in("Next Hunk", &GoToHunk, &focus_handle, cx)
-                            }
-                        })
-                        .on_click({
-                            let editor = editor.clone();
-                            move |_event, window, cx| {
-                                editor.update(cx, |editor, cx| {
-                                    let snapshot = editor.snapshot(window, cx);
-                                    let position =
-                                        hunk_range.end.to_point(&snapshot.buffer_snapshot());
-                                    editor.go_to_hunk_before_or_after_position(
-                                        &snapshot,
-                                        position,
-                                        Direction::Next,
-                                        true,
-                                        window,
-                                        cx,
-                                    );
-                                    editor.expand_selected_diff_hunks(cx);
-                                });
-                            }
-                        }),
-                )
-                .child(
-                    IconButton::new(("prev-hunk", row as u64), IconName::ArrowUp)
-                        .shape(IconButtonShape::Square)
-                        .icon_size(IconSize::Small)
-                        // .disabled(!has_multiple_hunks)
-                        .tooltip({
-                            let focus_handle = editor.focus_handle(cx);
-                            move |_window, cx| {
-                                Tooltip::for_action_in(
-                                    "Previous Hunk",
-                                    &GoToPreviousHunk,
-                                    &focus_handle,
+            el.child(
+                IconButton::new(("next-hunk", row as u64), IconName::ArrowDown)
+                    .shape(IconButtonShape::Square)
+                    .icon_size(IconSize::Small)
+                    // .disabled(!has_multiple_hunks)
+                    .tooltip({
+                        let focus_handle = editor.focus_handle(cx);
+                        move |_window, cx| {
+                            Tooltip::for_action_in("Next Hunk", &GoToHunk, &focus_handle, cx)
+                        }
+                    })
+                    .on_click({
+                        let editor = editor.clone();
+                        move |_event, window, cx| {
+                            editor.update(cx, |editor, cx| {
+                                let snapshot = editor.snapshot(window, cx);
+                                let position = hunk_range.end.to_point(&snapshot.buffer_snapshot());
+                                editor.go_to_hunk_before_or_after_position(
+                                    &snapshot,
+                                    position,
+                                    Direction::Next,
+                                    true,
+                                    window,
                                     cx,
-                                )
-                            }
-                        })
-                        .on_click({
-                            let editor = editor.clone();
-                            move |_event, window, cx| {
-                                editor.update(cx, |editor, cx| {
-                                    let snapshot = editor.snapshot(window, cx);
-                                    let point =
-                                        hunk_range.start.to_point(&snapshot.buffer_snapshot());
-                                    editor.go_to_hunk_before_or_after_position(
-                                        &snapshot,
-                                        point,
-                                        Direction::Prev,
-                                        true,
-                                        window,
-                                        cx,
-                                    );
-                                    editor.expand_selected_diff_hunks(cx);
-                                });
-                            }
-                        }),
-                )
-            })
+                                );
+                                editor.expand_selected_diff_hunks(cx);
+                            });
+                        }
+                    }),
+            )
+            .child(
+                IconButton::new(("prev-hunk", row as u64), IconName::ArrowUp)
+                    .shape(IconButtonShape::Square)
+                    .icon_size(IconSize::Small)
+                    // .disabled(!has_multiple_hunks)
+                    .tooltip({
+                        let focus_handle = editor.focus_handle(cx);
+                        move |_window, cx| {
+                            Tooltip::for_action_in(
+                                "Previous Hunk",
+                                &GoToPreviousHunk,
+                                &focus_handle,
+                                cx,
+                            )
+                        }
+                    })
+                    .on_click({
+                        let editor = editor.clone();
+                        move |_event, window, cx| {
+                            editor.update(cx, |editor, cx| {
+                                let snapshot = editor.snapshot(window, cx);
+                                let point = hunk_range.start.to_point(&snapshot.buffer_snapshot());
+                                editor.go_to_hunk_before_or_after_position(
+                                    &snapshot,
+                                    point,
+                                    Direction::Prev,
+                                    true,
+                                    window,
+                                    cx,
+                                );
+                                editor.expand_selected_diff_hunks(cx);
+                            });
+                        }
+                    }),
+            )
+        })
         .into_any_element()
 }
 

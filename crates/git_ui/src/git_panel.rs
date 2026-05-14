@@ -27,8 +27,7 @@ use git::commit::ParsedCommitMessage;
 use git::repository::{
     Branch, CommitDetails, CommitOptions, CommitSummary, DiffType, FetchOptions, FossilSyncState,
     GitCommitTemplate, GitCommitter, PushOptions, Remote, RemoteCommandOutput, RepositoryKind,
-    ResetMode, Upstream, UpstreamTracking,
-    UpstreamTrackingStatus, get_git_committer,
+    ResetMode, Upstream, UpstreamTracking, UpstreamTrackingStatus, get_git_committer,
 };
 use git::stash::GitStash;
 use git::status::{DiffStat, StageStatus};
@@ -215,6 +214,7 @@ fn stage_file_action_title(repository_kind: RepositoryKind, staging: StageStatus
     }
 }
 
+#[cfg(test)]
 fn history_tab_title(repository_kind: RepositoryKind) -> &'static str {
     if repository_kind.is_fossil() {
         "Timeline"
@@ -223,6 +223,7 @@ fn history_tab_title(repository_kind: RepositoryKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn history_loading_label(repository_kind: RepositoryKind) -> &'static str {
     if repository_kind.is_fossil() {
         "Loading Timeline…"
@@ -231,6 +232,7 @@ fn history_loading_label(repository_kind: RepositoryKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn history_entry_tooltip_title(repository_kind: RepositoryKind) -> &'static str {
     if repository_kind.is_fossil() {
         "View Check-in"

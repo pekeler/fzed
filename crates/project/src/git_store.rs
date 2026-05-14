@@ -37,7 +37,7 @@ use git::{
         CreateWorktreeTarget, DiffType, FetchOptions, FossilSyncState, GitCommitTemplate,
         GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
         PushOptions, Remote, RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode,
-        SearchCommitArgs, UpstreamTrackingStatus, Worktree as GitWorktree, delete_branch_flag,
+        SearchCommitArgs, UpstreamTrackingStatus, Worktree as GitWorktree,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -5121,40 +5121,34 @@ impl Repository {
             cx,
             async move |this, cx| {
                 this.update(cx, |this, _cx| {
-                    this.send_job(
-                        Some(status_message),
-                        move |git_repo, _| async move {
-                            match git_repo {
-                                RepositoryState::Local(LocalRepositoryState {
-                                    backend,
-                                    environment,
-                                    ..
-                                }) => {
-                                    backend
-                                        .checkout_files(commit, paths, environment.clone())
-                                        .await
-                                }
-                                RepositoryState::Remote(RemoteRepositoryState {
-                                    project_id,
-                                    client,
-                                }) => {
-                                    client
-                                        .request(proto::GitCheckoutFiles {
-                                            project_id: project_id.0,
-                                            repository_id: id.to_proto(),
-                                            commit,
-                                            paths: paths
-                                                .into_iter()
-                                                .map(|p| p.to_proto())
-                                                .collect(),
-                                        })
-                                        .await?;
-
-                                    Ok(())
-                                }
+                    this.send_job(Some(status_message), move |git_repo, _| async move {
+                        match git_repo {
+                            RepositoryState::Local(LocalRepositoryState {
+                                backend,
+                                environment,
+                                ..
+                            }) => {
+                                backend
+                                    .checkout_files(commit, paths, environment.clone())
+                                    .await
                             }
-                        },
-                    )
+                            RepositoryState::Remote(RemoteRepositoryState {
+                                project_id,
+                                client,
+                            }) => {
+                                client
+                                    .request(proto::GitCheckoutFiles {
+                                        project_id: project_id.0,
+                                        repository_id: id.to_proto(),
+                                        commit,
+                                        paths: paths.into_iter().map(|p| p.to_proto()).collect(),
+                                    })
+                                    .await?;
+
+                                Ok(())
+                            }
+                        }
+                    })
                 })?
                 .await?
             },
@@ -7261,42 +7255,45 @@ impl Repository {
             None if is_fossil => "fossil open".to_string(),
             None => "git worktree add (detached)".to_string(),
         };
-        self.send_job(Some(job_description.into()), move |repo, mut cx| async move {
-            match repo {
-                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    let result = backend.create_worktree(target, path).await;
-                    if result.is_ok() {
-                        refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
-                    }
-                    result
-                }
-                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                    let (name, commit, use_existing_branch) = match target {
-                        CreateWorktreeTarget::ExistingBranch { branch_name } => {
-                            (Some(branch_name), None, true)
+        self.send_job(
+            Some(job_description.into()),
+            move |repo, mut cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        let result = backend.create_worktree(target, path).await;
+                        if result.is_ok() {
+                            refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
                         }
-                        CreateWorktreeTarget::NewBranch {
-                            branch_name,
-                            base_sha,
-                        } => (Some(branch_name), base_sha, false),
-                        CreateWorktreeTarget::Detached { base_sha } => (None, base_sha, false),
-                    };
+                        result
+                    }
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        let (name, commit, use_existing_branch) = match target {
+                            CreateWorktreeTarget::ExistingBranch { branch_name } => {
+                                (Some(branch_name), None, true)
+                            }
+                            CreateWorktreeTarget::NewBranch {
+                                branch_name,
+                                base_sha,
+                            } => (Some(branch_name), base_sha, false),
+                            CreateWorktreeTarget::Detached { base_sha } => (None, base_sha, false),
+                        };
 
-                    client
-                        .request(proto::GitCreateWorktree {
-                            project_id: project_id.0,
-                            repository_id: id.to_proto(),
-                            name: name.unwrap_or_default(),
-                            directory: path.to_string_lossy().to_string(),
-                            commit,
-                            use_existing_branch,
-                        })
-                        .await?;
+                        client
+                            .request(proto::GitCreateWorktree {
+                                project_id: project_id.0,
+                                repository_id: id.to_proto(),
+                                name: name.unwrap_or_default(),
+                                directory: path.to_string_lossy().to_string(),
+                                commit,
+                                use_existing_branch,
+                            })
+                            .await?;
 
-                    Ok(())
+                        Ok(())
+                    }
                 }
-            }
-        })
+            },
+        )
     }
 
     pub fn create_worktree_detached(
