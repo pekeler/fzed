@@ -88,6 +88,9 @@ FZed uses separate global/user settings and application data from upstream Zed:
   `~/Library/Application Support/fzed/`
 - logs: `~/Library/Logs/fzed/fzed.log`
 - cache/temp data: `~/Library/Caches/fzed/`
+- debug-build credentials: `~/.config/fzed/development_credentials`
+- production keychain credentials: namespaced as FZed entries, not shared with
+  upstream Zed
 
 Project settings are intentionally still shared with Zed for now:
 

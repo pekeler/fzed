@@ -28,10 +28,10 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Dev => "FZed-Editor-Dev",
+        ReleaseChannel::Nightly => "FZed-Editor-Nightly",
+        ReleaseChannel::Preview => "FZed-Editor-Preview",
+        ReleaseChannel::Stable => "FZed-Editor-Stable",
     }
 }
 

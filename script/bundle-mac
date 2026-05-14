@@ -100,7 +100,16 @@ sed \
     "s/package.metadata.bundle-${channel}/package.metadata.bundle/" \
     Cargo.toml
 
-app_path=$(cargo bundle ${build_flag} --target $target_triple --select-workspace-root | xargs)
+bundle_term="${TERM:-xterm-256color}"
+if [[ "$bundle_term" = "dumb" ]]; then
+    bundle_term="xterm-256color"
+fi
+
+if ! app_path=$(TERM="$bundle_term" cargo bundle ${build_flag} --target $target_triple --select-workspace-root | xargs); then
+    mv Cargo.toml.backup Cargo.toml
+    popd
+    exit 1
+fi
 
 mv Cargo.toml.backup Cargo.toml
 popd
@@ -335,5 +344,6 @@ cp target/${target_triple}/${target_dir}/fzed "${app_path}/Contents/MacOS/fzed"
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
 sign_app_binaries
 
-sign_binary "target/$target_triple/release/remote_server"
-gzip -f --stdout --best target/$target_triple/release/remote_server > target/zed-remote-server-macos-$arch_suffix.gz
+remote_server_path="target/$target_triple/$target_dir/remote_server"
+sign_binary "$remote_server_path"
+gzip -f --stdout --best "$remote_server_path" > target/zed-remote-server-macos-$arch_suffix.gz

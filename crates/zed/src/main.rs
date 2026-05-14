@@ -367,7 +367,7 @@ fn main() {
         }
     };
     if failed_single_instance_check {
-        println!("zed is already running");
+        println!("{} is already running", paths::APP_NAME_LOWERCASE);
         return;
     }
 

@@ -62,7 +62,8 @@ release.
 
 ### Versioning
 
-Files: `README.md`, future release tooling
+Files: `README.md`, `crates/zed/Cargo.toml`, `Cargo.lock`, future release
+tooling
 
 FZed release versions are derived from the upstream Zed release tag they are
 based on:
@@ -190,19 +191,33 @@ Fossil and fork-safety surface area.
 When using GitHub CLI against this repository, pass the FZed repository
 explicitly if needed so commands do not accidentally inspect upstream Zed.
 
-### Branding, Binary Name, And User Data
+### Branding, Binary Name, App Identity, And User Data
 
 Files: `README.md`, `crates/paths/src/paths.rs`, `crates/zed/src/main.rs`,
-`crates/release_channel/src/lib.rs`
+`crates/release_channel/src/lib.rs`, `crates/zed/src/zed/mac_only_instance.rs`,
+`crates/zed_credentials_provider/src/zed_credentials_provider.rs`,
+`script/bundle-mac`
 
 User-facing fork names should follow Zed's capitalization pattern: use `fzed`
 where Zed would use lowercase `zed`, and `FZed` where Zed would use capitalized
-`Zed`. The local development binary is `fzed`. Global/user settings, data,
-logs, cache, and temp directories use `fzed` paths rather than upstream Zed
-paths.
+`Zed`. The local development binary is `fzed`. macOS bundle metadata uses FZed
+names, `dev.fzed.*` bundle identifiers, and the `fzed://` URL scheme.
+Global/user settings, data, logs, cache, and temp directories use `fzed` paths
+rather than upstream Zed paths.
+
+FZed also uses fork-owned single-instance identities. On macOS, FZed's
+single-instance ports and handshake strings must not collide with upstream Zed.
+On Windows, the single-instance mutex/pipe app identifiers use `FZed`.
+
+FZed keychain entries are namespaced with `fzed:` before reaching the platform
+credential backend. Debug builds use the local development credential file by
+default, even if the release channel file says `stable`; set
+`FZED_DEVELOPMENT_USE_KEYCHAIN=1` only when intentionally testing production
+keychain behavior.
 
 Reason: FZed should be installable and runnable alongside upstream Zed without
-sharing global user data or presenting itself as upstream Zed.
+sharing global user data, logs, single-instance locks, keychain credentials, or
+presenting itself as upstream Zed.
 
 Project settings intentionally remain `.zed/settings.json`, `.zed/tasks.json`,
 and `.zed/debug.json` for now.
@@ -228,10 +243,10 @@ important during upstream merges:
 - `script/install.sh` and `script/get-released-version` still target Zed Cloud.
   Treat them as inherited upstream tooling, not FZed release tooling, until they
   are explicitly rewritten for FZed.
-- Platform app identifiers in `crates/release_channel/src/lib.rs` still use
-  upstream-style IDs in some places. Do not change them casually; bundle IDs,
-  application IDs, URL schemes, settings migration, and update behavior need to
-  be migrated deliberately.
+- Some platform/distribution metadata outside the macOS bundle path may still
+  use upstream Zed IDs or release URLs. Do not change them casually; bundle
+  IDs, application IDs, URL schemes, settings migration, and update behavior
+  need to be migrated deliberately.
 - Many source identifiers still say Git because the original Zed SCM layer is
   Git-shaped. User-facing Fossil behavior has priority over internal renaming.
 

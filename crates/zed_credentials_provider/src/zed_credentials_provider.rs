@@ -10,18 +10,23 @@ use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Global};
 use release_channel::ReleaseChannel;
 
-/// An environment variable whose presence indicates that the system keychain
+/// Environment variables whose presence indicates that the system keychain
 /// should be used in development.
 ///
-/// By default, running Zed in development uses the development credentials
+/// By default, running FZed in development uses the development credentials
 /// provider. Setting this environment variable allows you to interact with the
 /// system keychain (for instance, if you need to test something).
 ///
-/// Only works in development. Setting this environment variable in other
-/// release channels is a no-op.
+/// Only works in development. Setting these environment variables in release
+/// builds is a no-op. The Zed-prefixed name remains supported for upstream
+/// compatibility.
 static ZED_DEVELOPMENT_USE_KEYCHAIN: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("ZED_DEVELOPMENT_USE_KEYCHAIN").is_ok_and(|value| !value.is_empty())
+    std::env::var("FZED_DEVELOPMENT_USE_KEYCHAIN")
+        .or_else(|_| std::env::var("ZED_DEVELOPMENT_USE_KEYCHAIN"))
+        .is_ok_and(|value| !value.is_empty())
 });
+
+const KEYCHAIN_CREDENTIALS_NAMESPACE: &str = "fzed:";
 
 pub struct ZedCredentialsProvider(pub Arc<dyn CredentialsProvider>);
 
@@ -44,17 +49,9 @@ pub fn global(cx: &App) -> Arc<dyn CredentialsProvider> {
 
 fn new(cx: &App) -> Arc<dyn CredentialsProvider> {
     let use_development_provider = match ReleaseChannel::try_global(cx) {
-        Some(ReleaseChannel::Dev) => {
-            // In development we default to using the development
-            // credentials provider to avoid getting spammed by relentless
-            // keychain access prompts.
-            //
-            // However, if the `ZED_DEVELOPMENT_USE_KEYCHAIN` environment
-            // variable is set, we will use the actual keychain.
-            !*ZED_DEVELOPMENT_USE_KEYCHAIN
-        }
+        Some(ReleaseChannel::Dev) => !*ZED_DEVELOPMENT_USE_KEYCHAIN,
         Some(ReleaseChannel::Nightly | ReleaseChannel::Preview | ReleaseChannel::Stable) | None => {
-            false
+            cfg!(debug_assertions) && !*ZED_DEVELOPMENT_USE_KEYCHAIN
         }
     };
 
@@ -68,13 +65,23 @@ fn new(cx: &App) -> Arc<dyn CredentialsProvider> {
 /// A credentials provider that stores credentials in the system keychain.
 struct KeychainCredentialsProvider;
 
+impl KeychainCredentialsProvider {
+    fn namespaced_url(url: &str) -> String {
+        format!("{KEYCHAIN_CREDENTIALS_NAMESPACE}{url}")
+    }
+}
+
 impl CredentialsProvider for KeychainCredentialsProvider {
     fn read_credentials<'a>(
         &'a self,
         url: &'a str,
         cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<Option<(String, Vec<u8>)>>> + 'a>> {
-        async move { cx.update(|cx| cx.read_credentials(url)).await }.boxed_local()
+        async move {
+            let url = Self::namespaced_url(url);
+            cx.update(|cx| cx.read_credentials(&url)).await
+        }
+        .boxed_local()
     }
 
     fn write_credentials<'a>(
@@ -85,7 +92,8 @@ impl CredentialsProvider for KeychainCredentialsProvider {
         cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
         async move {
-            cx.update(move |cx| cx.write_credentials(url, username, password))
+            let url = Self::namespaced_url(url);
+            cx.update(move |cx| cx.write_credentials(&url, username, password))
                 .await
         }
         .boxed_local()
@@ -96,7 +104,11 @@ impl CredentialsProvider for KeychainCredentialsProvider {
         url: &'a str,
         cx: &'a AsyncApp,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        async move { cx.update(move |cx| cx.delete_credentials(url)).await }.boxed_local()
+        async move {
+            let url = Self::namespaced_url(url);
+            cx.update(move |cx| cx.delete_credentials(&url)).await
+        }
+        .boxed_local()
     }
 }
 
