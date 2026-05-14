@@ -25,14 +25,15 @@ Before resolving or accepting upstream changes:
 
 1. Read this file and `FZED_FOSSIL_PLAN.md`.
 2. Confirm the target upstream release tag and update the documented baseline.
-3. Resolve conflicts preserving the FZed behavior below.
-4. Search for restored upstream-only update or distribution behavior:
+3. Confirm the FZed version follows the versioning rule below.
+4. Resolve conflicts preserving the FZed behavior below.
+5. Search for restored upstream-only update or distribution behavior:
    `cloud.zed.dev`, `zed-industries/zed`, `Zed.dmg`, `Zed.exe`,
    `zed.tar.gz`, and `zed-remote-server`.
-5. Search for restored user-facing Git-only labels in shared SCM surfaces,
+6. Search for restored user-facing Git-only labels in shared SCM surfaces,
    especially panel names, diff actions, history views, and command palette
    entries.
-6. Run the focused Fossil/update checks that match the touched area. Useful
+7. Run the focused Fossil/update checks that match the touched area. Useful
    defaults:
 
 ```sh
@@ -58,6 +59,27 @@ FZed tracks upstream Zed release tags instead of upstream `main`.
 Reason: upstream `main` changes daily. Tracking release tags keeps integration
 work bounded and makes the FZed delta easier to review after each upstream
 release.
+
+### Versioning
+
+Files: `README.md`, future release tooling
+
+FZed release versions are derived from the upstream Zed release tag they are
+based on:
+
+- upstream `vX.Y.Z` maps to the first FZed release `X.Y.Z-fzed.0`
+- fork-only follow-ups on the same upstream base increment the suffix:
+  `X.Y.Z-fzed.1`, `X.Y.Z-fzed.2`, and so on
+- moving to a newer upstream Zed release tag resets the suffix to `fzed.0` for
+  that upstream version
+
+Reason: the upstream baseline remains visible in every FZed release, while
+FZed-only fixes still have an ordered release sequence. Use a prerelease suffix,
+not build metadata, because semver ignores build metadata for ordering.
+
+FZed update checks must compare only against FZed releases. A generic semver
+comparator considers `X.Y.Z` newer than `X.Y.Z-fzed.N`, so comparing against
+upstream Zed releases would be incorrect and unsafe.
 
 ### Fossil Support Is Additive
 

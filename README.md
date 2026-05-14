@@ -23,6 +23,21 @@ intentional fork differences that should be preserved while resolving conflicts.
 
 Current upstream baseline: `v1.2.3`.
 
+### Versioning
+
+FZed versions are derived from the upstream Zed release tag they are based on:
+
+- If the upstream tag is `vX.Y.Z`, the first FZed release based on that tag is
+  `X.Y.Z-fzed.0`.
+- If FZed publishes fork-only follow-up releases without changing the upstream
+  base tag, increment the suffix: `X.Y.Z-fzed.1`, `X.Y.Z-fzed.2`, and so on.
+- When FZed moves to a newer upstream Zed release tag, reset the suffix to
+  `fzed.0` for that upstream version.
+
+Use the prerelease suffix, not build metadata, so fork-only follow-ups sort in
+release order. FZed update checks must compare only against FZed releases, not
+against upstream Zed releases.
+
 ### Current Development Build
 
 The Cargo package is still named `zed` to reduce upstream merge churn, but the
