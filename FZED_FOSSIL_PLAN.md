@@ -13,6 +13,15 @@ Date: 2026-05-12
   - `origin` -> `https://github.com/pekeler/fzed.git`
   - `upstream` -> `https://github.com/zed-industries/zed.git`
 
+## Fork Runtime Safety
+
+- FZed must not use Zed's binary auto-update channel or replace itself with upstream Zed.
+- Until FZed publishes official binary releases, runtime binary update polling is disabled for every release channel.
+- Manual "Check for Updates" should explain that FZed binary updates are not available yet and can open `https://github.com/pekeler/fzed/releases`.
+- Release-note links should point at FZed GitHub pages, not Zed Cloud or `zed-industries/zed`.
+- Remote-server binary downloads from Zed Cloud are disabled until FZed publishes matching remote server artifacts or implements a FZed-specific remote-server distribution path.
+- Future optional task: replace the disabled binary updater with a FZed GitHub release check that never downloads or installs binaries. If it detects a newer official FZed release, the action should open the GitHub release page in the browser.
+
 ## Local Tooling Baseline
 
 Installed or verified on 2026-05-12:

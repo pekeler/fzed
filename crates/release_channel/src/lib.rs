@@ -173,9 +173,12 @@ impl ReleaseChannel {
             .map(|channel| channel.0)
     }
 
-    /// Returns whether we want to poll for updates for this [`ReleaseChannel`]
+    /// Returns whether FZed should poll for binary updates for this [`ReleaseChannel`].
     pub fn poll_for_updates(&self) -> bool {
-        !matches!(self, ReleaseChannel::Dev)
+        // FZed does not publish binary releases yet. Keep the inherited Zed
+        // updater disabled so this fork never downloads or installs upstream
+        // Zed release artifacts.
+        false
     }
 
     /// Returns the display name for this [`ReleaseChannel`].

@@ -30,6 +30,8 @@ use util::command::new_command;
 use workspace::Workspace;
 
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
+const FZED_RELEASES_URL: &str = "https://github.com/pekeler/fzed/releases";
+const FZED_BINARY_UPDATES_DISABLED: &str = "FZed does not provide binary updates yet. This build will not download or install Zed release artifacts.";
 
 #[derive(Debug)]
 struct MissingDependencyError(String);
@@ -273,7 +275,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            "FZed was installed via a package manager.",
             Some(&message),
             &["Ok"],
             cx,
@@ -285,6 +287,19 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
         .map(|channel| channel.poll_for_updates())
         .unwrap_or(false)
     {
+        let prompt = window.prompt(
+            gpui::PromptLevel::Info,
+            "FZed updates are not available yet",
+            Some(FZED_BINARY_UPDATES_DISABLED),
+            &["Open Releases", "Ok"],
+            cx,
+        );
+        cx.spawn(async move |cx| {
+            if prompt.await == Ok(0) {
+                cx.update(|cx| cx.open_url(FZED_RELEASES_URL));
+            }
+        })
+        .detach();
         return;
     }
 
@@ -304,20 +319,10 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
 pub fn release_notes_url(cx: &mut App) -> Option<String> {
     let release_channel = ReleaseChannel::try_global(cx)?;
     let url = match release_channel {
-        ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            let auto_updater = AutoUpdater::get(cx)?;
-            let auto_updater = auto_updater.read(cx);
-            let mut current_version = auto_updater.current_version.clone();
-            current_version.pre = semver::Prerelease::EMPTY;
-            current_version.build = semver::BuildMetadata::EMPTY;
-            let release_channel = release_channel.dev_name();
-            let path = format!("/releases/{release_channel}/{current_version}");
-            auto_updater.client.http_client().build_url(&path)
+        ReleaseChannel::Stable | ReleaseChannel::Preview => FZED_RELEASES_URL.to_string(),
+        ReleaseChannel::Nightly | ReleaseChannel::Dev => {
+            "https://github.com/pekeler/fzed/commits/main/".to_string()
         }
-        ReleaseChannel::Nightly => {
-            "https://github.com/zed-industries/zed/commits/nightly/".to_string()
-        }
-        ReleaseChannel::Dev => "https://github.com/zed-industries/zed/commits/main/".to_string(),
     };
     Some(url)
 }
@@ -588,6 +593,14 @@ impl AutoUpdater {
         arch: &str,
         cx: &mut AsyncApp,
     ) -> Result<ReleaseAsset> {
+        match asset {
+            "zed" => anyhow::bail!("{FZED_BINARY_UPDATES_DISABLED}"),
+            "zed-remote-server" => anyhow::bail!(
+                "FZed remote server release downloads are not available yet. Build the remote server from this checkout instead of downloading upstream Zed artifacts."
+            ),
+            _ => {}
+        }
+
         let client = this.read_with(cx, |this, _| this.client.clone());
 
         let (system_id, metrics_id, is_staff) = if client.telemetry().metrics_enabled() {
@@ -1151,7 +1164,6 @@ pub async fn finalize_auto_update_on_quit() {
 mod tests {
     use client::Client;
     use clock::FakeSystemClock;
-    use futures::channel::oneshot;
     use gpui::TestAppContext;
     use http_client::{FakeHttpClient, Response};
     use settings::default_settings;
@@ -1162,7 +1174,6 @@ mod tests {
             atomic::{self, AtomicBool},
         },
     };
-    use tempfile::tempdir;
 
     #[ctor::ctor]
     fn init_logger() {
@@ -1190,12 +1201,10 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_auto_update_downloads(cx: &mut TestAppContext) {
+    async fn test_fzed_auto_update_does_not_poll_for_zed_downloads(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
         zlog::init_test();
-        let release_available = Arc::new(AtomicBool::new(false));
-
-        let (dmg_tx, dmg_rx) = oneshot::channel::<String>();
+        let update_endpoint_was_requested = Arc::new(AtomicBool::new(false));
 
         cx.update(|cx| {
             settings::init(cx);
@@ -1204,29 +1213,14 @@ mod tests {
             release_channel::init_test(current_version, ReleaseChannel::Stable, cx);
 
             let clock = Arc::new(FakeSystemClock::new());
-            let release_available = Arc::clone(&release_available);
-            let dmg_rx = Arc::new(parking_lot::Mutex::new(Some(dmg_rx)));
+            let update_endpoint_was_requested = Arc::clone(&update_endpoint_was_requested);
             let fake_client_http = FakeHttpClient::create(move |req| {
-                let release_available = release_available.load(atomic::Ordering::Relaxed);
-                let dmg_rx = dmg_rx.clone();
+                let update_endpoint_was_requested = Arc::clone(&update_endpoint_was_requested);
                 async move {
-                if req.uri().path() == "/releases/stable/latest/asset" {
-                    if release_available {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.1","url":"https://test.example/new-download"}"#.into()
-                        ).unwrap());
-                    } else {
-                        return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.0","url":"https://test.example/old-download"}"#.into()
-                        ).unwrap());
+                    if req.uri().path() == "/releases/stable/latest/asset" {
+                        update_endpoint_was_requested.store(true, atomic::Ordering::SeqCst);
                     }
-                } else if req.uri().path() == "/new-download" {
-                    return Ok(Response::builder().status(200).body({
-                        let dmg_rx = dmg_rx.lock().take().unwrap();
-                        dmg_rx.await.unwrap().into()
-                    }).unwrap());
-                }
-                Ok(Response::builder().status(404).body("".into()).unwrap())
+                    Ok(Response::builder().status(404).body("".into()).unwrap())
                 }
             });
             let client = Client::new(clock, fake_client_http, cx);
@@ -1242,60 +1236,12 @@ mod tests {
             assert_eq!(updater.current_version(), semver::Version::new(0, 100, 0));
         });
 
-        release_available.store(true, atomic::Ordering::SeqCst);
         cx.background_executor.advance_clock(POLL_INTERVAL);
         cx.background_executor.run_until_parked();
 
-        loop {
-            cx.background_executor.timer(Duration::from_millis(0)).await;
-            cx.run_until_parked();
-            let status = auto_updater.read_with(cx, |updater, _| updater.status());
-            if !matches!(status, AutoUpdateStatus::Idle) {
-                break;
-            }
-        }
         let status = auto_updater.read_with(cx, |updater, _| updater.status());
-        assert_eq!(
-            status,
-            AutoUpdateStatus::Downloading {
-                version: VersionCheckType::Semantic(semver::Version::new(0, 100, 1))
-            }
-        );
-
-        dmg_tx.send("<fake-zed-update>".to_owned()).unwrap();
-
-        let tmp_dir = Arc::new(tempdir().unwrap());
-
-        cx.update(|cx| {
-            let tmp_dir = tmp_dir.clone();
-            cx.set_global(InstallOverride(Rc::new(move |target_path, _cx| {
-                let tmp_dir = tmp_dir.clone();
-                let dest_path = tmp_dir.path().join("zed");
-                std::fs::copy(&target_path, &dest_path)?;
-                Ok(Some(dest_path))
-            })));
-        });
-
-        loop {
-            cx.background_executor.timer(Duration::from_millis(0)).await;
-            cx.run_until_parked();
-            let status = auto_updater.read_with(cx, |updater, _| updater.status());
-            if !matches!(status, AutoUpdateStatus::Downloading { .. }) {
-                break;
-            }
-        }
-        let status = auto_updater.read_with(cx, |updater, _| updater.status());
-        assert_eq!(
-            status,
-            AutoUpdateStatus::Updated {
-                version: VersionCheckType::Semantic(semver::Version::new(0, 100, 1))
-            }
-        );
-        let will_restart = cx.expect_restart();
-        cx.update(|cx| cx.restart());
-        let path = will_restart.await.unwrap().unwrap();
-        assert_eq!(path, tmp_dir.path().join("zed"));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+        assert_eq!(status, AutoUpdateStatus::Idle);
+        assert!(!update_endpoint_was_requested.load(atomic::Ordering::SeqCst));
     }
 
     #[test]

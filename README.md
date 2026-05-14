@@ -17,6 +17,10 @@ tag, then FZed-specific commits should be replayed and tested on top of that
 release. Between upstream releases, avoid pulling daily upstream `main` commits
 unless a specific fix is needed and is intentionally cherry-picked.
 
+Before each upstream merge, review
+[FZed Upstream Differences](./FZED_UPSTREAM_DIFFERENCES.md). It lists the
+intentional fork differences that should be preserved while resolving conflicts.
+
 Current upstream baseline: `v1.2.3`.
 
 ### Current Development Build
