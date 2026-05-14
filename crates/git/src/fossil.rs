@@ -16,7 +16,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, anyhow};
 use async_channel::Sender;
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use futures::{FutureExt as _, future::BoxFuture};
 use gpui::{AsyncApp, BackgroundExecutor, SharedString, Task};
 use parking_lot::Mutex;
@@ -223,8 +223,19 @@ impl GitRepository for FossilRepository {
         let fossil = self.fossil_binary();
         let path_prefixes = path_prefixes.to_vec();
         self.executor.spawn(async move {
+            let has_path_prefixes = path_prefixes.iter().any(|path| !path.is_empty());
             let output = fossil.run(&fossil_changes_args(path_prefixes)).await?;
-            parse_fossil_changes(&output)
+            let mut changes = parse_fossil_changes_with_kind(&output);
+            if has_path_prefixes
+                && changes
+                    .iter()
+                    .any(|change| change.kind == FossilChangeKind::Extra)
+            {
+                let output = fossil.run(&fossil_changes_args(Vec::new())).await?;
+                changes =
+                    filter_scoped_fossil_extras(changes, parse_fossil_changes_with_kind(&output));
+            }
+            Ok(fossil_changes_to_status(changes))
         })
     }
 
@@ -1720,12 +1731,6 @@ impl FossilChangeKind {
     }
 }
 
-fn parse_fossil_changes(output: &str) -> Result<GitStatus> {
-    Ok(fossil_changes_to_status(parse_fossil_changes_with_kind(
-        output,
-    )))
-}
-
 fn parse_fossil_changes_with_kind(output: &str) -> Vec<FossilChange> {
     let mut entries = Vec::new();
     for line in output.lines() {
@@ -1773,6 +1778,23 @@ fn fossil_changes_to_status(changes: Vec<FossilChange>) -> GitStatus {
             .collect::<Vec<_>>()
             .into(),
     }
+}
+
+fn filter_scoped_fossil_extras(
+    scoped_changes: Vec<FossilChange>,
+    unscoped_changes: Vec<FossilChange>,
+) -> Vec<FossilChange> {
+    let visible_extras = unscoped_changes
+        .into_iter()
+        .filter_map(|change| (change.kind == FossilChangeKind::Extra).then_some(change.repo_path))
+        .collect::<HashSet<_>>();
+
+    scoped_changes
+        .into_iter()
+        .filter(|change| {
+            change.kind != FossilChangeKind::Extra || visible_extras.contains(&change.repo_path)
+        })
+        .collect()
 }
 
 fn fossil_changes_args(path_prefixes: Vec<RepoPath>) -> Vec<OsString> {
@@ -2082,11 +2104,11 @@ struct FossilBinaryCommandError {
 #[cfg(test)]
 mod tests {
     use super::{
-        FossilBinary, FossilRepository, fossil_oid_from_hash,
-        fossil_output_reports_unsupported_no_verify_comment, fossil_stash_id_from_oid,
-        parse_fossil_blame_line, parse_fossil_branch_list_line, parse_fossil_changes,
-        parse_fossil_commit_info, parse_fossil_default_remote, parse_fossil_info,
-        parse_fossil_numstat, parse_fossil_remote_list, parse_fossil_stash_list,
+        FossilBinary, FossilRepository, filter_scoped_fossil_extras, fossil_changes_to_status,
+        fossil_oid_from_hash, fossil_output_reports_unsupported_no_verify_comment,
+        fossil_stash_id_from_oid, parse_fossil_blame_line, parse_fossil_branch_list_line,
+        parse_fossil_changes_with_kind, parse_fossil_commit_info, parse_fossil_default_remote,
+        parse_fossil_info, parse_fossil_numstat, parse_fossil_remote_list, parse_fossil_stash_list,
         parse_fossil_timeline_entries, parse_fossil_unified_diff, parse_fossil_verbose_checkouts,
         run_fossil_commit_with_legacy_comment_verification_fallback,
     };
@@ -2121,10 +2143,9 @@ mod tests {
 
     #[test]
     fn parses_fossil_changes() {
-        let status = parse_fossil_changes(
+        let status = fossil_changes_to_status(parse_fossil_changes_with_kind(
             "EDITED src/main.rs\nADDED new file.txt\nDELETED old.rs\nEXTRA scratch.txt\nCONFLICT both.rs\n",
-        )
-        .unwrap();
+        ));
 
         let lookup = |path: &str| {
             status
@@ -2139,6 +2160,31 @@ mod tests {
         assert_eq!(lookup("old.rs"), Some(StatusCode::Deleted.worktree()));
         assert_eq!(lookup("scratch.txt"), Some(FileStatus::Untracked));
         assert!(lookup("both.rs").unwrap().is_conflicted());
+    }
+
+    #[test]
+    fn filters_ignored_fossil_extras_from_scoped_status() {
+        let scoped_changes = parse_fossil_changes_with_kind(
+            "EXTRA ignored.txt\nEXTRA scratch.txt\nEDITED tracked.txt\n",
+        );
+        let unscoped_changes =
+            parse_fossil_changes_with_kind("EXTRA scratch.txt\nEDITED tracked.txt\n");
+        let status = fossil_changes_to_status(filter_scoped_fossil_extras(
+            scoped_changes,
+            unscoped_changes,
+        ));
+
+        let lookup = |path: &str| {
+            status
+                .entries
+                .iter()
+                .find(|(repo_path, _)| repo_path == &RepoPath::new(path).unwrap())
+                .map(|(_, status)| *status)
+        };
+
+        assert_eq!(lookup("ignored.txt"), None);
+        assert_eq!(lookup("scratch.txt"), Some(FileStatus::Untracked));
+        assert_eq!(lookup("tracked.txt"), Some(StatusCode::Modified.worktree()));
     }
 
     #[test]
@@ -2358,6 +2404,19 @@ mod tests {
 
         std::fs::write(checkout.join("tracked.txt"), "modified\n").unwrap();
         std::fs::write(checkout.join("extra.txt"), "extra").unwrap();
+        std::fs::create_dir(checkout.join(".fossil-settings")).unwrap();
+        std::fs::write(
+            checkout.join(".fossil-settings").join("ignore-glob"),
+            "ignored.txt\nignored-dir\n",
+        )
+        .unwrap();
+        std::fs::write(checkout.join("ignored.txt"), "ignored").unwrap();
+        std::fs::create_dir(checkout.join("ignored-dir")).unwrap();
+        std::fs::write(
+            checkout.join("ignored-dir").join("generated.txt"),
+            "ignored",
+        )
+        .unwrap();
 
         let repository = FossilRepository::new_for_test(
             &checkout.join(".fslckout"),
@@ -2383,6 +2442,17 @@ mod tests {
             Some(StatusCode::Modified.worktree())
         );
         assert_eq!(lookup_status("extra.txt"), Some(FileStatus::Untracked));
+        assert_eq!(lookup_status("ignored.txt"), None);
+        assert_eq!(lookup_status("ignored-dir/generated.txt"), None);
+
+        let scoped_ignored_statuses = repository
+            .status(&[
+                RepoPath::new("ignored.txt").unwrap(),
+                RepoPath::new("ignored-dir").unwrap(),
+            ])
+            .await
+            .unwrap();
+        assert!(scoped_ignored_statuses.entries.is_empty());
 
         let stats = repository.diff_stat(&[]).await.unwrap();
         let tracked_stat = stats
