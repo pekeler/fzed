@@ -526,7 +526,8 @@ impl GitRepository for FossilRepository {
                     args.push(OsString::from(commit));
                 }
                 args.extend(repo_paths_to_args(paths));
-                fossil.run_with_env(&args, env).await?;
+                run_fossil_commit_with_legacy_comment_verification_fallback(&fossil, &args, env)
+                    .await?;
                 Ok(())
             })
             .boxed()
@@ -1894,6 +1895,47 @@ fn normalize_existing_path(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
 
+async fn run_fossil_commit_with_legacy_comment_verification_fallback(
+    fossil: &FossilBinary,
+    args: &[OsString],
+    env: Arc<HashMap<String, String>>,
+) -> Result<()> {
+    match fossil.run_with_env(args, env.clone()).await {
+        Ok(_) => Ok(()),
+        Err(error) if fossil_error_is_unsupported_no_verify_comment(&error) => {
+            log::warn!(
+                "Fossil binary does not support --no-verify-comment; retrying commit without it"
+            );
+            let fallback_args = args
+                .iter()
+                .filter(|arg| arg.as_os_str() != OsStr::new("--no-verify-comment"))
+                .cloned()
+                .collect::<Vec<_>>();
+            fossil.run_with_env(&fallback_args, env).await?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn fossil_error_is_unsupported_no_verify_comment(error: &anyhow::Error) -> bool {
+    let Some(command_error) = error.downcast_ref::<FossilBinaryCommandError>() else {
+        return false;
+    };
+    fossil_output_reports_unsupported_no_verify_comment(
+        &command_error.stdout,
+        &command_error.stderr,
+    )
+}
+
+fn fossil_output_reports_unsupported_no_verify_comment(stdout: &str, stderr: &str) -> bool {
+    let reports_unrecognized_option = stdout.contains("unrecognized command-line option")
+        || stderr.contains("unrecognized command-line option");
+    let mentions_no_verify_comment =
+        stdout.contains("--no-verify-comment") || stderr.contains("--no-verify-comment");
+    reports_unrecognized_option && mentions_no_verify_comment
+}
+
 #[derive(Clone)]
 struct FossilBinary {
     fossil_binary_path: PathBuf,
@@ -2040,11 +2082,13 @@ struct FossilBinaryCommandError {
 #[cfg(test)]
 mod tests {
     use super::{
-        FossilRepository, fossil_oid_from_hash, fossil_stash_id_from_oid, parse_fossil_blame_line,
-        parse_fossil_branch_list_line, parse_fossil_changes, parse_fossil_commit_info,
-        parse_fossil_default_remote, parse_fossil_info, parse_fossil_numstat,
-        parse_fossil_remote_list, parse_fossil_stash_list, parse_fossil_timeline_entries,
-        parse_fossil_unified_diff, parse_fossil_verbose_checkouts,
+        FossilBinary, FossilRepository, fossil_oid_from_hash,
+        fossil_output_reports_unsupported_no_verify_comment, fossil_stash_id_from_oid,
+        parse_fossil_blame_line, parse_fossil_branch_list_line, parse_fossil_changes,
+        parse_fossil_commit_info, parse_fossil_default_remote, parse_fossil_info,
+        parse_fossil_numstat, parse_fossil_remote_list, parse_fossil_stash_list,
+        parse_fossil_timeline_entries, parse_fossil_unified_diff, parse_fossil_verbose_checkouts,
+        run_fossil_commit_with_legacy_comment_verification_fallback,
     };
     use crate::{
         repository::{
@@ -2129,6 +2173,65 @@ mod tests {
             Some("private")
         );
         assert_eq!(parse_fossil_branch_list_line("   "), None);
+    }
+
+    #[test]
+    fn detects_legacy_fossil_comment_verification_flag_error() {
+        assert!(fossil_output_reports_unsupported_no_verify_comment(
+            "",
+            "unrecognized command-line option or missing argument: --no-verify-comment\n",
+        ));
+        assert!(!fossil_output_reports_unsupported_no_verify_comment(
+            "",
+            "unrecognized command-line option or missing argument: --allow-empty\n",
+        ));
+        assert!(!fossil_output_reports_unsupported_no_verify_comment(
+            "",
+            "check-in comment rejected by policy\n",
+        ));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn fossil_commit_retries_without_legacy_comment_verification_flag(
+        cx: &mut TestAppContext,
+    ) {
+        use std::{ffi::OsString, os::unix::fs::PermissionsExt};
+
+        cx.executor().allow_parking();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let script_path = temp_dir.path().join("fossil");
+        let captured_args_path = temp_dir.path().join("args");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--no-verify-comment\" ]; then\n    echo 'unrecognized command-line option or missing argument: --no-verify-comment' >&2\n    exit 1\n  fi\ndone\nprintf '%s\\n' \"$@\" > \"$FZED_FOSSIL_TEST_ARGS\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let fossil = FossilBinary::new(script_path, temp_dir.path().to_path_buf(), Arc::default());
+        run_fossil_commit_with_legacy_comment_verification_fallback(
+            &fossil,
+            &[
+                OsString::from("commit"),
+                OsString::from("--comment"),
+                OsString::from("message"),
+                OsString::from("--no-verify-comment"),
+            ],
+            Arc::new(HashMap::from_iter([(
+                "FZED_FOSSIL_TEST_ARGS".to_string(),
+                captured_args_path.to_string_lossy().into_owned(),
+            )])),
+        )
+        .await
+        .unwrap();
+
+        let captured_args = std::fs::read_to_string(captured_args_path).unwrap();
+        assert!(captured_args.contains("commit\n"));
+        assert!(!captured_args.contains("--no-verify-comment"));
     }
 
     #[test]
