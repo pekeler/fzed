@@ -155,6 +155,17 @@ Release Notes:
 - N/A
 ```
 
+# FZed release hygiene
+
+When publishing or editing FZed GitHub release notes:
+
+- Write for potential FZed users, not maintainers. Focus on what changed for
+  users, what they can download, and important user-facing limitations.
+- Do not include internal planning notes, merge-process commentary, or next-cycle
+  reminders.
+- Always link to the upstream Zed release notes for the upstream version that
+  the FZed release is based on.
+
 # Crash Investigation
 
 ## Sentry Integration
