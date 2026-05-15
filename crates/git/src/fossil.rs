@@ -262,16 +262,27 @@ impl GitRepository for FossilRepository {
         let fossil = self.fossil_binary();
         self.executor
             .spawn(async move {
-                let current = fossil.run(&["branch", "current"]).await.ok();
+                let info = parse_fossil_info(&fossil.run(&["info"]).await?);
+                let checkout_info = match info.checkout.as_deref() {
+                    Some(checkout) => match fossil_commit_info(&fossil, checkout).await {
+                        Ok(info) => Some(info),
+                        Err(error) => {
+                            log::warn!("failed to load Fossil check-in summary: {error:#}");
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                let current = fossil
+                    .run(&["branch", "current"])
+                    .await
+                    .ok()
+                    .or_else(|| checkout_info.as_ref().and_then(|info| info.branch.clone()));
                 let list = fossil
                     .run(&["branch", "list", "--all"])
                     .await
                     .unwrap_or_default();
-                let checkout = parse_fossil_info(&fossil.run(&["info"]).await?).checkout;
-                let current_commit = match checkout {
-                    Some(checkout) => Some(fossil_commit_summary(&fossil, &checkout).await?),
-                    None => None,
-                };
+                let current_commit = checkout_info.as_ref().map(fossil_commit_summary_from_info);
                 let mut branches = Vec::new();
                 for line in list.lines() {
                     if let Some(name) = parse_fossil_branch_list_line(line) {
@@ -1278,15 +1289,14 @@ async fn fossil_commit_info(fossil: &FossilBinary, commit: &str) -> Result<Fossi
     parse_fossil_commit_info(&output).with_context(|| format!("parsing Fossil info for {commit}"))
 }
 
-async fn fossil_commit_summary(fossil: &FossilBinary, commit: &str) -> Result<CommitSummary> {
-    let info = fossil_commit_info(fossil, commit).await?;
-    Ok(CommitSummary {
-        sha: SharedString::from(info.hash),
+fn fossil_commit_summary_from_info(info: &FossilCommitInfo) -> CommitSummary {
+    CommitSummary {
+        sha: SharedString::from(info.hash.clone()),
         subject: SharedString::from(info.comment.lines().next().unwrap_or_default().to_string()),
         commit_timestamp: info.timestamp,
-        author_name: SharedString::from(info.user.unwrap_or_default()),
+        author_name: SharedString::from(info.user.clone().unwrap_or_default()),
         has_parent: !info.parents.is_empty(),
-    })
+    }
 }
 
 async fn fossil_commit_data(fossil: &FossilBinary, commit: &str) -> Result<CommitData> {
@@ -1919,10 +1929,42 @@ fn parse_fossil_verbose_checkouts(output: &str) -> Vec<PathBuf> {
             if key.trim() != "check-out" {
                 return None;
             }
-            let path = value.split_whitespace().next()?;
-            (!path.is_empty()).then(|| PathBuf::from(path.trim_end_matches('/')))
+            let path = parse_fossil_verbose_checkout_path(value)?;
+            Some(PathBuf::from(
+                path.trim_end_matches(std::path::MAIN_SEPARATOR),
+            ))
         })
         .collect()
+}
+
+fn parse_fossil_verbose_checkout_path(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let path = match value.rfind(char::is_whitespace) {
+        Some(index) => {
+            let (path, suffix) = value.split_at(index);
+            if is_fossil_checkout_date(suffix.trim()) {
+                path.trim_end()
+            } else {
+                value
+            }
+        }
+        None => value,
+    };
+    (!path.is_empty()).then_some(path)
+}
+
+fn is_fossil_checkout_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..].iter().all(u8::is_ascii_digit)
 }
 
 fn fossil_branch_name(name: &str) -> String {
@@ -2237,6 +2279,67 @@ mod tests {
         assert_eq!(parse_fossil_branch_list_line("   "), None);
     }
 
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn fossil_branches_fall_back_to_checkout_tags(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+
+        cx.executor().allow_parking();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let checkout = temp_dir.path().join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(checkout.join(".fslckout"), "").unwrap();
+
+        let script_path = temp_dir.path().join("fossil");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\n\
+             checkout='1234567890abcdef1234567890abcdef12345678'\n\
+             if [ \"$1\" = info ] && [ \"$#\" -eq 1 ]; then\n\
+               printf 'checkout:     %s 2026-05-13 06:44:31 UTC\\n' \"$checkout\"\n\
+               exit 0\n\
+             fi\n\
+             if [ \"$1\" = info ] && [ \"$2\" = \"$checkout\" ]; then\n\
+               printf 'hash:         %s 2026-05-13 06:44:31 UTC\\n' \"$checkout\"\n\
+               printf 'tags:         sym-trunk, feature\\n'\n\
+               printf 'comment:      from tags (user: tester)\\n'\n\
+               exit 0\n\
+             fi\n\
+             if [ \"$1\" = branch ] && [ \"$2\" = current ]; then\n\
+               exit 1\n\
+             fi\n\
+             if [ \"$1\" = branch ] && [ \"$2\" = list ]; then\n\
+               exit 0\n\
+             fi\n\
+             exit 1\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let repository = FossilRepository::new_for_test(
+            &checkout.join(".fslckout"),
+            Some(script_path),
+            cx.executor(),
+            HashMap::default(),
+        )
+        .unwrap();
+
+        let branches = repository.branches().await.unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].name(), "feature");
+        assert!(branches[0].is_head);
+        let commit = branches[0].most_recent_commit.as_ref().unwrap();
+        assert_eq!(
+            commit.sha.as_ref(),
+            "1234567890abcdef1234567890abcdef12345678"
+        );
+        assert_eq!(commit.subject.as_ref(), "from tags");
+        assert_eq!(commit.author_name.as_ref(), "tester");
+    }
+
     #[test]
     fn detects_legacy_fossil_comment_verification_flag_error() {
         assert!(fossil_output_reports_unsupported_no_verify_comment(
@@ -2321,6 +2424,13 @@ mod tests {
                 PathBuf::from("/tmp/checkout2")
             ]
         );
+        let checkouts = parse_fossil_verbose_checkouts(
+            "check-out:    /tmp/Card School/card.school/           2026-05-14\n",
+        );
+        assert_eq!(
+            checkouts,
+            vec![PathBuf::from("/tmp/Card School/card.school")]
+        );
     }
 
     #[test]
@@ -2384,7 +2494,7 @@ mod tests {
 
         let temp_dir = tempfile::tempdir().unwrap();
         let fossil_home = temp_dir.path().join("home");
-        let checkout = temp_dir.path().join("checkout");
+        let checkout = temp_dir.path().join("checkout with space");
         let repo_db = temp_dir.path().join("repo.fossil");
         std::fs::create_dir(&fossil_home).unwrap();
         std::fs::create_dir(&checkout).unwrap();

@@ -4745,7 +4745,7 @@ impl Repository {
     fn reload_buffer_diff_bases(&mut self, cx: &mut Context<Self>) {
         let this = cx.weak_entity();
         let git_store = self.git_store.clone();
-        let _ = self.send_keyed_job(
+        let result = self.send_keyed_job(
             Some(GitJobKey::ReloadBufferDiffBases),
             None,
             |state, mut cx| async move {
@@ -4901,6 +4901,19 @@ impl Repository {
                 })
             },
         );
+        Self::log_background_job_result("repository diff base refresh", result, cx);
+    }
+
+    fn log_background_job_result(
+        operation: &'static str,
+        result: oneshot::Receiver<Result<()>>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |_, _| match result.await {
+            Ok(Ok(())) | Err(_) => {}
+            Ok(Err(error)) => log::error!("{operation} failed: {error:#}"),
+        })
+        .detach();
     }
 
     pub fn send_job<F, Fut, R>(
@@ -8134,7 +8147,7 @@ impl Repository {
         cx: &mut Context<Self>,
     ) {
         let this = cx.weak_entity();
-        let _ = self.send_keyed_job(
+        let result = self.send_keyed_job(
             Some(GitJobKey::ReloadGitState),
             None,
             |state, mut cx| async move {
@@ -8158,6 +8171,7 @@ impl Repository {
                 Ok(())
             },
         );
+        Self::log_background_job_result("repository status scan", result, cx);
     }
 
     fn spawn_local_git_worker(
@@ -8359,7 +8373,7 @@ impl Repository {
         }
 
         let this = cx.weak_entity();
-        let _ = self.send_keyed_job(
+        let result = self.send_keyed_job(
             Some(GitJobKey::RefreshStatuses),
             None,
             |state, mut cx| async move {
@@ -8379,7 +8393,10 @@ impl Repository {
 
                 let has_head = prev_snapshot.head_commit.is_some();
 
-                let stash_entries = backend.stash_entries().await?;
+                let stash_entries = backend
+                    .stash_entries()
+                    .await
+                    .context("loading repository stash entries")?;
                 let changed_path_statuses = cx
                     .background_spawn(async move {
                         let mut changed_paths =
@@ -8396,8 +8413,19 @@ impl Repository {
                             .boxed()
                         };
 
-                        let (statuses, diff_stats) =
-                            futures::future::try_join(status_task, diff_stat_future).await?;
+                        let (statuses, diff_stats) = futures::future::try_join(
+                            async {
+                                status_task
+                                    .await
+                                    .context("loading changed repository statuses")
+                            },
+                            async {
+                                diff_stat_future
+                                    .await
+                                    .context("loading changed repository diff stats")
+                            },
+                        )
+                        .await?;
 
                         let diff_stats: HashMap<RepoPath, DiffStat> =
                             HashMap::from_iter(diff_stats.entries.into_iter().cloned());
@@ -8463,6 +8491,7 @@ impl Repository {
                 })
             },
         );
+        Self::log_background_job_result("incremental repository status refresh", result, cx);
     }
 
     /// currently running git command and when it started
@@ -9658,7 +9687,7 @@ async fn compute_snapshot(
     let head_commit_future = {
         let backend = backend.clone();
         async move {
-            Ok(match backend.head_sha().await {
+            Ok::<Option<CommitDetails>, anyhow::Error>(match backend.head_sha().await {
                 Some(head_sha) => backend.show(head_sha).await.log_err(),
                 None => None,
             })
@@ -9669,9 +9698,23 @@ async fn compute_snapshot(
             let backend = backend.clone();
             async move {
                 futures::future::try_join3(
-                    backend.branches(),
-                    head_commit_future,
-                    backend.worktrees(),
+                    async {
+                        backend
+                            .branches()
+                            .await
+                            .context("loading repository branches")
+                    },
+                    async {
+                        head_commit_future
+                            .await
+                            .context("loading repository head commit")
+                    },
+                    async {
+                        backend
+                            .worktrees()
+                            .await
+                            .context("loading repository worktrees")
+                    },
                 )
                 .await
             }
@@ -9754,11 +9797,25 @@ async fn compute_snapshot(
                         .boxed()
                     };
                 futures::future::try_join3(
-                    backend.status(&[RepoPath::from_rel_path(
-                        &RelPath::new(".".as_ref(), PathStyle::local()).unwrap(),
-                    )]),
-                    diff_stat_future,
-                    backend.stash_entries(),
+                    async {
+                        backend
+                            .status(&[RepoPath::from_rel_path(
+                                &RelPath::new(".".as_ref(), PathStyle::local()).unwrap(),
+                            )])
+                            .await
+                            .context("loading repository status")
+                    },
+                    async {
+                        diff_stat_future
+                            .await
+                            .context("loading repository diff stats")
+                    },
+                    async {
+                        backend
+                            .stash_entries()
+                            .await
+                            .context("loading repository stash entries")
+                    },
                 )
                 .await
             }
