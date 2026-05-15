@@ -159,10 +159,13 @@ Release Notes:
 
 When publishing or editing FZed GitHub release notes:
 
-- Write for potential FZed users, not maintainers. Focus on what changed for
-  users, what they can download, and important user-facing limitations.
+- Keep notes concise and useful to potential FZed users. Mention the upstream
+  Zed release, the actual FZed user-facing change, and any important download
+  limitation.
 - Do not include internal planning notes, merge-process commentary, or next-cycle
   reminders.
+- Do not include CI/build verification details or repeat checksums when a
+  checksum file is attached as a release asset.
 - Always link to the upstream Zed release notes for the upstream version that
   the FZed release is based on.
 
