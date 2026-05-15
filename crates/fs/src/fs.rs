@@ -294,6 +294,7 @@ pub trait Fs: Send + Sync {
     async fn git_config(&self, abs_work_directory: &Path, args: Vec<String>) -> Result<String>;
     fn is_fake(&self) -> bool;
     async fn is_case_sensitive(&self) -> bool;
+    fn start_job(&self, message: SharedString) -> JobTracker;
     fn subscribe_to_jobs(&self) -> JobEventReceiver;
 
     /// Restores a given `TrashedEntry`, moving it from the system's trash back
@@ -454,7 +455,7 @@ pub enum JobEvent {
 pub type JobEventSender = futures::channel::mpsc::UnboundedSender<JobEvent>;
 pub type JobEventReceiver = futures::channel::mpsc::UnboundedReceiver<JobEvent>;
 
-struct JobTracker {
+pub struct JobTracker {
     id: JobId,
     subscribers: Arc<Mutex<Vec<JobEventSender>>>,
 }
@@ -1322,15 +1323,19 @@ impl Fs for RealFs {
         Ok(())
     }
 
-    async fn git_clone(&self, abs_work_directory: &Path, repo_url: &str) -> Result<()> {
+    fn start_job(&self, message: SharedString) -> JobTracker {
         let job_id = self.next_job_id.fetch_add(1, Ordering::SeqCst);
         let job_info = JobInfo {
             id: job_id,
             start: Instant::now(),
-            message: SharedString::from(format!("Cloning {}", repo_url)),
+            message,
         };
 
-        let _job_tracker = JobTracker::new(job_info, self.job_event_subscribers.clone());
+        JobTracker::new(job_info, self.job_event_subscribers.clone())
+    }
+
+    async fn git_clone(&self, abs_work_directory: &Path, repo_url: &str) -> Result<()> {
+        let _job_tracker = self.start_job(SharedString::from(format!("Cloning {}", repo_url)));
 
         let output = new_command("git")
             .current_dir(abs_work_directory)
@@ -1480,6 +1485,7 @@ pub struct FakeFs {
 #[cfg(feature = "test-support")]
 struct FakeFsState {
     root: FakeFsEntry,
+    next_job_id: Arc<AtomicUsize>,
     next_inode: u64,
     next_mtime: SystemTime,
     git_event_tx: async_channel::Sender<PathBuf>,
@@ -1767,6 +1773,7 @@ impl FakeFs {
                     git_repo_state: None,
                 },
                 git_event_tx: tx,
+                next_job_id: Arc::new(AtomicUsize::new(0)),
                 next_mtime: UNIX_EPOCH + Self::SYSTEMTIME_INTERVAL,
                 next_inode: 1,
                 event_txs: Default::default(),
@@ -3292,6 +3299,18 @@ impl Fs for FakeFs {
 
     async fn is_case_sensitive(&self) -> bool {
         true
+    }
+
+    fn start_job(&self, message: SharedString) -> JobTracker {
+        let state = self.state.lock();
+        let job_id = state.next_job_id.fetch_add(1, Ordering::SeqCst);
+        let job_info = JobInfo {
+            id: job_id,
+            start: Instant::now(),
+            message,
+        };
+
+        JobTracker::new(job_info, state.job_event_subscribers.clone())
     }
 
     fn subscribe_to_jobs(&self) -> JobEventReceiver {

@@ -7141,12 +7141,26 @@ impl Render for ProjectPanel {
                         .child(Divider::horizontal()),
                 )
                 .child(
-                    Button::new("clone_repo", "Clone Repository")
+                    Button::new("clone_git_repo", "Clone Git Repository")
                         .full_width()
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.workspace
                                 .update(cx, |_, cx| {
                                     window.dispatch_action(git::Clone.boxed_clone(), cx);
+                                })
+                                .log_err();
+                        })),
+                )
+                .child(
+                    Button::new("clone_fossil_repo", "Clone Fossil Repository")
+                        .full_width()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.workspace
+                                .update(cx, |_, cx| {
+                                    window.dispatch_action(
+                                        git::fossil_actions::Clone.boxed_clone(),
+                                        cx,
+                                    );
                                 })
                                 .log_err();
                         })),

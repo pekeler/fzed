@@ -4405,10 +4405,17 @@ impl Sidebar {
                     .child(Divider::horizontal().color(ui::DividerColor::Border)),
             )
             .child(
-                Button::new("clone_repo", "Clone Repository")
+                Button::new("clone_git_repo", "Clone Git Repository")
                     .full_width()
                     .on_click(|_, window, cx| {
                         window.dispatch_action(git::Clone.boxed_clone(), cx);
+                    }),
+            )
+            .child(
+                Button::new("clone_fossil_repo", "Clone Fossil Repository")
+                    .full_width()
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(git::fossil_actions::Clone.boxed_clone(), cx);
                     }),
             )
     }

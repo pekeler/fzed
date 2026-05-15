@@ -123,10 +123,15 @@ pub fn clone_remote(
             let repo_url = repo_url.to_string();
             let checkout_name = checkout_name_from_url(&repo_url);
             let result = match workspace
-                .update(cx, |_workspace, cx| {
+                .update(cx, |workspace, cx| {
+                    let fs = workspace.app_state().fs.clone();
                     let destination_dir = destination_dir.clone();
                     let repo_url = repo_url.clone();
                     cx.background_spawn(async move {
+                        let _job = fs.start_job(SharedString::from(format!(
+                            "Cloning Fossil repository {}",
+                            repo_url
+                        )));
                         fossil_clone_to_checkout(&repo_url, &destination_dir).await
                     })
                 })
@@ -188,10 +193,15 @@ pub fn open_existing_repository(
                 .to_string();
 
             if let Err(error) = workspace
-                .update(cx, |_workspace, cx| {
+                .update(cx, |workspace, cx| {
+                    let fs = workspace.app_state().fs.clone();
                     let repository_db = repository_db.clone();
                     let checkout_dir = checkout_dir.clone();
                     cx.background_spawn(async move {
+                        let _job = fs.start_job(SharedString::from(format!(
+                            "Opening Fossil repository {}",
+                            repository_db.display()
+                        )));
                         fossil_open_repository(&repository_db, &checkout_dir).await
                     })
                 })
@@ -233,9 +243,16 @@ pub fn init_repository(workspace: WeakEntity<Workspace>, window: &mut Window, cx
                 .to_string();
 
             if let Err(error) = workspace
-                .update(cx, |_workspace, cx| {
+                .update(cx, |workspace, cx| {
+                    let fs = workspace.app_state().fs.clone();
                     let checkout_dir = checkout_dir.clone();
-                    cx.background_spawn(async move { fossil_init_checkout(&checkout_dir).await })
+                    cx.background_spawn(async move {
+                        let _job = fs.start_job(SharedString::from(format!(
+                            "Initializing Fossil repository {}",
+                            checkout_dir.display()
+                        )));
+                        fossil_init_checkout(&checkout_dir).await
+                    })
                 })
                 .ok()?
                 .await

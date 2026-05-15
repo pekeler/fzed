@@ -5,7 +5,7 @@ use crate::{
     persistence::WorkspaceDb,
 };
 use agent_settings::AgentSettings;
-use git::Clone as GitClone;
+use git::{Clone as GitClone, fossil_actions::Clone as FossilClone};
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     ParentElement, Render, Styled, Task, TaskExt, Window, actions,
@@ -160,7 +160,7 @@ impl SectionEntry {
     }
 }
 
-const CONTENT: (Section<4>, Section<3>) = (
+const CONTENT: (Section<5>, Section<3>) = (
     Section {
         title: "Get Started",
         entries: [
@@ -178,8 +178,14 @@ const CONTENT: (Section<4>, Section<3>) = (
             },
             SectionEntry {
                 icon: IconName::CloudDownload,
-                title: "Clone Repository",
+                title: "Clone Git Repository",
                 action: &GitClone,
+                visibility_guard: SectionVisibility::Always,
+            },
+            SectionEntry {
+                icon: IconName::CloudDownload,
+                title: "Clone Fossil Repository",
+                action: &FossilClone,
                 visibility_guard: SectionVisibility::Always,
             },
             SectionEntry {
