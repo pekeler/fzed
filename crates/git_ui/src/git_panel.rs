@@ -257,6 +257,10 @@ fn graph_action_title(repository_kind: RepositoryKind) -> &'static str {
     }
 }
 
+fn should_show_uncommit_action(repository_kind: RepositoryKind, has_parent: bool) -> bool {
+    !repository_kind.is_fossil() && has_parent
+}
+
 fn generate_commit_message_action_title(repository_kind: RepositoryKind) -> &'static str {
     if repository_kind.is_fossil() {
         "Generate Check-in Message"
@@ -5172,30 +5176,31 @@ impl GitPanel {
                 .child(
                     h_flex()
                         .gap_0p5()
-                        .when(commit.has_parent, |this| {
-                            let has_unstaged = self.has_unstaged_changes();
-                            this.child(
-                                panel_icon_button("undo", IconName::Undo)
-                                    .icon_size(IconSize::Small)
-                                    .tooltip(move |_window, cx| {
-                                        Tooltip::with_meta(
-                                            "Uncommit",
-                                            Some(&git::Uncommit),
-                                            if has_unstaged {
-                                                "git reset HEAD^ --soft"
-                                            } else {
-                                                "git reset HEAD^"
-                                            },
-                                            cx,
-                                        )
-                                    })
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| {
+                        .when(
+                            should_show_uncommit_action(repository_kind, commit.has_parent),
+                            |this| {
+                                let has_unstaged = self.has_unstaged_changes();
+                                this.child(
+                                    panel_icon_button("undo", IconName::Undo)
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(move |_window, cx| {
+                                            Tooltip::with_meta(
+                                                "Uncommit",
+                                                Some(&git::Uncommit),
+                                                if has_unstaged {
+                                                    "git reset HEAD^ --soft"
+                                                } else {
+                                                    "git reset HEAD^"
+                                                },
+                                                cx,
+                                            )
+                                        })
+                                        .on_click(cx.listener(|this, _, window, cx| {
                                             this.uncommit(window, cx)
-                                        }),
-                                    ),
-                            )
-                        })
+                                        })),
+                                )
+                            },
+                        )
                         .child(
                             panel_icon_button("git-graph-button", IconName::GitGraph)
                                 .icon_size(IconSize::Small)
@@ -7402,6 +7407,9 @@ mod tests {
             "View File Timeline"
         );
         assert_eq!(graph_action_title(RepositoryKind::Fossil), "Open Timeline");
+        assert!(!should_show_uncommit_action(RepositoryKind::Fossil, true));
+        assert!(should_show_uncommit_action(RepositoryKind::Git, true));
+        assert!(!should_show_uncommit_action(RepositoryKind::Git, false));
         assert_eq!(
             generate_commit_message_action_title(RepositoryKind::Fossil),
             "Generate Check-in Message"

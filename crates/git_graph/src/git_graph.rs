@@ -5,7 +5,7 @@ use git::{
     parse_git_remote_url,
     repository::{
         CommitDiff, CommitFile, InitialGraphCommitData, LogOrder, LogSource, RepoPath,
-        SearchCommitArgs,
+        RepositoryKind, SearchCommitArgs,
     },
     status::{FileStatus, StatusCode, TrackedStatus},
 };
@@ -64,6 +64,15 @@ const COPIED_STATE_DURATION: Duration = Duration::from_secs(2);
 // Extra vertical breathing room added to the UI line height when computing
 // the git graph's row height, so commit dots and lines have space around them.
 const ROW_VERTICAL_PADDING: Pixels = px(4.0);
+
+fn graph_tab_title(repository_kind: RepositoryKind, is_path_history: bool) -> &'static str {
+    match (repository_kind, is_path_history) {
+        (RepositoryKind::Fossil, true) => "Path Timeline",
+        (RepositoryKind::Fossil, false) => "Timeline",
+        (RepositoryKind::Git, true) => "Path History",
+        (RepositoryKind::Git, false) => "Git Graph",
+    }
+}
 
 struct CopiedState {
     copied_at: Option<Instant>,
@@ -3315,19 +3324,20 @@ impl Item for GitGraph {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
         });
+        let repository_kind = self
+            .get_repository(cx)
+            .map(|repo| repo.read(cx).kind())
+            .unwrap_or_default();
         let path_history_path = match &self.log_source {
             LogSource::Path(path) => Some(path.as_unix_str().to_string()),
             _ => None,
         };
+        let title = graph_tab_title(repository_kind, path_history_path.is_some());
 
         Some(TabTooltipContent::Custom(Box::new(Tooltip::element({
             move |_, _| {
                 v_flex()
-                    .child(Label::new(if path_history_path.is_some() {
-                        "Path History"
-                    } else {
-                        "Git Graph"
-                    }))
+                    .child(Label::new(title))
                     .when_some(path_history_path.clone(), |this, path| {
                         this.child(Label::new(path).color(Color::Muted).size(LabelSize::Small))
                     })
@@ -3340,6 +3350,12 @@ impl Item for GitGraph {
     }
 
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
+        let repository = self.get_repository(cx);
+        let repository_kind = repository
+            .as_ref()
+            .map(|repo| repo.read(cx).kind())
+            .unwrap_or_default();
+
         if let LogSource::Path(path) = &self.log_source {
             return path
                 .as_ref()
@@ -3348,14 +3364,17 @@ impl Item for GitGraph {
                 .unwrap_or_else(|| SharedString::from(path.as_unix_str().to_string()));
         }
 
-        self.get_repository(cx)
+        repository
             .and_then(|repo| {
                 repo.read(cx)
                     .work_directory_abs_path
                     .file_name()
                     .map(|name| name.to_string_lossy().to_string())
             })
-            .map_or_else(|| "Git Graph".into(), |name| SharedString::from(name))
+            .map_or_else(
+                || graph_tab_title(repository_kind, false).into(),
+                SharedString::from,
+            )
     }
 
     fn show_toolbar(&self) -> bool {
@@ -3742,6 +3761,17 @@ mod tests {
             project_panel::init(cx);
             init(cx);
         });
+    }
+
+    #[test]
+    fn graph_tab_title_tracks_repository_kind() {
+        assert_eq!(graph_tab_title(RepositoryKind::Git, false), "Git Graph");
+        assert_eq!(graph_tab_title(RepositoryKind::Git, true), "Path History");
+        assert_eq!(graph_tab_title(RepositoryKind::Fossil, false), "Timeline");
+        assert_eq!(
+            graph_tab_title(RepositoryKind::Fossil, true),
+            "Path Timeline"
+        );
     }
 
     /// Generates a random commit DAG suitable for testing git graph rendering.

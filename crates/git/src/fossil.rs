@@ -3,10 +3,10 @@ use crate::{
     blame::Blame,
     repository::{
         Branch, CommitData, CommitDataReader, CommitDetails, CommitDiff, CommitFile, CommitOptions,
-        CreateWorktreeTarget, DiffType, FetchOptions, FossilSyncState, GRAPH_CHUNK_SIZE,
-        GitCommitTemplate, GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData,
-        LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput, RepoPath, RepositoryKind,
-        ResetMode, SearchCommitArgs, Worktree,
+        CommitSummary, CreateWorktreeTarget, DiffType, FetchOptions, FossilSyncState,
+        GRAPH_CHUNK_SIZE, GitCommitTemplate, GitRepository, GitRepositoryCheckpoint,
+        InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput,
+        RepoPath, RepositoryKind, ResetMode, SearchCommitArgs, Worktree,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -267,6 +267,11 @@ impl GitRepository for FossilRepository {
                     .run(&["branch", "list", "--all"])
                     .await
                     .unwrap_or_default();
+                let checkout = parse_fossil_info(&fossil.run(&["info"]).await?).checkout;
+                let current_commit = match checkout {
+                    Some(checkout) => Some(fossil_commit_summary(&fossil, &checkout).await?),
+                    None => None,
+                };
                 let mut branches = Vec::new();
                 for line in list.lines() {
                     if let Some(name) = parse_fossil_branch_list_line(line) {
@@ -275,7 +280,7 @@ impl GitRepository for FossilRepository {
                             is_head,
                             ref_name: SharedString::from(format!("refs/heads/{name}")),
                             upstream: None,
-                            most_recent_commit: None,
+                            most_recent_commit: is_head.then(|| current_commit.clone()).flatten(),
                         });
                     }
                 }
@@ -286,7 +291,7 @@ impl GitRepository for FossilRepository {
                         is_head: true,
                         ref_name: SharedString::from(format!("refs/heads/{current}")),
                         upstream: None,
-                        most_recent_commit: None,
+                        most_recent_commit: current_commit,
                     });
                 }
                 Ok(branches)
@@ -1271,6 +1276,17 @@ struct FossilCommitInfo {
 async fn fossil_commit_info(fossil: &FossilBinary, commit: &str) -> Result<FossilCommitInfo> {
     let output = fossil.run_raw(&["info", commit]).await?;
     parse_fossil_commit_info(&output).with_context(|| format!("parsing Fossil info for {commit}"))
+}
+
+async fn fossil_commit_summary(fossil: &FossilBinary, commit: &str) -> Result<CommitSummary> {
+    let info = fossil_commit_info(fossil, commit).await?;
+    Ok(CommitSummary {
+        sha: SharedString::from(info.hash),
+        subject: SharedString::from(info.comment.lines().next().unwrap_or_default().to_string()),
+        commit_timestamp: info.timestamp,
+        author_name: SharedString::from(info.user.unwrap_or_default()),
+        has_parent: !info.parents.is_empty(),
+    })
 }
 
 async fn fossil_commit_data(fossil: &FossilBinary, commit: &str) -> Result<CommitData> {
@@ -2491,15 +2507,16 @@ mod tests {
         );
         std::fs::write(checkout.join("tracked.txt"), "modified\n").unwrap();
 
-        assert!(repository.head_sha().await.is_some());
-        assert!(
-            repository
-                .branches()
-                .await
-                .unwrap()
-                .iter()
-                .any(|branch| branch.is_head && branch.name() == "trunk")
-        );
+        let head = repository.head_sha().await.unwrap();
+        let branches = repository.branches().await.unwrap();
+        let head_branch = branches
+            .iter()
+            .find(|branch| branch.is_head && branch.name() == "trunk")
+            .unwrap();
+        let most_recent_commit = head_branch.most_recent_commit.as_ref().unwrap();
+        assert_eq!(most_recent_commit.sha.as_ref(), head.as_str());
+        assert_eq!(most_recent_commit.subject.as_ref(), "initial");
+        assert_eq!(most_recent_commit.author_name.as_ref(), "tester");
 
         repository
             .create_branch("feature".to_string(), None)
