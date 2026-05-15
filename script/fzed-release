@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: script/fzed-release [options]
+
+Publishes a FZed GitHub release without serializing CI and local bundling.
+
+The script:
+  1. verifies the current clean main checkout and FZed version
+  2. creates the vX.Y.Z-fzed.N tag
+  3. pushes main and the tag
+  4. dispatches run_tests on GitHub
+  5. builds the Apple Silicon macOS DMG locally while CI runs
+  6. publishes the GitHub release after both CI and the bundle succeed
+
+Options:
+  --summary TEXT       One concise FZed user-facing release note paragraph.
+  --notes-file PATH    Use an existing Markdown release notes file instead.
+  --repo OWNER/REPO    GitHub repository. Default: pekeler/fzed
+  --workflow NAME      GitHub Actions workflow. Default: run_tests.yml
+  --target TRIPLE      macOS Rust target. Default: host triple
+  -h, --help           Show this help.
+
+Examples:
+  script/fzed-release --summary "Improves Fossil clone feedback and adds separate Git/Fossil clone entry points."
+  script/fzed-release --notes-file /tmp/fzed-release-notes.md
+USAGE
+}
+
+repo="pekeler/fzed"
+workflow="run_tests.yml"
+target_triple=""
+summary=""
+notes_file=""
+generated_notes_file=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --summary)
+      summary="${2:-}"
+      shift 2
+      ;;
+    --notes-file)
+      notes_file="${2:-}"
+      shift 2
+      ;;
+    --repo)
+      repo="${2:-}"
+      shift 2
+      ;;
+    --workflow)
+      workflow="${2:-}"
+      shift 2
+      ;;
+    --target)
+      target_triple="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+fail() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
+}
+
+require_command cargo
+require_command gh
+require_command git
+require_command shasum
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+current_branch="$(git rev-parse --abbrev-ref HEAD)"
+[[ "$current_branch" == "main" ]] || fail "release must be run from main, not $current_branch"
+
+[[ -z "$(git status --porcelain)" ]] || fail "working tree must be clean"
+
+if [[ -n "$notes_file" && -n "$summary" ]]; then
+  fail "use either --summary or --notes-file, not both"
+fi
+
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1)"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-fzed\.[0-9]+$ ]] || fail "unexpected FZed version '$version'"
+
+tag_name="v${version}"
+head_sha="$(git rev-parse HEAD)"
+
+if [[ -n "$notes_file" ]]; then
+  [[ -f "$notes_file" ]] || fail "release notes file not found: $notes_file"
+else
+  [[ -n "$summary" ]] || fail "provide --summary or --notes-file"
+  upstream_version="${version%%-fzed.*}"
+  upstream_tag="v${upstream_version}"
+  generated_notes_file="$(mktemp)"
+  notes_file="$generated_notes_file"
+  cat > "$notes_file" <<NOTES
+Updates to Zed [$upstream_tag](https://github.com/zed-industries/zed/releases/tag/$upstream_tag).
+
+$summary
+
+Build the app from source or download the DMG for Apple Silicon macOS (macOS will show a security warning for the downloaded DMG because it is only ad-hoc signed and not Apple-notarized).
+NOTES
+fi
+
+cleanup() {
+  if [[ -n "$generated_notes_file" ]]; then
+    rm -f "$generated_notes_file"
+  fi
+}
+trap cleanup EXIT
+
+if [[ -z "$target_triple" ]]; then
+  target_triple="$(rustc --version --verbose | sed -n 's/^host: //p')"
+fi
+
+case "$target_triple" in
+  aarch64-apple-darwin)
+    arch_suffix="aarch64"
+    ;;
+  x86_64-apple-darwin)
+    arch_suffix="x86_64"
+    ;;
+  *)
+    fail "unsupported release target '$target_triple'"
+    ;;
+esac
+
+if gh release view "$tag_name" --repo "$repo" >/dev/null 2>&1; then
+  fail "GitHub release already exists: $tag_name"
+fi
+
+if git rev-parse --verify --quiet "$tag_name" >/dev/null; then
+  tag_commit="$(git rev-parse "$tag_name^{commit}")"
+  [[ "$tag_commit" == "$head_sha" ]] || fail "$tag_name already exists and does not point at HEAD"
+else
+  git tag -a "$tag_name" -m "FZed $version"
+fi
+
+echo "Pushing main and $tag_name"
+git push origin HEAD:main "$tag_name"
+
+triggered_after="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+echo "Dispatching $workflow for $head_sha"
+gh workflow run "$workflow" --repo "$repo" --ref main
+
+run_id=""
+for _ in {1..30}; do
+  run_id="$(
+    gh run list \
+      --repo "$repo" \
+      --workflow "$workflow" \
+      --branch main \
+      --event workflow_dispatch \
+      --limit 20 \
+      --json databaseId,headSha,createdAt \
+      --jq "map(select(.headSha == \"$head_sha\" and .createdAt >= \"$triggered_after\")) | .[0].databaseId // empty"
+  )"
+  if [[ -n "$run_id" ]]; then
+    break
+  fi
+  sleep 5
+done
+
+[[ -n "$run_id" ]] || fail "could not find dispatched CI run for $head_sha"
+
+build_log="$(mktemp "${TMPDIR:-/tmp}/fzed-release-${tag_name}-bundle.XXXXXX")"
+
+echo "Building macOS DMG in parallel with CI"
+(
+  set -o pipefail
+  bash script/bundle-mac "$target_triple" 2>&1 | tee "$build_log"
+) &
+build_pid=$!
+
+echo "Watching CI run $run_id"
+(
+  gh run watch "$run_id" --repo "$repo" --exit-status --interval 30
+) &
+ci_pid=$!
+
+set +e
+wait "$ci_pid"
+ci_status=$?
+wait "$build_pid"
+build_status=$?
+set -e
+
+if [[ "$ci_status" -ne 0 || "$build_status" -ne 0 ]]; then
+  echo "CI status: $ci_status" >&2
+  echo "Build status: $build_status" >&2
+  echo "Bundle log: $build_log" >&2
+  exit 1
+fi
+
+dmg_path="target/${target_triple}/release/FZed-${arch_suffix}.dmg"
+[[ -f "$dmg_path" ]] || fail "bundle did not produce $dmg_path"
+
+versioned_dmg_path="target/${target_triple}/release/FZed-${version}-${arch_suffix}.dmg"
+checksum_path="${versioned_dmg_path}.sha256"
+
+cp "$dmg_path" "$versioned_dmg_path"
+shasum -a 256 "$versioned_dmg_path" > "$checksum_path"
+
+echo "Publishing $tag_name"
+gh release create "$tag_name" \
+  "$versioned_dmg_path" \
+  "$checksum_path" \
+  --repo "$repo" \
+  --title "$tag_name" \
+  --notes-file "$notes_file"

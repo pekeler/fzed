@@ -171,6 +171,11 @@ When publishing or editing FZed GitHub release notes:
 - Always link to the upstream Zed release notes for the upstream version that
   the FZed release is based on.
 
+When cutting a FZed GitHub release after the merge/version commit is ready, use
+`script/fzed-release` so GitHub CI and the local macOS DMG build run in
+parallel. Do not wait for CI and then build serially unless debugging the
+release process itself.
+
 # Crash Investigation
 
 ## Sentry Integration
