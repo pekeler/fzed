@@ -22,6 +22,7 @@ use gpui::{AsyncApp, BackgroundExecutor, SharedString, Task};
 use parking_lot::Mutex;
 use rope::Rope;
 use smallvec::SmallVec;
+use smol::lock::Mutex as AsyncMutex;
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
@@ -43,6 +44,7 @@ pub struct FossilRepository {
     executor: BackgroundExecutor,
     is_trusted: Arc<AtomicBool>,
     cached_info: Arc<Mutex<Option<FossilInfo>>>,
+    command_lock: Arc<AsyncMutex<()>>,
     envs: Arc<HashMap<String, String>>,
 }
 
@@ -67,6 +69,7 @@ impl FossilRepository {
             executor,
             is_trusted: Arc::new(AtomicBool::new(false)),
             cached_info: Arc::default(),
+            command_lock: Arc::default(),
             envs: Arc::default(),
         })
     }
@@ -87,6 +90,7 @@ impl FossilRepository {
         FossilBinary::new(
             self.fossil_binary_path.clone(),
             self.work_directory.clone(),
+            self.command_lock.clone(),
             self.envs.clone(),
         )
     }
@@ -1231,6 +1235,7 @@ impl FossilRepository {
             executor: self.executor.clone(),
             is_trusted: self.is_trusted.clone(),
             cached_info: self.cached_info.clone(),
+            command_lock: self.command_lock.clone(),
             envs: self.envs.clone(),
         }
     }
@@ -2020,6 +2025,7 @@ fn fossil_output_reports_unsupported_no_verify_comment(stdout: &str, stderr: &st
 struct FossilBinary {
     fossil_binary_path: PathBuf,
     working_directory: PathBuf,
+    command_lock: Arc<AsyncMutex<()>>,
     envs: Arc<HashMap<String, String>>,
 }
 
@@ -2027,11 +2033,13 @@ impl FossilBinary {
     fn new(
         fossil_binary_path: PathBuf,
         working_directory: PathBuf,
+        command_lock: Arc<AsyncMutex<()>>,
         envs: Arc<HashMap<String, String>>,
     ) -> Self {
         Self {
             fossil_binary_path,
             working_directory,
+            command_lock,
             envs,
         }
     }
@@ -2095,6 +2103,7 @@ impl FossilBinary {
     where
         S: AsRef<OsStr>,
     {
+        let _lock = self.command_lock.lock().await;
         let mut command = self.build_command(args);
         if let Some(env) = env {
             command.envs(env.iter());
@@ -2129,6 +2138,7 @@ impl FossilBinary {
         Self {
             fossil_binary_path: self.fossil_binary_path.clone(),
             working_directory,
+            command_lock: self.command_lock.clone(),
             envs: self.envs.clone(),
         }
     }
@@ -2377,7 +2387,12 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script_path, permissions).unwrap();
 
-        let fossil = FossilBinary::new(script_path, temp_dir.path().to_path_buf(), Arc::default());
+        let fossil = FossilBinary::new(
+            script_path,
+            temp_dir.path().to_path_buf(),
+            Arc::default(),
+            Arc::default(),
+        );
         run_fossil_commit_with_legacy_comment_verification_fallback(
             &fossil,
             &[
