@@ -297,7 +297,7 @@ osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["fzed"]
 
 [package.metadata.bundle-stable]
-icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
+icon = ["resources/app-icon-fzed@2x.png", "resources/app-icon-fzed.png"]
 identifier = "dev.fzed.fzed"
 name = "FZed"
 osx_minimum_system_version = "10.15.7"
