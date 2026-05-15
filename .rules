@@ -176,6 +176,15 @@ When cutting a FZed GitHub release after the merge/version commit is ready, use
 parallel. Do not wait for CI and then build serially unless debugging the
 release process itself.
 
+# FZed upstream bug handling
+
+When investigating a bug, determine whether it comes from FZed-specific Fossil
+changes or from unchanged upstream Zed code. If the bug exists upstream, file an
+upstream Zed issue and prefer submitting an upstream PR so FZed receives the fix
+through the next upstream release. Keep a local FZed patch only when users need
+the fix before upstream can take it or when the issue only appears because of
+FZed's Fossil integration.
+
 # Crash Investigation
 
 ## Sentry Integration
