@@ -158,6 +158,7 @@ function download_and_unpack() {
     local path_to_unpack=$2
     local target_path=$3
 
+    local temp_dir
     temp_dir=$(mktemp -d)
 
     if ! command -v curl &> /dev/null; then
@@ -165,37 +166,64 @@ function download_and_unpack() {
         exit 1
     fi
 
-    curl --silent --fail --location "$url" | tar -xvz -C "$temp_dir" -f - $path_to_unpack
+    if ! curl --silent --show-error --fail --location --retry 3 "$url" | tar -xz -C "$temp_dir" -f - "$path_to_unpack"; then
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    if [[ ! -f "$temp_dir/$path_to_unpack" ]]; then
+        echo "Downloaded archive did not contain $path_to_unpack"
+        rm -rf "$temp_dir"
+        return 1
+    fi
 
     mv "$temp_dir/$path_to_unpack" "$target_path"
 
     rm -rf "$temp_dir"
 }
 
-function download_git() {
+function download_cached_git() {
     local architecture=$1
     local target_binary=$2
+    local cache_dir="target/${target_triple}/${target_dir}/bundled-tools"
+    local cached_binary="${cache_dir}/git-${GIT_VERSION}-${GIT_VERSION_SHA}-${architecture}"
+    local expected_git_version="${GIT_VERSION#v}"
 
-    tmp_dir=$(mktemp -d)
-    pushd "$tmp_dir"
+    mkdir -p "$cache_dir"
 
-    case "$architecture" in
-        aarch64-apple-darwin)
-            download_and_unpack "https://github.com/desktop/dugite-native/releases/download/${GIT_VERSION}/dugite-native-${GIT_VERSION}-${GIT_VERSION_SHA}-macOS-arm64.tar.gz" bin/git ./git
-            ;;
-        x86_64-apple-darwin)
-            download_and_unpack "https://github.com/desktop/dugite-native/releases/download/${GIT_VERSION}/dugite-native-${GIT_VERSION}-${GIT_VERSION_SHA}-macOS-x64.tar.gz" bin/git ./git
-            ;;
-        *)
-            echo "Unsupported architecture: $architecture"
-            exit 1
-            ;;
-    esac
+    if [[ ! -x "$cached_binary" ]]; then
+        local previous_bundle_git="target/${target_triple}/${target_dir}/dmg/FZed.app/Contents/MacOS/git"
+        if [[ -x "$previous_bundle_git" ]] && [[ "$("$previous_bundle_git" --version)" == "git version ${expected_git_version}"* ]]; then
+            echo "Using previously bundled git binary"
+            cp "$previous_bundle_git" "$cached_binary"
+        fi
+    fi
 
-    popd
+    if [[ ! -x "$cached_binary" ]]; then
+        local tmp_dir
+        tmp_dir=$(mktemp -d)
 
-    mv "${tmp_dir}/git" "${target_binary}"
-    rm -rf "$tmp_dir"
+        case "$architecture" in
+            aarch64-apple-darwin)
+                download_and_unpack "https://github.com/desktop/dugite-native/releases/download/${GIT_VERSION}/dugite-native-${GIT_VERSION}-${GIT_VERSION_SHA}-macOS-arm64.tar.gz" bin/git "${tmp_dir}/git"
+                ;;
+            x86_64-apple-darwin)
+                download_and_unpack "https://github.com/desktop/dugite-native/releases/download/${GIT_VERSION}/dugite-native-${GIT_VERSION_SHA}-macOS-x64.tar.gz" bin/git "${tmp_dir}/git"
+                ;;
+            *)
+                echo "Unsupported architecture: $architecture"
+                exit 1
+                ;;
+        esac
+
+        mv "${tmp_dir}/git" "${cached_binary}"
+        rm -rf "$tmp_dir"
+    else
+        echo "Using cached git binary"
+    fi
+
+    cp "${cached_binary}" "${target_binary}"
+    chmod +x "${target_binary}"
 }
 
 function sign_app_binaries() {
@@ -203,7 +231,7 @@ function sign_app_binaries() {
     mkdir -p "${app_path}/Contents/Frameworks"
 
     echo "Downloading git binary"
-    download_git "${target_triple}" "${app_path}/Contents/MacOS/git"
+    download_cached_git "${target_triple}" "${app_path}/Contents/MacOS/git"
 
     # Note: The app identifier for our development builds is the same as the app identifier for nightly.
     cp crates/zed/contents/$channel/embedded.provisionprofile "${app_path}/Contents/"
@@ -275,7 +303,9 @@ function sign_app_binaries() {
         rm ${dmg_source_directory}/Applications
 
         echo "Adding license agreement to DMG"
-        npm install --global dmg-license minimist
+        if ! command -v dmg-license &> /dev/null; then
+            npm install --global dmg-license minimist
+        fi
         dmg-license script/terms/terms.json "${dmg_file_path}"
 
         if [[ $can_code_sign = true ]]; then
