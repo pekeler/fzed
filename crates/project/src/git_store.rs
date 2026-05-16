@@ -439,19 +439,24 @@ impl LocalRepositoryState {
         let backend = cx
             .background_spawn({
                 let fs = fs.clone();
-                let binary_name =
-                    repository_kind_for_metadata_path(&dot_git_abs_path).binary_name();
+                let repository_kind = repository_kind_for_metadata_path(&dot_git_abs_path);
                 async move {
-                    let system_binary_path = search_paths
-                        .and_then(|search_paths| {
-                            which::which_in(
-                                binary_name,
-                                Some(search_paths),
-                                &work_directory_abs_path,
-                            )
-                            .ok()
-                        })
-                        .or_else(|| which::which(binary_name).ok());
+                    let system_binary_path = match repository_kind {
+                        RepositoryKind::Git => search_paths
+                            .and_then(|search_paths| {
+                                which::which_in(
+                                    repository_kind.binary_name(),
+                                    Some(search_paths),
+                                    &work_directory_abs_path,
+                                )
+                                .ok()
+                            })
+                            .or_else(|| which::which(repository_kind.binary_name()).ok()),
+                        RepositoryKind::Fossil => Some(git::fossil::resolve_fossil_binary(
+                            search_paths.as_deref(),
+                            &work_directory_abs_path,
+                        )?),
+                    };
                     fs.open_repo(&dot_git_abs_path, system_binary_path.as_deref())
                         .with_context(|| format!("opening repository at {dot_git_abs_path:?}"))
                 }

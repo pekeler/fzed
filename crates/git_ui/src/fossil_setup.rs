@@ -362,12 +362,13 @@ async fn fossil_init_checkout(checkout_dir: &Path) -> Result<()> {
 }
 
 async fn run_fossil(working_dir: &Path, args: impl IntoIterator<Item = OsString>) -> Result<()> {
-    let output = new_command("fossil")
+    let fossil_binary = git::fossil::resolve_fossil_binary(None, working_dir)?;
+    let output = new_command(&fossil_binary)
         .current_dir(working_dir)
         .args(args)
         .output()
         .await
-        .context("running fossil")?;
+        .with_context(|| format!("running Fossil executable at {}", fossil_binary.display()))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -37,6 +37,9 @@ use text::LineEnding;
 use time::PrimitiveDateTime;
 use util::{command::new_command, paths::PathStyle};
 
+pub const FOSSIL_BINARY_NAME: &str = "fossil";
+pub const FOSSIL_BINARY_NOT_FOUND_MESSAGE: &str = "Fossil executable not found. Install Fossil and make sure the `fossil` command is available on PATH.";
+
 pub struct FossilRepository {
     checkout_db_path: PathBuf,
     work_directory: PathBuf,
@@ -58,7 +61,10 @@ impl FossilRepository {
             .parent()
             .context("Fossil checkout database has no parent directory")?
             .to_path_buf();
-        let fossil_binary_path = fossil_binary_path.unwrap_or_else(|| PathBuf::from("fossil"));
+        let fossil_binary_path = match fossil_binary_path {
+            Some(path) => path,
+            None => resolve_fossil_binary(None, &work_directory)?,
+        };
         log::info!(
             "opening Fossil repository at {checkout_db_path:?} using fossil binary {fossil_binary_path:?}"
         );
@@ -105,6 +111,50 @@ impl FossilRepository {
     fn unsupported<T: Send + 'static>(operation: &'static str) -> BoxFuture<'static, Result<T>> {
         async move { Err(anyhow!("Fossil backend does not support {operation} yet")) }.boxed()
     }
+}
+
+pub fn fossil_binary_not_found_error() -> anyhow::Error {
+    anyhow!(FOSSIL_BINARY_NOT_FOUND_MESSAGE)
+}
+
+pub fn resolve_fossil_binary(
+    search_paths: Option<&str>,
+    working_directory: &Path,
+) -> Result<PathBuf> {
+    if let Some(path) = search_paths
+        .filter(|paths| !paths.is_empty())
+        .and_then(|search_paths| {
+            which::which_in(FOSSIL_BINARY_NAME, Some(search_paths), working_directory).ok()
+        })
+    {
+        return Ok(path);
+    }
+
+    if let Ok(path) = which::which(FOSSIL_BINARY_NAME) {
+        return Ok(path);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for path in common_macos_fossil_paths() {
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+    }
+
+    Err(fossil_binary_not_found_error())
+}
+
+#[cfg(target_os = "macos")]
+fn common_macos_fossil_paths() -> impl IntoIterator<Item = PathBuf> {
+    [
+        "/opt/homebrew/bin/fossil",
+        "/usr/local/bin/fossil",
+        "/opt/local/bin/fossil",
+        "/sw/bin/fossil",
+    ]
+    .map(PathBuf::from)
 }
 
 impl GitRepository for FossilRepository {
@@ -2178,7 +2228,7 @@ mod tests {
         parse_fossil_changes_with_kind, parse_fossil_commit_info, parse_fossil_default_remote,
         parse_fossil_info, parse_fossil_numstat, parse_fossil_remote_list, parse_fossil_stash_list,
         parse_fossil_timeline_entries, parse_fossil_unified_diff, parse_fossil_verbose_checkouts,
-        run_fossil_commit_with_legacy_comment_verification_fallback,
+        resolve_fossil_binary, run_fossil_commit_with_legacy_comment_verification_fallback,
     };
     use crate::{
         repository::{
@@ -2195,6 +2245,24 @@ mod tests {
         sync::Arc,
     };
     use text::{LineEnding, Rope};
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_fossil_binary_from_search_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fossil_path = temp_dir.path().join("fossil");
+        std::fs::write(&fossil_path, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&fossil_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fossil_path, permissions).unwrap();
+
+        assert_eq!(
+            resolve_fossil_binary(temp_dir.path().to_str(), temp_dir.path()).unwrap(),
+            fossil_path
+        );
+    }
 
     #[test]
     fn parses_fossil_info_checkout() {

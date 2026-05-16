@@ -38,6 +38,42 @@ Use the prerelease suffix, not build metadata, so fork-only follow-ups sort in
 release order. FZed update checks must compare only against FZed releases, not
 against upstream Zed releases.
 
+### Fossil Executable
+
+FZed does not bundle Fossil. Install Fossil separately and make sure the
+`fossil` executable is available.
+
+When opening an existing Fossil checkout, FZed looks for `fossil` in the
+project shell environment's `PATH`, then in the app process `PATH`. On macOS,
+it also checks common package-manager locations:
+
+- `/opt/homebrew/bin/fossil`
+- `/usr/local/bin/fossil`
+- `/opt/local/bin/fossil`
+- `/sw/bin/fossil`
+
+FZed shows a clear error if Fossil cannot be found.
+
+On macOS, apps launched from Finder, Dock, or Spotlight may not inherit the
+same `PATH` as Terminal shells. If Fossil is installed in a custom location,
+either start FZed from a shell that already has the right `PATH`, or update the
+per-user launchd `PATH`.
+
+For the current login session only:
+
+```sh
+launchctl setenv PATH "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+```
+
+For a persistent setting:
+
+```sh
+launchctl config user path "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+```
+
+The persistent setting requires a reboot before newly launched GUI apps see the
+new `PATH`.
+
 ### Current Development Build
 
 The Cargo package is still named `zed` to reduce upstream merge churn, but the
