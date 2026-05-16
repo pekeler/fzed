@@ -2,22 +2,13 @@
 # Rebuild with `cargo xtask workflows`.
 name: deploy_nightly_docs
 on:
-  push:
-    branches:
-    - main
+  workflow_dispatch: {}
 jobs:
-  deploy_docs:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    permissions:
-      contents: read
-    uses: zed-industries/zed/.github/workflows/deploy_docs.yml@main
-    secrets:
-      DOCS_AMPLITUDE_API_KEY: ${{ secrets.DOCS_AMPLITUDE_API_KEY }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-    with:
-      channel: nightly
-      checkout_ref: ${{ github.sha }}
+  disabled_for_fzed:
+    name: Disabled for FZed
+    runs-on: ubuntu-24.04
+    steps:
+    - run: echo "Nightly docs deployment is disabled for FZed."
 defaults:
   run:
     shell: bash -euxo pipefail {0}
