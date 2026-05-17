@@ -158,6 +158,10 @@ pub mod fossil_actions {
             RevertTrackedFiles,
             /// Moves Fossil extra files to trash.
             CleanExtras,
+            /// Records a Fossil rename from a missing file and an extra file.
+            RecordRename,
+            /// Undoes the selected recorded Fossil rename.
+            UndoRecordedRename,
             /// Synchronizes the active Fossil checkout with its remote.
             Sync,
             /// Updates the active Fossil checkout.

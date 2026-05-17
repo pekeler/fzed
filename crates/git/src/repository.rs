@@ -941,6 +941,33 @@ pub trait GitRepository: Send + Sync {
         self.commit(message, name_and_email, options, askpass, env)
     }
 
+    fn record_fossil_rename(
+        &self,
+        _old_path: RepoPath,
+        _new_path: RepoPath,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async move {
+            Err(anyhow!(
+                "repository does not support recording Fossil renames"
+            ))
+        }
+        .boxed()
+    }
+
+    fn undo_fossil_rename(
+        &self,
+        _new_path: RepoPath,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async move {
+            Err(anyhow!(
+                "repository does not support undoing Fossil renames"
+            ))
+        }
+        .boxed()
+    }
+
     fn stash_paths(
         &self,
         paths: Vec<RepoPath>,

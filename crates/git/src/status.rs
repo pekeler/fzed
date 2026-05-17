@@ -430,6 +430,13 @@ impl std::ops::Sub for GitSummary {
 #[derive(Clone, Debug)]
 pub struct GitStatus {
     pub entries: Arc<[(RepoPath, FileStatus)]>,
+    pub renames: Arc<[StatusRename]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusRename {
+    pub source: RepoPath,
+    pub target: RepoPath,
 }
 
 impl FromStr for GitStatus {
@@ -486,6 +493,7 @@ impl FromStr for GitStatus {
         });
         Ok(Self {
             entries: entries.into(),
+            renames: Arc::default(),
         })
     }
 }
@@ -494,6 +502,7 @@ impl Default for GitStatus {
     fn default() -> Self {
         Self {
             entries: Arc::new([]),
+            renames: Arc::default(),
         }
     }
 }

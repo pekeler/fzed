@@ -540,6 +540,7 @@ impl GitRepository for FakeGitRepository {
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             anyhow::Ok(GitStatus {
                 entries: entries.into(),
+                renames: Arc::default(),
             })
         });
         Task::ready(match result {

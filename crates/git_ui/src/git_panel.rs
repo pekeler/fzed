@@ -675,10 +675,19 @@ pub struct GitStatusEntry {
     pub(crate) status: FileStatus,
     pub(crate) staging: StageStatus,
     pub(crate) diff_stat: Option<DiffStat>,
+    pub(crate) rename_source: Option<RepoPath>,
 }
 
 impl GitStatusEntry {
     fn display_name(&self, path_style: PathStyle) -> String {
+        if let Some(rename_source) = &self.rename_source {
+            return format!(
+                "{} -> {}",
+                rename_source.display(path_style),
+                self.repo_path.display(path_style)
+            );
+        }
+
         self.repo_path
             .file_name()
             .map(|name| name.to_owned())
@@ -686,6 +695,10 @@ impl GitStatusEntry {
     }
 
     fn parent_dir(&self, path_style: PathStyle) -> Option<String> {
+        if self.rename_source.is_some() {
+            return None;
+        }
+
         self.repo_path
             .parent()
             .map(|parent| parent.display(path_style).to_string())
@@ -1417,6 +1430,91 @@ impl GitPanel {
 
     fn get_selected_entry(&self) -> Option<&GitListEntry> {
         self.selected_entry.and_then(|i| self.entries.get(i))
+    }
+
+    fn selected_status_entries(&self) -> Vec<GitStatusEntry> {
+        let mut selected_indices = self.marked_entries.clone();
+        if let Some(selected_entry) = self.selected_entry {
+            selected_indices.push(selected_entry);
+        }
+        selected_indices.sort_unstable();
+        selected_indices.dedup();
+
+        selected_indices
+            .into_iter()
+            .filter_map(|index| self.entries.get(index)?.status_entry().cloned())
+            .collect()
+    }
+
+    fn fossil_record_rename_pair(&self) -> Option<(RepoPath, RepoPath)> {
+        let selected_entries = self.selected_status_entries();
+        Self::fossil_record_rename_pair_from_entries(&selected_entries).or_else(|| {
+            let [entry] = selected_entries.as_slice() else {
+                return None;
+            };
+            self.fossil_record_rename_pair_for_entry(entry)
+        })
+    }
+
+    fn fossil_record_rename_pair_from_entries(
+        entries: &[GitStatusEntry],
+    ) -> Option<(RepoPath, RepoPath)> {
+        if entries.len() != 2 {
+            return None;
+        }
+
+        let old_path = entries
+            .iter()
+            .find(|entry| entry.status.is_deleted())?
+            .repo_path
+            .clone();
+        let new_path = entries
+            .iter()
+            .find(|entry| entry.status.is_untracked())?
+            .repo_path
+            .clone();
+
+        Some((old_path, new_path))
+    }
+
+    fn fossil_record_rename_pair_for_entry(
+        &self,
+        entry: &GitStatusEntry,
+    ) -> Option<(RepoPath, RepoPath)> {
+        let candidates = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.status_entry())
+            .filter(|candidate| {
+                if entry.status.is_deleted() {
+                    candidate.status.is_untracked()
+                } else if entry.status.is_untracked() {
+                    candidate.status.is_deleted()
+                } else {
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let [candidate] = candidates.as_slice() else {
+            return None;
+        };
+
+        if entry.status.is_deleted() {
+            Some((entry.repo_path.clone(), candidate.repo_path.clone()))
+        } else {
+            Some((candidate.repo_path.clone(), entry.repo_path.clone()))
+        }
+    }
+
+    fn toggle_marked_entry(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(position) = self.marked_entries.iter().position(|marked| *marked == ix) {
+            self.marked_entries.remove(position);
+        } else {
+            self.marked_entries.push(ix);
+        }
+        self.selected_entry = Some(ix);
+        cx.notify();
     }
 
     fn open_diff(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
@@ -2279,6 +2377,74 @@ impl GitPanel {
         }
     }
 
+    pub(crate) fn record_fossil_rename(
+        &mut self,
+        _: &git::fossil_actions::RecordRename,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_repository_kind(cx).is_fossil() {
+            return;
+        }
+        let Some((old_path, new_path)) = self.fossil_record_rename_pair() else {
+            return;
+        };
+        let Some(active_repository) = self.active_repository.clone() else {
+            return;
+        };
+
+        self.marked_entries.clear();
+        let receiver = active_repository.update(cx, |repo, _cx| {
+            repo.record_fossil_rename(old_path, new_path)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = receiver.await?;
+            this.update(cx, |this, cx| {
+                if let Err(err) = result {
+                    this.show_error_toast("fossil rename", err, cx);
+                }
+                cx.notify();
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    pub(crate) fn undo_fossil_rename(
+        &mut self,
+        _: &git::fossil_actions::UndoRecordedRename,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.active_repository_kind(cx).is_fossil() {
+            return;
+        }
+        let Some(entry) = self
+            .get_selected_entry()
+            .and_then(|entry| entry.status_entry())
+        else {
+            return;
+        };
+        if entry.rename_source.is_none() {
+            return;
+        }
+        let Some(active_repository) = self.active_repository.clone() else {
+            return;
+        };
+
+        let new_path = entry.repo_path.clone();
+        let receiver = active_repository.update(cx, |repo, _cx| repo.undo_fossil_rename(new_path));
+        cx.spawn(async move |this, cx| {
+            let result = receiver.await?;
+            this.update(cx, |this, cx| {
+                if let Err(err) = result {
+                    this.show_error_toast("fossil rename", err, cx);
+                }
+                cx.notify();
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
     fn on_commit(&mut self, _: &git::Commit, window: &mut Window, cx: &mut Context<Self>) {
         if self.commit(&self.commit_editor.focus_handle(cx), window, cx) {
             telemetry::event!("Git Committed", source = "Source Control Panel");
@@ -2546,6 +2712,11 @@ impl GitPanel {
                 commit_task.await?
             })
         };
+        let commit_error_action = if repository_kind.is_fossil() {
+            "fossil commit"
+        } else {
+            "commit"
+        };
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
@@ -2561,7 +2732,7 @@ impl GitPanel {
                             this.original_commit_message = None;
                         }
                     }
-                    Err(e) => this.show_error_toast("commit", e, cx),
+                    Err(e) => this.show_error_toast(commit_error_action, e, cx),
                 }
             })
             .ok();
@@ -3900,6 +4071,7 @@ impl GitPanel {
                 status: entry.status,
                 staging,
                 diff_stat: entry.diff_stat,
+                rename_source: entry.rename_source.clone(),
             };
 
             if staging.has_staged() {
@@ -3937,6 +4109,7 @@ impl GitPanel {
                             status: status.status,
                             staging: StageStatus::Staged,
                             diff_stat: status.diff_stat,
+                            rename_source: status.rename_source.clone(),
                         });
             }
         }
@@ -5650,11 +5823,18 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_entry != Some(ix) && !self.marked_entries.contains(&ix) {
+            self.marked_entries.clear();
+        }
+        self.selected_entry = Some(ix);
+
         let Some(entry) = self.entries.get(ix).and_then(|e| e.status_entry()) else {
             return;
         };
         let repository_kind = self.active_repository_kind(cx);
         let is_fossil = repository_kind.is_fossil();
+        let can_record_fossil_rename = is_fossil && self.fossil_record_rename_pair().is_some();
+        let can_undo_fossil_rename = is_fossil && entry.rename_source.is_some();
         let stage_title = stage_file_action_title(repository_kind, entry.staging);
         let restore_title = if entry.status.is_created() {
             "Trash File"
@@ -5674,6 +5854,20 @@ impl GitPanel {
                         git::AddToGitignore.boxed_clone(),
                     )
                 })
+                .when(is_fossil, |context_menu| {
+                    context_menu
+                        .separator()
+                        .action_disabled_when(
+                            !can_record_fossil_rename,
+                            "Record Fossil Rename",
+                            git::fossil_actions::RecordRename.boxed_clone(),
+                        )
+                        .action_disabled_when(
+                            !can_undo_fossil_rename,
+                            "Undo Recorded Fossil Rename",
+                            git::fossil_actions::UndoRecordedRename.boxed_clone(),
+                        )
+                })
                 .separator()
                 .action("Open Diff", menu::Confirm.boxed_clone())
                 .action("Open File", menu::SecondaryConfirm.boxed_clone())
@@ -5684,7 +5878,6 @@ impl GitPanel {
                     )
                 })
         });
-        self.selected_entry = Some(ix);
         self.set_context_menu(context_menu, position, window, cx);
     }
 
@@ -5971,6 +6164,13 @@ impl GitPanel {
             )
             .on_click({
                 cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if event.modifiers().platform {
+                        this.toggle_marked_entry(ix, cx);
+                        this.focus_handle.focus(window, cx);
+                        return;
+                    }
+
+                    this.marked_entries.clear();
                     this.selected_entry = Some(ix);
                     cx.notify();
                     if event.click_count() > 1 || event.modifiers().secondary() {
@@ -6416,6 +6616,8 @@ impl Render for GitPanel {
                         .on_action(cx.listener(Self::unstage_all))
                         .on_action(cx.listener(Self::stage_selected))
                         .on_action(cx.listener(Self::unstage_selected))
+                        .on_action(cx.listener(Self::record_fossil_rename))
+                        .on_action(cx.listener(Self::undo_fossil_rename))
                         .on_action(cx.listener(Self::generate_commit_message_action))
                 },
             )
@@ -7206,13 +7408,21 @@ fn open_output(
     let editor = cx.new(|cx| {
         let mut editor = Editor::for_buffer(buffer, None, window, cx);
         editor.buffer().update(cx, |buffer, cx| {
-            buffer.set_title(format!("Output from git {operation}"), cx);
+            buffer.set_title(format!("Output from {}", display_operation(&operation)), cx);
         });
         editor.set_read_only(true);
         editor
     });
 
     workspace.add_item_to_center(Box::new(editor), window, cx);
+}
+
+fn display_operation(operation: &str) -> String {
+    if operation.starts_with("git ") || operation.starts_with("fossil ") {
+        operation.to_string()
+    } else {
+        format!("git {operation}")
+    }
 }
 
 #[derive(Default)]
@@ -7258,22 +7468,26 @@ pub(crate) fn show_error_toast(
         cx.defer(move |cx| {
             workspace.update(cx, |workspace, cx| {
                 let workspace_weak = cx.weak_entity();
-                let toast = StatusToast::new(format!("git {} failed", action), cx, |this, _cx| {
-                    this.icon(
-                        Icon::new(IconName::XCircle)
-                            .size(IconSize::Small)
-                            .color(Color::Error),
-                    )
-                    .action("View Log", move |window, cx| {
-                        let message = message.clone();
-                        let action = action.clone();
-                        workspace_weak
-                            .update(cx, move |workspace, cx| {
-                                open_output(action, workspace, &message, window, cx)
-                            })
-                            .ok();
-                    })
-                });
+                let toast = StatusToast::new(
+                    format!("{} failed", display_operation(&action)),
+                    cx,
+                    |this, _cx| {
+                        this.icon(
+                            Icon::new(IconName::XCircle)
+                                .size(IconSize::Small)
+                                .color(Color::Error),
+                        )
+                        .action("View Log", move |window, cx| {
+                            let message = message.clone();
+                            let action = action.clone();
+                            workspace_weak
+                                .update(cx, move |workspace, cx| {
+                                    open_output(action, workspace, &message, window, cx)
+                                })
+                                .ok();
+                        })
+                    },
+                );
                 workspace.toggle_status_toast(toast, cx)
             });
         });
@@ -7527,6 +7741,7 @@ mod tests {
                         added: 1,
                         deleted: 1,
                     }),
+                    rename_source: None,
                 }),
                 GitListEntry::Status(GitStatusEntry {
                     repo_path: repo_path("crates/util/util.rs"),
@@ -7536,6 +7751,7 @@ mod tests {
                         added: 1,
                         deleted: 1,
                     }),
+                    rename_source: None,
                 },),
             ],
         );
@@ -7560,6 +7776,7 @@ mod tests {
                         added: 1,
                         deleted: 1,
                     }),
+                    rename_source: None,
                 }),
                 GitListEntry::Status(GitStatusEntry {
                     repo_path: repo_path("crates/util/util.rs"),
@@ -7569,6 +7786,7 @@ mod tests {
                         added: 1,
                         deleted: 1,
                     }),
+                    rename_source: None,
                 },),
             ],
         );

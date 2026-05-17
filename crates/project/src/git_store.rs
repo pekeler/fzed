@@ -217,6 +217,7 @@ pub struct StatusEntry {
     pub repo_path: RepoPath,
     pub status: FileStatus,
     pub diff_stat: Option<DiffStat>,
+    pub rename_source: Option<RepoPath>,
 }
 
 impl StatusEntry {
@@ -258,6 +259,7 @@ impl TryFrom<proto::StatusEntry> for StatusEntry {
             repo_path,
             status,
             diff_stat,
+            rename_source: None,
         })
     }
 }
@@ -6645,6 +6647,72 @@ impl Repository {
         self.send_commit_job(message, name_and_email, options, askpass, Some(paths), cx)
     }
 
+    pub fn record_fossil_rename(
+        &mut self,
+        old_path: RepoPath,
+        new_path: RepoPath,
+    ) -> oneshot::Receiver<Result<()>> {
+        let this = self.this.clone();
+        let old_path_for_status = old_path.clone();
+        let new_path_for_status = new_path.clone();
+        self.send_job(
+            Some(
+                format!(
+                    "fossil rename {} {}",
+                    old_path_for_status.as_unix_str(),
+                    new_path_for_status.as_unix_str()
+                )
+                .into(),
+            ),
+            move |repo, mut cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => {
+                        let result = backend
+                            .record_fossil_rename(old_path, new_path, environment)
+                            .await;
+                        if result.is_ok() {
+                            refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
+                        }
+                        result
+                    }
+                    RepositoryState::Remote(_) => {
+                        bail!("Recording Fossil renames is not supported in remote projects yet")
+                    }
+                }
+            },
+        )
+    }
+
+    pub fn undo_fossil_rename(&mut self, new_path: RepoPath) -> oneshot::Receiver<Result<()>> {
+        let this = self.this.clone();
+        let new_path_for_status = new_path.clone();
+        self.send_job(
+            Some(format!("fossil rename {}", new_path_for_status.as_unix_str()).into()),
+            move |repo, mut cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        environment,
+                        ..
+                    }) => {
+                        let result = backend.undo_fossil_rename(new_path, environment).await;
+                        if result.is_ok() {
+                            refresh_fossil_snapshot_after_command(this, backend, &mut cx).await?;
+                        }
+                        result
+                    }
+                    RepositoryState::Remote(_) => {
+                        bail!("Undoing Fossil renames is not supported in remote projects yet")
+                    }
+                }
+            },
+        )
+    }
+
     fn send_commit_job(
         &mut self,
         message: SharedString,
@@ -8434,6 +8502,11 @@ impl Repository {
 
                         let diff_stats: HashMap<RepoPath, DiffStat> =
                             HashMap::from_iter(diff_stats.entries.into_iter().cloned());
+                        let rename_sources: HashMap<RepoPath, RepoPath> = statuses
+                            .renames
+                            .iter()
+                            .map(|rename| (rename.target.clone(), rename.source.clone()))
+                            .collect();
 
                         let mut changed_path_statuses = Vec::new();
                         let prev_statuses = prev_snapshot.statuses_by_path.clone();
@@ -8443,9 +8516,16 @@ impl Repository {
                             let current_diff_stat = diff_stats.get(repo_path).copied();
 
                             changed_paths.remove(repo_path);
+                            let rename_source = rename_sources.get(repo_path).cloned();
+                            if let Some(rename_source) = rename_source.as_ref() {
+                                changed_paths.remove(rename_source);
+                            }
+
                             if cursor.seek_forward(&PathTarget::Path(repo_path), Bias::Left)
                                 && cursor.item().is_some_and(|entry| {
-                                    entry.status == *status && entry.diff_stat == current_diff_stat
+                                    entry.status == *status
+                                        && entry.diff_stat == current_diff_stat
+                                        && entry.rename_source == rename_source
                                 })
                             {
                                 continue;
@@ -8455,6 +8535,7 @@ impl Repository {
                                 repo_path: repo_path.clone(),
                                 status: *status,
                                 diff_stat: current_diff_stat,
+                                rename_source,
                             }));
                         }
                         let mut cursor = prev_statuses.cursor::<PathProgress>(());
@@ -9338,6 +9419,7 @@ mod tests {
                 repo_path: included_path.clone(),
                 status: StatusCode::Modified.worktree(),
                 diff_stat: None,
+                rename_source: None,
             }],
             (),
         );
@@ -9829,6 +9911,11 @@ async fn compute_snapshot(
 
     let diff_stat_map: HashMap<&RepoPath, DiffStat> =
         diff_stats.entries.iter().map(|(p, s)| (p, *s)).collect();
+    let rename_sources: HashMap<&RepoPath, &RepoPath> = statuses
+        .renames
+        .iter()
+        .map(|rename| (&rename.target, &rename.source))
+        .collect();
     let mut conflicted_paths = Vec::new();
     let statuses_by_path = SumTree::from_iter(
         statuses.entries.iter().map(|(repo_path, status)| {
@@ -9839,6 +9926,9 @@ async fn compute_snapshot(
                 repo_path: repo_path.clone(),
                 status: *status,
                 diff_stat: diff_stat_map.get(repo_path).copied(),
+                rename_source: rename_sources
+                    .get(repo_path)
+                    .map(|source| (*source).clone()),
             }
         }),
         (),

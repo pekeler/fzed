@@ -10,8 +10,8 @@ use crate::{
     },
     stash::{GitStash, StashEntry},
     status::{
-        DiffStat, DiffTreeType, FileStatus, GitDiffStat, GitStatus, StatusCode, TreeDiff,
-        UnmergedStatus, UnmergedStatusCode,
+        DiffStat, DiffTreeType, FileStatus, GitDiffStat, GitStatus, StatusCode, StatusRename,
+        TreeDiff, UnmergedStatus, UnmergedStatusCode,
     },
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -840,6 +840,70 @@ impl GitRepository for FossilRepository {
 
                 args.extend(repo_paths_to_args(paths));
                 run_fossil_commit_with_legacy_comment_verification_fallback(&fossil, &args, env)
+                    .await?;
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn record_fossil_rename(
+        &self,
+        old_path: RepoPath,
+        new_path: RepoPath,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                fossil
+                    .run_with_env(
+                        &[
+                            OsString::from("rename"),
+                            old_path.as_std_path().as_os_str().to_owned(),
+                            new_path.as_std_path().as_os_str().to_owned(),
+                        ],
+                        env,
+                    )
+                    .await?;
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn undo_fossil_rename(
+        &self,
+        new_path: RepoPath,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let changes_output = fossil
+                    .run_with_env(&fossil_changes_args(Vec::new()), env.clone())
+                    .await?;
+                let old_path = parse_fossil_changes_with_kind(&changes_output)
+                    .into_iter()
+                    .find_map(|change| {
+                        (change.repo_path == new_path)
+                            .then_some(change.rename_source)
+                            .flatten()
+                    })
+                    .with_context(|| {
+                        format!(
+                            "No recorded Fossil rename found for {}",
+                            new_path.as_unix_str()
+                        )
+                    })?;
+
+                fossil
+                    .run_with_env(
+                        &[
+                            OsString::from("rename"),
+                            new_path.as_std_path().as_os_str().to_owned(),
+                            old_path.as_std_path().as_os_str().to_owned(),
+                        ],
+                        env,
+                    )
                     .await?;
                 Ok(())
             })
@@ -1783,6 +1847,7 @@ fn parse_fossil_blame_line(line_number: u32, line: &str) -> Option<FossilBlameLi
 struct FossilChange {
     repo_path: RepoPath,
     kind: FossilChangeKind,
+    rename_source: Option<RepoPath>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1822,11 +1887,7 @@ fn parse_fossil_changes_with_kind(output: &str) -> Vec<FossilChange> {
         let Some((change_type, path)) = line.split_once(char::is_whitespace) else {
             continue;
         };
-        let path = path.trim();
-        if path.is_empty() {
-            continue;
-        }
-        let Ok(repo_path) = RepoPath::from_std_path(Path::new(path), PathStyle::local()) else {
+        let Some((rename_source, repo_path)) = parse_fossil_change_path(path.trim()) else {
             continue;
         };
         let kind = match change_type {
@@ -1844,20 +1905,51 @@ fn parse_fossil_changes_with_kind(output: &str) -> Vec<FossilChange> {
             | "UPDATED_BY_INTEGRATE" => FossilChangeKind::Modified,
             _ => continue,
         };
-        entries.push(FossilChange { repo_path, kind });
+        entries.push(FossilChange {
+            repo_path,
+            kind,
+            rename_source,
+        });
     }
     entries.sort_unstable_by(|left, right| left.repo_path.cmp(&right.repo_path));
     entries.dedup_by(|left, right| left.repo_path == right.repo_path);
     entries
 }
 
+fn parse_fossil_change_path(path: &str) -> Option<(Option<RepoPath>, RepoPath)> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let (rename_source, path) = if let Some((source, target)) = path.rsplit_once(" -> ") {
+        let source = RepoPath::from_std_path(Path::new(source.trim()), PathStyle::local()).ok()?;
+        (Some(source), target.trim())
+    } else {
+        (None, path)
+    };
+
+    let repo_path = RepoPath::from_std_path(Path::new(path), PathStyle::local()).ok()?;
+    Some((rename_source, repo_path))
+}
+
 fn fossil_changes_to_status(changes: Vec<FossilChange>) -> GitStatus {
+    let renames = changes
+        .iter()
+        .filter_map(|change| {
+            change.rename_source.as_ref().map(|source| StatusRename {
+                source: source.clone(),
+                target: change.repo_path.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+
     GitStatus {
         entries: changes
             .into_iter()
             .map(|change| (change.repo_path, change.kind.status()))
             .collect::<Vec<_>>()
             .into(),
+        renames: renames.into(),
     }
 }
 
@@ -2296,6 +2388,41 @@ mod tests {
         assert_eq!(lookup("old.rs"), Some(StatusCode::Deleted.worktree()));
         assert_eq!(lookup("scratch.txt"), Some(FileStatus::Untracked));
         assert!(lookup("both.rs").unwrap().is_conflicted());
+    }
+
+    #[test]
+    fn parses_fossil_renamed_changes_with_target_path() {
+        let status = fossil_changes_to_status(parse_fossil_changes_with_kind(
+            "RENAMED old.rs  ->  new.rs\nEDITED src/old name.rs  ->  src/new name.rs\n",
+        ));
+
+        let lookup = |path: &str| {
+            status
+                .entries
+                .iter()
+                .find(|(repo_path, _)| repo_path == &RepoPath::new(path).unwrap())
+                .map(|(_, status)| *status)
+        };
+
+        assert_eq!(lookup("old.rs"), None);
+        assert_eq!(lookup("new.rs"), Some(StatusCode::Renamed.worktree()));
+        assert_eq!(
+            lookup("src/new name.rs"),
+            Some(StatusCode::Modified.worktree())
+        );
+        assert_eq!(
+            status.renames.as_ref(),
+            [
+                crate::status::StatusRename {
+                    source: RepoPath::new("old.rs").unwrap(),
+                    target: RepoPath::new("new.rs").unwrap(),
+                },
+                crate::status::StatusRename {
+                    source: RepoPath::new("src/old name.rs").unwrap(),
+                    target: RepoPath::new("src/new name.rs").unwrap(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2968,6 +3095,112 @@ mod tests {
             .await
             .unwrap();
         assert!(repository.stash_entries().await.unwrap().entries.is_empty());
+    }
+
+    #[gpui::test]
+    async fn fossil_repository_records_and_undoes_rename(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+
+        if Command::new("fossil").arg("version").output().is_err() {
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fossil_home = temp_dir.path().join("home");
+        let checkout = temp_dir.path().join("checkout");
+        let repo_db = temp_dir.path().join("repo.fossil");
+        std::fs::create_dir(&fossil_home).unwrap();
+        std::fs::create_dir(&checkout).unwrap();
+
+        run_fossil(
+            &fossil_home,
+            temp_dir.path(),
+            &["init", repo_db.to_str().unwrap()],
+        );
+        run_fossil(
+            &fossil_home,
+            &checkout,
+            &["open", repo_db.to_str().unwrap()],
+        );
+
+        std::fs::write(checkout.join("old.txt"), "contents\n").unwrap();
+        run_fossil(&fossil_home, &checkout, &["add", "old.txt"]);
+        run_fossil(
+            &fossil_home,
+            &checkout,
+            &[
+                "commit",
+                "--nosync",
+                "--no-prompt",
+                "--user-override",
+                "tester",
+                "-m",
+                "initial",
+            ],
+        );
+
+        std::fs::rename(checkout.join("old.txt"), checkout.join("new.txt")).unwrap();
+        let repository = FossilRepository::new_for_test(
+            &checkout.join(".fslckout"),
+            Some("fossil".into()),
+            cx.executor(),
+            HashMap::from_iter([(
+                "HOME".to_string(),
+                fossil_home.to_string_lossy().into_owned(),
+            )]),
+        )
+        .unwrap();
+
+        repository
+            .record_fossil_rename(
+                RepoPath::new("old.txt").unwrap(),
+                RepoPath::new("new.txt").unwrap(),
+                Arc::new(HashMap::default()),
+            )
+            .await
+            .unwrap();
+
+        let status = repository.status(&[]).await.unwrap();
+        assert_eq!(
+            status.renames.as_ref(),
+            [crate::status::StatusRename {
+                source: RepoPath::new("old.txt").unwrap(),
+                target: RepoPath::new("new.txt").unwrap(),
+            }]
+        );
+        assert!(
+            status
+                .entries
+                .iter()
+                .any(|(repo_path, _)| repo_path == &RepoPath::new("new.txt").unwrap())
+        );
+
+        repository
+            .undo_fossil_rename(
+                RepoPath::new("new.txt").unwrap(),
+                Arc::new(HashMap::default()),
+            )
+            .await
+            .unwrap();
+
+        let status = repository.status(&[]).await.unwrap();
+        assert!(status.renames.is_empty());
+        assert_eq!(
+            status
+                .entries
+                .iter()
+                .find(|(repo_path, _)| repo_path == &RepoPath::new("old.txt").unwrap())
+                .map(|(_, status)| *status),
+            Some(StatusCode::Deleted.worktree())
+        );
+        assert_eq!(
+            status
+                .entries
+                .iter()
+                .find(|(repo_path, _)| repo_path == &RepoPath::new("new.txt").unwrap())
+                .map(|(_, status)| *status),
+            Some(FileStatus::Untracked)
+        );
     }
 
     fn run_fossil(home: &Path, current_dir: &Path, args: &[&str]) -> Output {

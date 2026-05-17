@@ -173,6 +173,20 @@ pub fn init(cx: &mut App) {
             },
         );
         workspace.register_action(
+            |workspace, _: &git::fossil_actions::RecordRename, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.record_fossil_rename(&git::fossil_actions::RecordRename, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::fossil_actions::UndoRecordedRename, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.undo_fossil_rename(&git::fossil_actions::UndoRecordedRename, window, cx);
+                });
+            },
+        );
+        workspace.register_action(
             |workspace, _: &git::fossil_actions::IncludeRange, window, cx| {
                 with_fossil_panel(workspace, window, cx, |panel, window, cx| {
                     panel.stage_range(&git::StageRange, window, cx);
