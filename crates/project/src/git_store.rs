@@ -6713,6 +6713,18 @@ impl Repository {
         )
     }
 
+    pub fn refresh_fossil_status(&mut self) -> oneshot::Receiver<Result<()>> {
+        let this = self.this.clone();
+        self.send_job(None, move |repo, mut cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    refresh_fossil_snapshot_after_command(this, backend, &mut cx).await
+                }
+                RepositoryState::Remote(_) => Ok(()),
+            }
+        })
+    }
+
     fn send_commit_job(
         &mut self,
         message: SharedString,

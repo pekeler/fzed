@@ -1738,6 +1738,7 @@ impl GitPanel {
                     if let Some(task) = task {
                         task.await?;
                     }
+                    refresh_fossil_status_if_needed(active_repo, cx).await?;
                     Ok(())
                 })
                 .detach_and_prompt_err(
@@ -1950,6 +1951,7 @@ impl GitPanel {
             for task in tasks {
                 task.await?;
             }
+            refresh_fossil_status_if_needed(active_repo, cx).await?;
             Ok(())
         })
         .detach_and_prompt_err("Failed to trash files", window, cx, |e, _, _| {
@@ -7494,6 +7496,23 @@ pub(crate) fn show_error_toast(
     }
 }
 
+async fn refresh_fossil_status_if_needed(
+    repository: Entity<Repository>,
+    cx: &mut AsyncWindowContext,
+) -> anyhow::Result<()> {
+    let Some(refresh) = repository.update(cx, |repository, _cx| {
+        repository
+            .kind()
+            .is_fossil()
+            .then(|| repository.refresh_fossil_status())
+    }) else {
+        return Ok(());
+    };
+
+    refresh.await??;
+    Ok(())
+}
+
 fn rpc_error_raw_message_from_chain(error: &anyhow::Error) -> Option<&str> {
     error
         .chain()
@@ -7983,6 +8002,77 @@ mod tests {
             panel.update(cx, |panel, cx| panel.configure_commit_button(cx)),
             (true, "Check In")
         );
+    }
+
+    #[gpui::test]
+    async fn test_fossil_trash_untracked_files_refreshes_panel(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({
+                "project": {
+                    ".fslckout": {},
+                    "tracked": "tracked\n",
+                    "extra": "extra\n",
+                },
+            }),
+        )
+        .await;
+
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/root/project/.fslckout")),
+            &[("tracked", "tracked\n".into())],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        let entries = panel.read_with(cx, |panel, _| panel.entries.clone());
+        #[rustfmt::skip]
+        pretty_assertions::assert_matches!(
+            entries.as_slice(),
+            &[
+                GitListEntry::Header(GitHeaderEntry { header: Section::New }),
+                GitListEntry::Status(GitStatusEntry { repo_path: ref path, .. }),
+            ] if path == &repo_path("extra"),
+        );
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.clean_all(&TrashUntrackedFiles, window, cx);
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Trash");
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        cx.executor().run_until_parked();
+
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        let entries = panel.read_with(cx, |panel, _| panel.entries.clone());
+        assert!(entries.is_empty(), "{entries:?}");
     }
 
     #[gpui::test]
