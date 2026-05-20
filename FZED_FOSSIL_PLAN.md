@@ -8,7 +8,7 @@ Date: 2026-05-12
 - Upstream: https://github.com/zed-industries/zed
 - Local checkout: `/Users/pekeler/Projects/FZed`
 - Upstream tracking policy: follow upstream release tags, not upstream `main`
-- Current upstream baseline: `v1.2.6`
+- Current upstream baseline: `v1.3.5`
 - Remotes:
   - `origin` -> `https://github.com/pekeler/fzed.git`
   - `upstream` -> `https://github.com/zed-industries/zed.git`
@@ -406,7 +406,7 @@ Phase 6 first slice is in progress:
 - Fossil-visible history surfaces now use timeline/check-in wording in the panel tab, loading state, entry tooltip, file context menu, graph/timeline button, commit/check-in view toolbar, blame/commit tooltip hash copy actions, and "View Commit" modal.
 - Commit message generation copy now switches to "check-in message" for Fossil repositories.
 - Added first-class Fossil command aliases that route to existing Fossil-aware behavior while leaving Git actions intact:
-  - check-in: `fossil::CheckIn`, `fossil::GenerateCheckInMessage`, `fossil::ViewCheckIn`
+  - check-in: `fossil::CheckIn`, `fossil::ToggleFillCheckInEditor`, `fossil::GenerateCheckInMessage`, `fossil::ViewCheckIn`
   - file selection: `fossil::IncludeFile`, `fossil::ExcludeFile`, `fossil::ToggleIncluded`, `fossil::IncludeRange`, `fossil::IncludeAll`, `fossil::ExcludeAll`
   - checkout maintenance: `fossil::RevertFile`, `fossil::RevertTrackedFiles`, `fossil::CleanExtras`
   - sync/history: `fossil::Sync`, `fossil::Update`, `fossil::Timeline`, `fossil::FileTimeline`, `fossil::Annotate`, `fossil::Blame`

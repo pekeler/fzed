@@ -463,7 +463,7 @@ impl SplittableEditor {
     }
 
     pub fn disable_diff_hunk_controls(&self, cx: &mut Context<Self>) {
-        let empty_controls = Arc::new(|_, _, _: &_, _, _, _, _: &_, _: &mut _, _: &mut _| {
+        let empty_controls = Arc::new(|_, _: &_, _, _, _, _: &_, _: &mut _, _: &mut _| {
             gpui::Empty.into_any_element()
         });
         self.update_editors(cx, |editor, cx| {
@@ -583,8 +583,13 @@ impl SplittableEditor {
         };
         let project = workspace.read(cx).project().clone();
 
+        let is_rhs_singleton = self.rhs_multibuffer.read(cx).is_singleton();
         let lhs_multibuffer = cx.new(|cx| {
-            let mut multibuffer = MultiBuffer::new(Capability::ReadOnly);
+            let mut multibuffer = if is_rhs_singleton {
+                MultiBuffer::without_headers(Capability::ReadOnly)
+            } else {
+                MultiBuffer::new(Capability::ReadOnly)
+            };
             multibuffer.set_all_diff_hunks_expanded(cx);
             multibuffer
         });

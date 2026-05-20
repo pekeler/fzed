@@ -121,8 +121,8 @@ Files: `crates/git/src/git.rs`, `crates/git_ui`
 FZed exposes Fossil-specific command aliases for workflows that make sense for
 Fossil users:
 
-- check-in: `fossil::CheckIn`, `fossil::GenerateCheckInMessage`,
-  `fossil::ViewCheckIn`
+- check-in: `fossil::CheckIn`, `fossil::ToggleFillCheckInEditor`,
+  `fossil::GenerateCheckInMessage`, `fossil::ViewCheckIn`
 - file selection: `fossil::IncludeFile`, `fossil::ExcludeFile`,
   `fossil::ToggleIncluded`, `fossil::IncludeRange`, `fossil::IncludeAll`,
   `fossil::ExcludeAll`
@@ -151,6 +151,12 @@ Shared SCM UI should use generic source-control wording, or Fossil-specific
 wording when a Fossil repository is active. Examples include "check-in",
 "timeline", and "source control" instead of Git-only wording in Fossil
 contexts.
+
+Source-control history and graph surfaces should label Fossil revisions as
+check-ins and hashes, and should use timeline wording for Fossil history.
+Worktree removal UI should use checkout/close wording for Fossil and map force
+close to `fossil close --force`. Custom Git command tasks in the graph context
+menu are intentionally Git-only until FZed has a Fossil-specific task surface.
 
 Reason: FZed should not make Fossil look like Git with different plumbing.
 Internal `GitRepository`, `GitStore`, `GitPanel`, crate names, and tests may

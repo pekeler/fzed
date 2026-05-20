@@ -853,7 +853,7 @@ impl TerminalView {
         });
     }
 
-    fn add_paths_to_terminal(&self, paths: &[PathBuf], window: &mut Window, cx: &mut App) {
+    pub fn add_paths_to_terminal(&self, paths: &[PathBuf], window: &mut Window, cx: &mut App) {
         let mut text = paths.iter().map(|path| format!(" {path:?}")).join("");
         text.push(' ');
         window.focus(&self.focus_handle(cx), cx);
@@ -2005,7 +2005,7 @@ impl SearchableItem for TerminalView {
 /// For remote projects, local-only resolution (home dir fallback, shell expansion,
 /// local `is_dir` checks) is skipped -- returning `None` lets the remote shell
 /// open in the remote user's home directory by default.
-pub(crate) fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
+pub fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
     let is_remote = workspace.project().read(cx).is_remote();
     let directory = match &TerminalSettings::get_global(cx).working_directory {
         WorkingDirectory::CurrentFileDirectory => workspace

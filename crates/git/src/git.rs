@@ -130,6 +130,9 @@ pub mod fossil_actions {
             OpenRepository,
             /// Opens the Fossil check-in modal for the active checkout.
             CheckIn,
+            /// Toggles whether the check-in message editor fills all the available
+            /// vertical space within the source control panel.
+            ToggleFillCheckInEditor,
             /// Generates a Fossil check-in message using AI.
             GenerateCheckInMessage,
             /// Includes the selected path in the next Fossil check-in.
@@ -358,6 +361,10 @@ mod tests {
     #[test]
     fn fossil_action_names_are_first_class() {
         assert_eq!(fossil_actions::CheckIn::name_for_type(), "fossil::CheckIn");
+        assert_eq!(
+            fossil_actions::ToggleFillCheckInEditor::name_for_type(),
+            "fossil::ToggleFillCheckInEditor"
+        );
         assert_eq!(
             fossil_actions::GenerateCheckInMessage::name_for_type(),
             "fossil::GenerateCheckInMessage"

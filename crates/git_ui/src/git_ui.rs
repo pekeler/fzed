@@ -145,6 +145,13 @@ pub fn init(cx: &mut App) {
             }
         });
         workspace.register_action(
+            |workspace, _: &git::fossil_actions::ToggleFillCheckInEditor, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.toggle_fill_commit_editor(&Default::default(), window, cx);
+                });
+            },
+        );
+        workspace.register_action(
             |workspace, _: &git::fossil_actions::GenerateCheckInMessage, window, cx| {
                 with_fossil_panel(workspace, window, cx, |panel, _window, cx| {
                     panel.generate_commit_message(cx);

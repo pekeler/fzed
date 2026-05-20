@@ -412,7 +412,12 @@ impl GitRepository for FossilRepository {
         Self::unsupported("renaming branches")
     }
 
-    fn delete_branch(&self, _is_remote: bool, _name: String) -> BoxFuture<'_, Result<()>> {
+    fn delete_branch(
+        &self,
+        _is_remote: bool,
+        _name: String,
+        _force: bool,
+    ) -> BoxFuture<'_, Result<()>> {
         Self::unsupported("deleting branches")
     }
 

@@ -147,8 +147,7 @@ pub fn data_dir() -> &'static PathBuf {
             custom_dir.clone()
         } else if cfg!(target_os = "macos") {
             home_dir()
-                .join("Library")
-                .join("Application Support")
+                .join("Library/Application Support")
                 .join(APP_NAME)
         } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             if let Ok(flatpak_xdg_data) = std::env::var("FLATPAK_XDG_DATA_HOME") {
@@ -171,10 +170,7 @@ pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
     STATE_DIR.get_or_init(|| {
         if cfg!(target_os = "macos") {
-            return home_dir()
-                .join(".local")
-                .join("state")
-                .join(APP_NAME_LOWERCASE);
+            return home_dir().join(".local").join("state").join(APP_NAME);
         }
 
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
@@ -233,7 +229,7 @@ pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
     LOGS_DIR.get_or_init(|| {
         if cfg!(target_os = "macos") {
-            home_dir().join("Library").join("Logs").join(APP_NAME)
+            home_dir().join("Library/Logs").join(APP_NAME)
         } else {
             data_dir().join("logs")
         }
@@ -249,13 +245,13 @@ pub fn remote_server_state_dir() -> &'static PathBuf {
 /// Returns the path to the application log file.
 pub fn log_file() -> &'static PathBuf {
     static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
-    LOG_FILE.get_or_init(|| logs_dir().join(format!("{APP_NAME}.log")))
+    LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log", APP_NAME)))
 }
 
 /// Returns the path to the previous application log file.
 pub fn old_log_file() -> &'static PathBuf {
     static OLD_LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
-    OLD_LOG_FILE.get_or_init(|| logs_dir().join(format!("{APP_NAME}.log.old")))
+    OLD_LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log.old", APP_NAME)))
 }
 
 /// Returns the path to the database directory.

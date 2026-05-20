@@ -97,6 +97,23 @@ pub struct InitialGraphCommitData {
     pub ref_names: Vec<SharedString>,
 }
 
+impl InitialGraphCommitData {
+    pub fn tag_names(&self) -> Vec<&str> {
+        self.ref_names
+            .iter()
+            .filter_map(|ref_name| {
+                let tag_name = ref_name.strip_prefix("tag: ")?;
+
+                if tag_name.is_empty() {
+                    return None;
+                }
+
+                Some(tag_name)
+            })
+            .collect()
+    }
+}
+
 struct CommitDataRequest {
     sha: Oid,
     response_tx: oneshot::Sender<Result<CommitData>>,
@@ -846,7 +863,12 @@ pub trait GitRepository: Send + Sync {
     -> BoxFuture<'_, Result<()>>;
     fn rename_branch(&self, branch: String, new_name: String) -> BoxFuture<'_, Result<()>>;
 
-    fn delete_branch(&self, is_remote: bool, name: String) -> BoxFuture<'_, Result<()>>;
+    fn delete_branch(
+        &self,
+        is_remote: bool,
+        name: String,
+        force: bool,
+    ) -> BoxFuture<'_, Result<()>>;
 
     fn worktrees(&self) -> BoxFuture<'_, Result<Vec<Worktree>>>;
 
@@ -2143,14 +2165,18 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
-    fn delete_branch(&self, is_remote: bool, name: String) -> BoxFuture<'_, Result<()>> {
+    fn delete_branch(
+        &self,
+        is_remote: bool,
+        name: String,
+        force: bool,
+    ) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary_in_worktree();
 
         self.executor
             .spawn(async move {
-                git_binary?
-                    .run(&["branch", if is_remote { "-dr" } else { "-d" }, &name])
-                    .await?;
+                let flag = delete_branch_flag(is_remote, force);
+                git_binary?.run(&["branch", flag, &name]).await?;
                 anyhow::Ok(())
             })
             .boxed()
@@ -3768,6 +3794,24 @@ mod tests {
             std::env::set_var("GIT_CONFIG_GLOBAL", "");
             std::env::set_var("GIT_CONFIG_SYSTEM", "");
         }
+    }
+
+    #[test]
+    fn test_initial_graph_commit_data_tag_names() {
+        let commit = InitialGraphCommitData {
+            sha: Oid::from_bytes(&[0; 20]).unwrap(),
+            parents: SmallVec::new(),
+            ref_names: vec![
+                SharedString::from("HEAD -> main"),
+                SharedString::from("origin/main"),
+                SharedString::from("tag: v1.0.0"),
+                SharedString::from("tag: v1.1.0"),
+                SharedString::from("tag: "),
+                SharedString::from("refs/heads/feature"),
+            ],
+        };
+
+        assert_eq!(commit.tag_names(), ["v1.0.0", "v1.1.0"]);
     }
 
     #[gpui::test]
