@@ -267,6 +267,14 @@ fn graph_action_title(repository_kind: RepositoryKind) -> &'static str {
     }
 }
 
+fn add_to_repository_ignore_action_title(repository_kind: RepositoryKind) -> &'static str {
+    if repository_kind.is_fossil() {
+        "Add to ignore-glob"
+    } else {
+        "Add to .gitignore"
+    }
+}
+
 fn should_show_uncommit_action(repository_kind: RepositoryKind, has_parent: bool) -> bool {
     !repository_kind.is_fossil() && has_parent
 }
@@ -1721,6 +1729,19 @@ impl GitPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.add_selected_entry_to_repository_ignore(cx);
+    }
+
+    fn add_to_ignore_glob(
+        &mut self,
+        _: &git::fossil_actions::AddToIgnoreGlob,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_selected_entry_to_repository_ignore(cx);
+    }
+
+    fn add_selected_entry_to_repository_ignore(&mut self, cx: &mut Context<Self>) {
         maybe!({
             let list_entry = self.entries.get(self.selected_entry?)?.clone();
             let entry = list_entry.status_entry()?.to_owned();
@@ -1732,15 +1753,22 @@ impl GitPanel {
             let active_repository = self.active_repository.clone()?;
             let workspace = self.workspace.clone();
             let repo_path = entry.repo_path;
+            let repository_kind = active_repository.read(cx).kind();
 
-            let receiver = active_repository
-                .update(cx, |repo, _| repo.add_path_to_gitignore(&repo_path, false));
+            let receiver = active_repository.update(cx, |repo, _| {
+                repo.add_path_to_repository_ignore(&repo_path, false)
+            });
 
             cx.spawn(async move |_, cx| {
                 if let Err(e) = receiver.await? {
                     if let Some(workspace) = workspace.upgrade() {
                         cx.update(|cx| {
-                            show_error_toast(workspace, "add to .gitignore", e, cx);
+                            show_error_toast(
+                                workspace,
+                                add_to_repository_ignore_action_title(repository_kind),
+                                e,
+                                cx,
+                            );
                         });
                     }
                 }
@@ -6384,8 +6412,15 @@ impl GitPanel {
                 .when(!is_fossil, |context_menu| {
                     context_menu.action_disabled_when(
                         !is_created,
-                        "Add to .gitignore",
+                        add_to_repository_ignore_action_title(repository_kind),
                         git::AddToGitignore.boxed_clone(),
+                    )
+                })
+                .when(is_fossil, |context_menu| {
+                    context_menu.action_disabled_when(
+                        !is_created,
+                        add_to_repository_ignore_action_title(repository_kind),
+                        git::fossil_actions::AddToIgnoreGlob.boxed_clone(),
                     )
                 })
                 .when(is_fossil, |context_menu| {
@@ -7159,6 +7194,7 @@ impl Render for GitPanel {
                 this.on_action(cx.listener(GitPanel::on_amend))
                     .on_action(cx.listener(GitPanel::toggle_signoff_enabled))
                     .on_action(cx.listener(Self::add_to_gitignore))
+                    .on_action(cx.listener(Self::add_to_ignore_glob))
             })
             .when(has_restore_access && !project.is_read_only(cx), |this| {
                 this.on_action(cx.listener(Self::restore_tracked_files))
@@ -8185,6 +8221,14 @@ mod tests {
             "View File Timeline"
         );
         assert_eq!(graph_action_title(RepositoryKind::Fossil), "Open Timeline");
+        assert_eq!(
+            add_to_repository_ignore_action_title(RepositoryKind::Fossil),
+            "Add to ignore-glob"
+        );
+        assert_eq!(
+            add_to_repository_ignore_action_title(RepositoryKind::Git),
+            "Add to .gitignore"
+        );
         assert!(!should_show_uncommit_action(RepositoryKind::Fossil, true));
         assert!(should_show_uncommit_action(RepositoryKind::Git, true));
         assert!(!should_show_uncommit_action(RepositoryKind::Git, false));

@@ -30,7 +30,8 @@ use futures::{
     stream::{FuturesOrdered, FuturesUnordered},
 };
 use git::{
-    BuildPermalinkParams, DOT_FOSSIL, FOSSIL_CHECKOUT, GitHostingProviderRegistry, Oid, RunHook,
+    BuildPermalinkParams, DOT_FOSSIL, FOSSIL_CHECKOUT, FOSSIL_IGNORE_GLOB, FOSSIL_SETTINGS_DIR,
+    GitHostingProviderRegistry, Oid, RunHook,
     blame::Blame,
     parse_git_remote_url,
     repository::{
@@ -84,7 +85,9 @@ use sum_tree::{Edit, SumTree, TreeMap};
 use task::Shell;
 use text::{Bias, BufferId};
 use util::{
-    ResultExt, debug_panic,
+    ResultExt,
+    command::new_command,
+    debug_panic,
     paths::{PathStyle, SanitizedPath},
     post_inc,
     rel_path::RelPath,
@@ -4525,6 +4528,117 @@ impl MergeDetails {
     }
 }
 
+fn repository_ignore_file_name(repository_kind: RepositoryKind) -> &'static str {
+    match repository_kind {
+        RepositoryKind::Git => ".gitignore",
+        RepositoryKind::Fossil => "ignore-glob",
+    }
+}
+
+async fn append_repository_ignore_pattern(
+    fs: &dyn Fs,
+    ignore_file_path: &Path,
+    pattern: &str,
+) -> Result<()> {
+    let existing_content = match fs.load(ignore_file_path).await {
+        Ok(content) => content,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            String::new()
+        }
+        Err(error) => return Err(error),
+    };
+
+    if existing_content.lines().any(|line| line.trim() == pattern) {
+        return Ok(());
+    }
+
+    let new_content = if existing_content.is_empty() {
+        format!("{pattern}\n")
+    } else if existing_content.ends_with('\n') {
+        format!("{existing_content}{pattern}\n")
+    } else {
+        format!("{existing_content}\n{pattern}\n")
+    };
+
+    fs.save(
+        ignore_file_path,
+        &text::Rope::from(new_content.as_str()),
+        text::LineEnding::Unix,
+    )
+    .await
+}
+
+fn fossil_ignore_glob_patterns(contents: &str) -> impl Iterator<Item = &str> {
+    contents
+        .lines()
+        .flat_map(|line| line.split(','))
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+}
+
+fn fossil_ignore_glob_content_with_pattern(contents: &str, pattern: &str) -> Option<String> {
+    let mut patterns = fossil_ignore_glob_patterns(contents).collect::<Vec<_>>();
+    if patterns.iter().any(|existing| *existing == pattern) {
+        return None;
+    }
+
+    patterns.push(pattern);
+    Some(format!("{}\n", patterns.join("\n")))
+}
+
+async fn fossil_ignore_glob_setting_value(
+    work_dir: &Path,
+    environment: &HashMap<String, String>,
+) -> Result<String> {
+    let fossil_binary_path =
+        git::fossil::resolve_fossil_binary(environment.get("PATH").map(String::as_str), work_dir)?;
+    let mut command = new_command(fossil_binary_path);
+    command
+        .current_dir(work_dir)
+        .envs(environment.iter())
+        .args(["settings", "ignore-glob", "--value"]);
+    let output = command.output().await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "failed to read Fossil ignore-glob setting:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+async fn append_fossil_ignore_glob_pattern(
+    fs: &dyn Fs,
+    work_dir: &Path,
+    pattern: &str,
+    environment: &HashMap<String, String>,
+) -> Result<()> {
+    let fossil_settings_path = work_dir.join(FOSSIL_SETTINGS_DIR);
+    let ignore_file_path = fossil_settings_path.join(FOSSIL_IGNORE_GLOB);
+    fs.create_dir(&fossil_settings_path).await?;
+
+    let existing_content = if fs.is_file(&ignore_file_path).await {
+        fs.load(&ignore_file_path).await?
+    } else {
+        fossil_ignore_glob_setting_value(work_dir, environment).await?
+    };
+
+    if let Some(new_content) = fossil_ignore_glob_content_with_pattern(&existing_content, pattern) {
+        fs.save(
+            &ignore_file_path,
+            &text::Rope::from(new_content.as_str()),
+            text::LineEnding::Unix,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
 impl Repository {
     pub fn is_trusted(&self) -> bool {
         match self.repository_state.peek() {
@@ -6515,12 +6629,13 @@ impl Repository {
         })
     }
 
-    pub fn add_path_to_gitignore(
+    pub fn add_path_to_repository_ignore(
         &mut self,
         repo_path: &RepoPath,
         is_dir: bool,
     ) -> oneshot::Receiver<Result<()>> {
         let work_dir = self.snapshot.work_directory_abs_path.clone();
+        let repository_kind = self.snapshot.kind;
         let path_display = repo_path.as_ref().display(PathStyle::Posix);
         let file_path_str = if is_dir {
             format!("{}/", path_display)
@@ -6529,43 +6644,47 @@ impl Repository {
         };
 
         self.send_job(
-            "add_path_to_gitignore",
+            "add_path_to_repository_ignore",
             None,
             move |git_repo, _cx| async move {
                 match git_repo {
-                    RepositoryState::Local(LocalRepositoryState { fs, .. }) => {
-                        let gitignore_path = work_dir.join(".gitignore");
-
-                        let existing_content = fs.load(&gitignore_path).await.unwrap_or_default();
-
-                        if existing_content
-                            .lines()
-                            .any(|line| line.trim() == file_path_str)
-                        {
-                            return Ok(());
+                    RepositoryState::Local(LocalRepositoryState {
+                        fs, environment, ..
+                    }) => match repository_kind {
+                        RepositoryKind::Git => {
+                            let ignore_file_path = work_dir.join(".gitignore");
+                            append_repository_ignore_pattern(
+                                fs.as_ref(),
+                                &ignore_file_path,
+                                &file_path_str,
+                            )
+                            .await
                         }
-
-                        let new_content = if existing_content.is_empty() {
-                            format!("{}\n", file_path_str)
-                        } else if existing_content.ends_with('\n') {
-                            format!("{}{}\n", existing_content, file_path_str)
-                        } else {
-                            format!("{}\n{}\n", existing_content, file_path_str)
-                        };
-
-                        fs.save(
-                            &gitignore_path,
-                            &text::Rope::from(new_content.as_str()),
-                            text::LineEnding::Unix,
-                        )
-                        .await
-                    }
+                        RepositoryKind::Fossil => {
+                            append_fossil_ignore_glob_pattern(
+                                fs.as_ref(),
+                                &work_dir,
+                                &file_path_str,
+                                environment.as_ref(),
+                            )
+                            .await
+                        }
+                    },
                     RepositoryState::Remote(_) => Err(anyhow::anyhow!(
-                        "Cannot modify .gitignore on remote repository"
+                        "Cannot modify {} on remote repository",
+                        repository_ignore_file_name(repository_kind)
                     )),
                 }
             },
         )
+    }
+
+    pub fn add_path_to_gitignore(
+        &mut self,
+        repo_path: &RepoPath,
+        is_dir: bool,
+    ) -> oneshot::Receiver<Result<()>> {
+        self.add_path_to_repository_ignore(repo_path, is_dir)
     }
 
     pub fn stash_drop(

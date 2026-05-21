@@ -70,11 +70,14 @@ jobs:
       - name: Test Fossil project state
         run: cargo test -p project fossil --lib
 
+      - name: Test Fossil project integration
+        run: cargo test -p project --test integration test_add_path_to_fossil_ignore_glob
+
       - name: Test Fossil UI
         run: cargo test -p git_ui fossil --lib
 
-      - name: Test Fossil worktree detection
-        run: cargo test -p worktree --features test-support fossil_repository_detection
+      - name: Test Fossil worktree integration
+        run: cargo test -p worktree --features test-support --test integration fossil
 
       - name: Test repository update protocol
         run: cargo test -p proto split_repository_update

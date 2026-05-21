@@ -10322,11 +10322,13 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         added: 1,
                         deleted: 1,
                     }),
+                    rename_source: None,
                 },
                 StatusEntry {
                     repo_path: repo_path("b.txt"),
                     status: FileStatus::Untracked,
                     diff_stat: None,
+                    rename_source: None,
                 },
                 StatusEntry {
                     repo_path: repo_path("d.txt"),
@@ -10335,6 +10337,7 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         added: 0,
                         deleted: 1,
                     }),
+                    rename_source: None,
                 },
             ]
         );
@@ -10360,11 +10363,13 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         added: 1,
                         deleted: 1,
                     }),
+                    rename_source: None,
                 },
                 StatusEntry {
                     repo_path: repo_path("b.txt"),
                     status: FileStatus::Untracked,
                     diff_stat: None,
+                    rename_source: None,
                 },
                 StatusEntry {
                     repo_path: repo_path("c.txt"),
@@ -10373,6 +10378,7 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         added: 1,
                         deleted: 1,
                     }),
+                    rename_source: None,
                 },
                 StatusEntry {
                     repo_path: repo_path("d.txt"),
@@ -10381,6 +10387,7 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         added: 0,
                         deleted: 1,
                     }),
+                    rename_source: None,
                 },
             ]
         );
@@ -10418,6 +10425,7 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                     added: 0,
                     deleted: 1,
                 }),
+                rename_source: None,
             }]
         );
     });
@@ -10483,6 +10491,7 @@ async fn test_git_status_postprocessing(cx: &mut gpui::TestAppContext) {
                 }
                 .into(),
                 diff_stat: None,
+                rename_source: None,
             }]
         )
     });
@@ -10689,6 +10698,7 @@ async fn test_repository_pending_ops_staging(
                     added: 1,
                     deleted: 0,
                 }),
+                rename_source: None,
             }]
         );
     });
@@ -10799,6 +10809,7 @@ async fn test_repository_pending_ops_long_running_staging(
                     added: 1,
                     deleted: 0,
                 }),
+                rename_source: None,
             }]
         );
     });
@@ -10924,11 +10935,13 @@ async fn test_repository_pending_ops_stage_all(
                     repo_path: repo_path("a.txt"),
                     status: FileStatus::Untracked,
                     diff_stat: None,
+                    rename_source: None,
                 },
                 StatusEntry {
                     repo_path: repo_path("b.txt"),
                     status: FileStatus::Untracked,
                     diff_stat: None,
+                    rename_source: None,
                 },
             ]
         );
@@ -11025,6 +11038,56 @@ async fn test_fossil_repository_file_selection_state(
         assert!(!repo.fossil_path_included_for_check_in(&repo_path("other-tracked.txt")));
         assert!(!repo.fossil_path_included_for_check_in(&repo_path("extra.txt")));
     });
+}
+
+#[gpui::test]
+async fn test_add_path_to_fossil_ignore_glob(
+    executor: gpui::BackgroundExecutor,
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "my-repo": {
+                ".fslckout": {},
+                ".fossil-settings": {
+                    "ignore-glob": "already-ignored.txt, old-build\n"
+                },
+                "generated": {
+                    "output.txt": "generated"
+                },
+            }
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/root/my-repo").as_ref()], cx).await;
+    project
+        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .await;
+    cx.run_until_parked();
+
+    let repo = project.read_with(cx, |project, cx| {
+        project.repositories(cx).values().next().unwrap().clone()
+    });
+    let receiver = repo.update(cx, |repo, _| {
+        repo.add_path_to_repository_ignore(&repo_path("generated"), true)
+    });
+    match receiver.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("failed to add path to Fossil ignore-glob: {error:#}"),
+        Err(error) => panic!("Fossil ignore-glob task was canceled: {error:#}"),
+    }
+
+    pretty_assertions::assert_eq!(
+        fs.load(path!("/root/my-repo/.fossil-settings/ignore-glob").as_ref())
+            .await
+            .unwrap(),
+        "already-ignored.txt\nold-build\ngenerated/\n"
+    );
 }
 
 #[gpui::test]

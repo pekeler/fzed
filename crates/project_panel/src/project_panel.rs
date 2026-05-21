@@ -16,6 +16,7 @@ use editor::{
 use feature_flags::{FeatureFlagAppExt, ProjectPanelUndoRedoFeatureFlag};
 use file_icons::FileIcons;
 use git;
+use git::repository::RepositoryKind;
 use git::status::GitSummary;
 use git_ui;
 use git_ui::file_diff_view::FileDiffView;
@@ -371,6 +372,8 @@ actions!(
         OpenSplitHorizontal,
         /// Toggles visibility of git-ignored files.
         ToggleHideGitIgnore,
+        /// Toggles visibility of Fossil ignore-glob files.
+        ToggleHideIgnoreGlob,
         /// Toggles visibility of hidden files.
         ToggleHideHidden,
         /// Starts a new search in the selected directory.
@@ -454,6 +457,13 @@ impl FoldedAncestors {
     }
 }
 
+fn add_to_repository_ignore_label(repository_kind: RepositoryKind) -> &'static str {
+    match repository_kind {
+        RepositoryKind::Git => "Add to .gitignore",
+        RepositoryKind::Fossil => "Add to ignore-glob",
+    }
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
@@ -466,6 +476,19 @@ pub fn init(cx: &mut App) {
         });
 
         workspace.register_action(|workspace, _: &ToggleHideGitIgnore, _, cx| {
+            let fs = workspace.app_state().fs.clone();
+            update_settings_file(fs, cx, move |setting, _| {
+                setting.project_panel.get_or_insert_default().hide_gitignore = Some(
+                    !setting
+                        .project_panel
+                        .get_or_insert_default()
+                        .hide_gitignore
+                        .unwrap_or(false),
+                );
+            })
+        });
+
+        workspace.register_action(|workspace, _: &ToggleHideIgnoreGlob, _, cx| {
             let fs = workspace.app_state().fs.clone();
             update_settings_file(fs, cx, move |setting, _| {
                 setting.project_panel.get_or_insert_default().hide_gitignore = Some(
@@ -1055,20 +1078,23 @@ impl ProjectPanel {
                     || (settings.hide_root && visible_worktrees_count == 1));
             let should_show_compare = !is_dir && self.file_abs_paths_to_diff(cx).is_some();
 
-            let (has_git_repo, has_history) = {
+            let (repository_kind, has_history) = {
                 let project_path = project::ProjectPath {
                     worktree_id,
                     path: entry.path.clone(),
                 };
                 let git_store = project.git_store().read(cx);
-                let has_git_repo = git_store
+                let repository = git_store
                     .repository_and_path_for_project_path(&project_path, cx)
-                    .is_some();
-                let has_history = has_git_repo
+                    .map(|(repository, _)| repository);
+                let repository_kind = repository
+                    .as_ref()
+                    .map(|repository| repository.read(cx).kind());
+                let has_history = repository.is_some()
                     && !git_store
                         .project_path_git_status(&project_path, cx)
                         .is_some_and(|status| status.is_created());
-                (has_git_repo, has_history)
+                (repository_kind, has_history)
             };
 
             let has_pasteable_content = self.has_pasteable_content(cx);
@@ -1135,18 +1161,33 @@ impl ProjectPanel {
                                 "Copy Relative Path",
                                 Box::new(zed_actions::workspace::CopyRelativePath),
                             )
-                            .when(has_git_repo, |menu| {
-                                menu.separator()
-                                    .when(!is_dir && self.has_git_changes(entry_id), |menu| {
+                            .when(repository_kind.is_some(), |menu| {
+                                let Some(repository_kind) = repository_kind else {
+                                    return menu;
+                                };
+                                let menu = menu.separator().when(
+                                    !is_dir && self.has_git_changes(entry_id),
+                                    |menu| {
                                         menu.action(
                                             "Restore File",
                                             Box::new(git::RestoreFile { skip_prompt: false }),
                                         )
-                                    })
-                                    .action("Add to .gitignore", Box::new(git::AddToGitignore))
-                                    .when(has_history, |menu| {
-                                        menu.action("View History", Box::new(git::FileHistory))
-                                    })
+                                    },
+                                );
+                                let menu = if repository_kind.is_fossil() {
+                                    menu.action(
+                                        add_to_repository_ignore_label(repository_kind),
+                                        Box::new(git::fossil_actions::AddToIgnoreGlob),
+                                    )
+                                } else {
+                                    menu.action(
+                                        add_to_repository_ignore_label(repository_kind),
+                                        Box::new(git::AddToGitignore),
+                                    )
+                                };
+                                menu.when(has_history, |menu| {
+                                    menu.action("View History", Box::new(git::FileHistory))
+                                })
                             })
                             .when(!should_hide_rename, |menu| {
                                 menu.separator().action("Rename", Box::new(Rename))
@@ -2272,6 +2313,19 @@ impl ProjectPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.add_selection_to_repository_ignore(cx);
+    }
+
+    fn add_to_ignore_glob(
+        &mut self,
+        _: &git::fossil_actions::AddToIgnoreGlob,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_selection_to_repository_ignore(cx);
+    }
+
+    fn add_selection_to_repository_ignore(&mut self, cx: &mut Context<Self>) {
         maybe!({
             let selection = self.selection?;
             let (_, entry) = self.selected_sub_entry(cx)?;
@@ -2284,16 +2338,22 @@ impl ProjectPanel {
             let (repository, repo_path) = git_store
                 .read(cx)
                 .repository_and_path_for_project_path(&project_path, cx)?;
+            let repository_kind = repository.read(cx).kind();
 
             let workspace = self.workspace.clone();
-            let receiver =
-                repository.update(cx, |repo, _| repo.add_path_to_gitignore(&repo_path, is_dir));
+            let receiver = repository.update(cx, |repo, _| {
+                repo.add_path_to_repository_ignore(&repo_path, is_dir)
+            });
 
             cx.spawn(async move |_, cx| {
                 if let Err(e) = receiver.await? {
                     if let Some(workspace) = workspace.upgrade() {
                         cx.update(|cx| {
-                            let message = format!("Failed to add to .gitignore: {}", e);
+                            let message = format!(
+                                "Failed to {}: {}",
+                                add_to_repository_ignore_label(repository_kind),
+                                e
+                            );
                             let toast = StatusToast::new(message, cx, |this, _| {
                                 this.icon(Icon::new(IconName::XCircle).color(Color::Error))
                                     .dismiss_button(true)
@@ -6691,6 +6751,7 @@ impl Render for ProjectPanel {
                         .on_action(cx.listener(Self::duplicate))
                         .on_action(cx.listener(Self::restore_file))
                         .on_action(cx.listener(Self::add_to_gitignore))
+                        .on_action(cx.listener(Self::add_to_ignore_glob))
                         .when(!project.is_remote(), |el| {
                             el.on_action(cx.listener(Self::trash))
                         })

@@ -2795,6 +2795,83 @@ async fn test_fossil_repository_detection(executor: BackgroundExecutor, cx: &mut
 }
 
 #[gpui::test]
+async fn test_fossil_ignore_glob(executor: BackgroundExecutor, cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            ".fslckout": "",
+            ".fossil-settings": {
+                "ignore-glob": "ignored.txt, ignored-dir\n"
+            },
+            "ignored.txt": "",
+            "ignored-dir": {
+                "generated.txt": ""
+            },
+            "tracked.txt": "",
+        }),
+    )
+    .await;
+
+    let worktree = Worktree::local(
+        path!("/root").as_ref(),
+        true,
+        fs.clone(),
+        Arc::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    worktree
+        .update(cx, |worktree, _| {
+            worktree.as_local().unwrap().scan_complete()
+        })
+        .await;
+    cx.run_until_parked();
+
+    worktree.update(cx, |worktree, _cx| {
+        check_worktree_entries(
+            worktree,
+            WorktreeExpectations {
+                ignored_paths: &["ignored.txt", "ignored-dir"],
+                tracked_paths: &["tracked.txt"],
+                ..Default::default()
+            },
+        );
+    });
+
+    fs.write(
+        &Path::new(path!("/root"))
+            .join(".fossil-settings")
+            .join("ignore-glob"),
+        "tracked.txt".as_bytes(),
+    )
+    .await
+    .unwrap();
+    worktree
+        .update(cx, |worktree, _| {
+            worktree.as_local().unwrap().scan_complete()
+        })
+        .await;
+    cx.run_until_parked();
+
+    worktree.update(cx, |worktree, _cx| {
+        check_worktree_entries(
+            worktree,
+            WorktreeExpectations {
+                ignored_paths: &["tracked.txt"],
+                tracked_paths: &["ignored.txt", "ignored-dir", "ignored-dir/generated.txt"],
+                ..Default::default()
+            },
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_legacy_fossil_repository_detection(
     executor: BackgroundExecutor,
     cx: &mut TestAppContext,

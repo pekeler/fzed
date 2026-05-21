@@ -21,6 +21,8 @@ use std::str::FromStr;
 pub const DOT_GIT: &str = ".git";
 pub const DOT_FOSSIL: &str = ".fslckout";
 pub const FOSSIL_CHECKOUT: &str = "_FOSSIL_";
+pub const FOSSIL_SETTINGS_DIR: &str = ".fossil-settings";
+pub const FOSSIL_IGNORE_GLOB: &str = "ignore-glob";
 pub const GITIGNORE: &str = ".gitignore";
 pub const FSMONITOR_DAEMON: &str = "fsmonitor--daemon";
 pub const LFS_DIR: &str = "lfs";
@@ -191,6 +193,8 @@ pub mod fossil_actions {
             CopyBranchName,
             /// Opens a Fossil check-in by hash.
             ViewCheckIn,
+            /// Adds a file to Fossil ignore-glob.
+            AddToIgnoreGlob,
         ]
     );
 }

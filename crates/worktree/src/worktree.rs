@@ -22,8 +22,8 @@ use futures::{
 };
 use fuzzy::CharBag;
 use git::{
-    COMMIT_MESSAGE, DOT_FOSSIL, DOT_GIT, FOSSIL_CHECKOUT, FSMONITOR_DAEMON, GITIGNORE, INDEX_LOCK,
-    LFS_DIR, REPO_EXCLUDE, status::GitSummary,
+    COMMIT_MESSAGE, DOT_FOSSIL, DOT_GIT, FOSSIL_CHECKOUT, FOSSIL_IGNORE_GLOB, FOSSIL_SETTINGS_DIR,
+    FSMONITOR_DAEMON, GITIGNORE, INDEX_LOCK, LFS_DIR, REPO_EXCLUDE, status::GitSummary,
 };
 use gpui::{
     App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, EventEmitter, Priority,
@@ -69,7 +69,9 @@ use std::{
 use sum_tree::{Bias, Dimensions, Edit, KeyedItem, SeekTarget, SumTree, Summary, TreeMap, TreeSet};
 use text::{LineEnding, Rope};
 use util::{
-    ResultExt, maybe,
+    ResultExt,
+    command::new_command,
+    maybe,
     paths::{PathMatcher, PathStyle, SanitizedPath, home_dir},
     rel_path::{RelPath, RelPathBuf},
 };
@@ -2849,8 +2851,9 @@ impl LocalSnapshot {
                 }
             }
 
-            let metadata = fs.metadata(&ancestor.join(DOT_GIT)).await.ok().flatten();
-            if metadata.is_some() {
+            let repository_metadata_path =
+                repository_metadata_path_for_directory(ancestor, fs).await;
+            if repository_metadata_path.is_some() {
                 repo_root = Some(Arc::from(ancestor));
                 break;
             }
@@ -3315,6 +3318,29 @@ impl BackgroundScannerState {
             repository_dir_abs_path,
         };
 
+        match build_repository_exclude(
+            &local_repository.dot_git_abs_path,
+            &local_repository.common_dir_abs_path,
+            &work_directory_abs_path,
+            fs,
+        )
+        .await
+        {
+            Ok(exclude) => {
+                self.snapshot.repo_exclude_by_work_dir_abs_path.insert(
+                    local_repository.work_directory_abs_path.clone(),
+                    (Arc::new(exclude), false),
+                );
+            }
+            Err(_) if is_fossil_repository_metadata_path(&local_repository.dot_git_abs_path) => {
+                self.snapshot.repo_exclude_by_work_dir_abs_path.insert(
+                    local_repository.work_directory_abs_path.clone(),
+                    (Arc::new(empty_gitignore(&work_directory_abs_path)?), false),
+                );
+            }
+            Err(_) => {}
+        }
+
         self.snapshot
             .git_repositories
             .insert(work_directory_id, local_repository.clone());
@@ -3367,6 +3393,113 @@ async fn build_gitignore(abs_path: &Path, fs: &dyn Fs) -> Result<Gitignore> {
         builder.add_line(Some(abs_path.into()), line)?;
     }
     Ok(builder.build()?)
+}
+
+async fn build_fossil_ignore_glob(
+    abs_path: &Path,
+    work_dir_abs_path: &Path,
+    fs: &dyn Fs,
+) -> Result<Gitignore> {
+    let contents = fs.load(abs_path).await.with_context(|| {
+        format!(
+            "failed to load Fossil ignore-glob at {}",
+            abs_path.display()
+        )
+    })?;
+    build_fossil_ignore_glob_from_contents(&contents, work_dir_abs_path, Some(abs_path))
+}
+
+fn build_fossil_ignore_glob_from_contents(
+    contents: &str,
+    work_dir_abs_path: &Path,
+    source: Option<&Path>,
+) -> Result<Gitignore> {
+    let mut builder = GitignoreBuilder::new(work_dir_abs_path);
+    for pattern in contents
+        .lines()
+        .flat_map(|line| line.split(','))
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+    {
+        if let Some(source) = source {
+            builder.add_line(Some(source.to_path_buf()), pattern)?;
+        } else {
+            builder.add_line(None, pattern)?;
+        }
+    }
+    Ok(builder.build()?)
+}
+
+async fn build_fossil_settings_ignore_glob(work_dir_abs_path: &Path) -> Result<Gitignore> {
+    let fossil_binary_path = git::fossil::resolve_fossil_binary(None, work_dir_abs_path)?;
+    let mut command = new_command(fossil_binary_path);
+    command
+        .current_dir(work_dir_abs_path)
+        .args(["settings", "ignore-glob", "--value"]);
+    let output = command.output().await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "failed to read Fossil ignore-glob setting:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let contents = String::from_utf8(output.stdout)?;
+    build_fossil_ignore_glob_from_contents(&contents, work_dir_abs_path, None)
+}
+
+fn empty_gitignore(base_path: &Path) -> Result<Gitignore> {
+    Ok(GitignoreBuilder::new(base_path).build()?)
+}
+
+fn fossil_ignore_glob_abs_path(work_dir_abs_path: &Path) -> PathBuf {
+    work_dir_abs_path
+        .join(FOSSIL_SETTINGS_DIR)
+        .join(FOSSIL_IGNORE_GLOB)
+}
+
+fn is_fossil_repository_metadata_path(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new(DOT_FOSSIL))
+        || path.file_name() == Some(OsStr::new(FOSSIL_CHECKOUT))
+}
+
+fn repository_exclude_abs_path(
+    dot_git_abs_path: &Path,
+    common_dir_abs_path: &Path,
+    work_dir_abs_path: &Path,
+) -> Option<PathBuf> {
+    match dot_git_abs_path.file_name() {
+        Some(name) if name == DOT_GIT => Some(common_dir_abs_path.join(REPO_EXCLUDE)),
+        Some(name) if name == DOT_FOSSIL || name == FOSSIL_CHECKOUT => {
+            Some(fossil_ignore_glob_abs_path(work_dir_abs_path))
+        }
+        _ => None,
+    }
+}
+
+async fn build_repository_exclude(
+    dot_git_abs_path: &Path,
+    common_dir_abs_path: &Path,
+    work_dir_abs_path: &Path,
+    fs: &dyn Fs,
+) -> Result<Gitignore> {
+    let Some(exclude_abs_path) =
+        repository_exclude_abs_path(dot_git_abs_path, common_dir_abs_path, work_dir_abs_path)
+    else {
+        anyhow::bail!(
+            "repository metadata path has no exclude file: {}",
+            dot_git_abs_path.display()
+        );
+    };
+
+    if is_fossil_repository_metadata_path(dot_git_abs_path) {
+        if fs.is_file(&exclude_abs_path).await {
+            build_fossil_ignore_glob(&exclude_abs_path, work_dir_abs_path, fs).await
+        } else {
+            build_fossil_settings_ignore_glob(work_dir_abs_path).await
+        }
+    } else {
+        build_gitignore(&exclude_abs_path, fs).await
+    }
 }
 
 impl Deref for Worktree {
@@ -4463,7 +4596,22 @@ impl BackgroundScanner {
                     }
 
                     if !dot_git_abs_paths.contains(&dot_git_abs_path) {
-                        dot_git_abs_paths.push(dot_git_abs_path);
+                        dot_git_abs_paths.push(dot_git_abs_path.clone());
+                    }
+
+                    if path_in_git_dir == Path::new("")
+                        && self.track_git_repositories
+                        && let Some(repository) =
+                            snapshot.git_repositories.values().find(|repository| {
+                                repository.dot_git_abs_path.as_ref() == dot_git_abs_path.as_path()
+                            })
+                        && is_fossil_repository_metadata_path(&repository.dot_git_abs_path)
+                        && !work_dirs_needing_exclude_update
+                            .iter()
+                            .any(|path| path == &repository.work_directory_abs_path)
+                    {
+                        work_dirs_needing_exclude_update
+                            .push(repository.work_directory_abs_path.clone());
                     }
                 }
 
@@ -4477,6 +4625,27 @@ impl BackgroundScanner {
                     }) {
                         work_dirs_needing_exclude_update
                             .push(repository.work_directory_abs_path.clone());
+                    }
+                }
+
+                if self.track_git_repositories {
+                    for repository in snapshot.git_repositories.values() {
+                        let Some(exclude_abs_path) = repository_exclude_abs_path(
+                            &repository.dot_git_abs_path,
+                            &repository.common_dir_abs_path,
+                            &repository.work_directory_abs_path,
+                        ) else {
+                            continue;
+                        };
+
+                        if exclude_abs_path == abs_path.as_path()
+                            && !work_dirs_needing_exclude_update
+                                .iter()
+                                .any(|path| path == &repository.work_directory_abs_path)
+                        {
+                            work_dirs_needing_exclude_update
+                                .push(repository.work_directory_abs_path.clone());
+                        }
                     }
                 }
             }
@@ -4564,7 +4733,10 @@ impl BackgroundScanner {
             }
         }
 
-        if relative_paths.is_empty() && dot_git_abs_paths.is_empty() {
+        if relative_paths.is_empty()
+            && dot_git_abs_paths.is_empty()
+            && work_dirs_needing_exclude_update.is_empty()
+        {
             return;
         }
 
@@ -4577,6 +4749,29 @@ impl BackgroundScanner {
                     .get_mut(&work_dir_abs_path)
                 {
                     *needs_update = true;
+                } else {
+                    let should_insert_empty_fossil_ignore = state
+                        .snapshot
+                        .git_repositories
+                        .values()
+                        .find(|repository| repository.work_directory_abs_path == work_dir_abs_path)
+                        .is_some_and(|repository| {
+                            is_fossil_repository_metadata_path(&repository.dot_git_abs_path)
+                        });
+
+                    if should_insert_empty_fossil_ignore {
+                        match empty_gitignore(&work_dir_abs_path) {
+                            Ok(ignore) => {
+                                state
+                                    .snapshot
+                                    .repo_exclude_by_work_dir_abs_path
+                                    .insert(work_dir_abs_path, (Arc::new(ignore), true));
+                            }
+                            Err(error) => {
+                                log::error!("error preparing Fossil ignore-glob update: {error:#}");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4847,7 +5042,9 @@ impl BackgroundScanner {
         swap_to_front(&mut child_paths, DOT_GIT);
 
         if let Some(path) = child_paths.first()
-            && path.ends_with(DOT_GIT)
+            && path
+                .file_name()
+                .is_some_and(|name| is_repository_metadata_name(name))
         {
             ignore_stack.repo_root = Some(job.abs_path.clone());
         }
@@ -5300,8 +5497,13 @@ impl BackgroundScanner {
                         ignores_to_update.push(abs_path.as_path().into());
                     }
 
-                    if let Some((_, repository)) = repository {
-                        let exclude_abs_path = repository.common_dir_abs_path.join(REPO_EXCLUDE);
+                    if let Some((_, repository)) = repository
+                        && let Some(exclude_abs_path) = repository_exclude_abs_path(
+                            &repository.dot_git_abs_path,
+                            &repository.common_dir_abs_path,
+                            &repository.work_directory_abs_path,
+                        )
+                    {
                         excludes_to_load.push((work_dir_abs_path.clone(), exclude_abs_path));
                     }
                 }
@@ -5341,9 +5543,44 @@ impl BackgroundScanner {
         // Load gitignores asynchronously (outside the lock)
         let mut loaded_excludes: Vec<(Arc<Path>, Arc<Gitignore>)> = Vec::new();
         for (work_dir_abs_path, exclude_abs_path) in excludes_to_load {
-            if let Ok(current_exclude) = build_gitignore(&exclude_abs_path, self.fs.as_ref()).await
-            {
-                loaded_excludes.push((work_dir_abs_path, Arc::new(current_exclude)));
+            let repository = self
+                .state
+                .lock()
+                .await
+                .snapshot
+                .git_repositories
+                .values()
+                .find(|repository| repository.work_directory_abs_path == work_dir_abs_path)
+                .cloned();
+            let current_exclude = if let Some(repository) =
+                repository.as_ref().filter(|repository| {
+                    is_fossil_repository_metadata_path(&repository.dot_git_abs_path)
+                }) {
+                build_repository_exclude(
+                    &repository.dot_git_abs_path,
+                    &repository.common_dir_abs_path,
+                    &repository.work_directory_abs_path,
+                    self.fs.as_ref(),
+                )
+                .await
+            } else {
+                build_gitignore(&exclude_abs_path, self.fs.as_ref()).await
+            };
+
+            match current_exclude {
+                Ok(current_exclude) => {
+                    loaded_excludes.push((work_dir_abs_path, Arc::new(current_exclude)));
+                }
+                Err(_)
+                    if repository.as_ref().is_some_and(|repository| {
+                        is_fossil_repository_metadata_path(&repository.dot_git_abs_path)
+                    }) =>
+                {
+                    if let Ok(current_exclude) = empty_gitignore(&work_dir_abs_path) {
+                        loaded_excludes.push((work_dir_abs_path, Arc::new(current_exclude)));
+                    }
+                }
+                Err(_) => {}
             }
         }
 
@@ -5417,8 +5654,9 @@ impl BackgroundScanner {
             return;
         };
 
-        if let Ok(Some(metadata)) = self.fs.metadata(&job.abs_path.join(DOT_GIT)).await
-            && metadata.is_dir
+        if repository_metadata_path_for_directory(&job.abs_path, self.fs.as_ref())
+            .await
+            .is_some()
         {
             ignore_stack.repo_root = Some(job.abs_path.clone());
         }
@@ -5651,12 +5889,15 @@ async fn discover_ancestor_git_repo(
             let dot_git_abs_path: Arc<Path> = dot_git_abs_path.as_path().into();
             let (_, common_dir_abs_path) = discover_git_paths(&dot_git_abs_path, fs.as_ref()).await;
 
-            if dot_git_abs_path.file_name() == Some(OsStr::new(DOT_GIT)) {
-                let repo_exclude_abs_path = common_dir_abs_path.join(REPO_EXCLUDE);
-                if let Ok(repo_exclude) = build_gitignore(&repo_exclude_abs_path, fs.as_ref()).await
-                {
-                    exclude = Some(Arc::new(repo_exclude));
-                }
+            if let Ok(repo_exclude) = build_repository_exclude(
+                &dot_git_abs_path,
+                &common_dir_abs_path,
+                ancestor,
+                fs.as_ref(),
+            )
+            .await
+            {
+                exclude = Some(Arc::new(repo_exclude));
             }
 
             if index != 0 {
