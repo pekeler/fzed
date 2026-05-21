@@ -11091,6 +11091,54 @@ async fn test_add_path_to_fossil_ignore_glob(
 }
 
 #[gpui::test]
+async fn test_add_path_to_fossil_binary_glob(
+    executor: gpui::BackgroundExecutor,
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "my-repo": {
+                ".fslckout": {},
+                ".fossil-settings": {
+                    "binary-glob": "already-binary.dat, media/*\n"
+                },
+                "generated.dat": "generated"
+            }
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/root/my-repo").as_ref()], cx).await;
+    project
+        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .await;
+    cx.run_until_parked();
+
+    let repo = project.read_with(cx, |project, cx| {
+        project.repositories(cx).values().next().unwrap().clone()
+    });
+    let receiver = repo.update(cx, |repo, _| {
+        repo.add_path_to_fossil_binary_glob(&repo_path("generated.dat"))
+    });
+    match receiver.await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("failed to add path to Fossil binary-glob: {error:#}"),
+        Err(error) => panic!("Fossil binary-glob task was canceled: {error:#}"),
+    }
+
+    pretty_assertions::assert_eq!(
+        fs.load(path!("/root/my-repo/.fossil-settings/binary-glob").as_ref())
+            .await
+            .unwrap(),
+        "already-binary.dat\nmedia/*\ngenerated.dat\n"
+    );
+}
+
+#[gpui::test]
 async fn test_fossil_repository_check_in_uses_selected_paths(
     executor: gpui::BackgroundExecutor,
     cx: &mut gpui::TestAppContext,

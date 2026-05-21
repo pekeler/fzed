@@ -30,8 +30,8 @@ use futures::{
     stream::{FuturesOrdered, FuturesUnordered},
 };
 use git::{
-    BuildPermalinkParams, DOT_FOSSIL, FOSSIL_CHECKOUT, FOSSIL_IGNORE_GLOB, FOSSIL_SETTINGS_DIR,
-    GitHostingProviderRegistry, Oid, RunHook,
+    BuildPermalinkParams, DOT_FOSSIL, FOSSIL_BINARY_GLOB, FOSSIL_CHECKOUT, FOSSIL_IGNORE_GLOB,
+    FOSSIL_SETTINGS_DIR, GitHostingProviderRegistry, Oid, RunHook,
     blame::Blame,
     parse_git_remote_url,
     repository::{
@@ -4572,7 +4572,7 @@ async fn append_repository_ignore_pattern(
     .await
 }
 
-fn fossil_ignore_glob_patterns(contents: &str) -> impl Iterator<Item = &str> {
+fn fossil_glob_patterns(contents: &str) -> impl Iterator<Item = &str> {
     contents
         .lines()
         .flat_map(|line| line.split(','))
@@ -4580,8 +4580,8 @@ fn fossil_ignore_glob_patterns(contents: &str) -> impl Iterator<Item = &str> {
         .filter(|pattern| !pattern.is_empty())
 }
 
-fn fossil_ignore_glob_content_with_pattern(contents: &str, pattern: &str) -> Option<String> {
-    let mut patterns = fossil_ignore_glob_patterns(contents).collect::<Vec<_>>();
+fn fossil_glob_content_with_pattern(contents: &str, pattern: &str) -> Option<String> {
+    let mut patterns = fossil_glob_patterns(contents).collect::<Vec<_>>();
     if patterns.iter().any(|existing| *existing == pattern) {
         return None;
     }
@@ -4590,8 +4590,9 @@ fn fossil_ignore_glob_content_with_pattern(contents: &str, pattern: &str) -> Opt
     Some(format!("{}\n", patterns.join("\n")))
 }
 
-async fn fossil_ignore_glob_setting_value(
+async fn fossil_glob_setting_value(
     work_dir: &Path,
+    setting_name: &'static str,
     environment: &HashMap<String, String>,
 ) -> Result<String> {
     let fossil_binary_path =
@@ -4600,36 +4601,37 @@ async fn fossil_ignore_glob_setting_value(
     command
         .current_dir(work_dir)
         .envs(environment.iter())
-        .args(["settings", "ignore-glob", "--value"]);
+        .args(["settings", setting_name, "--value"]);
     let output = command.output().await?;
     anyhow::ensure!(
         output.status.success(),
-        "failed to read Fossil ignore-glob setting:\n{}{}",
+        "failed to read Fossil {setting_name} setting:\n{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(String::from_utf8(output.stdout)?)
 }
 
-async fn append_fossil_ignore_glob_pattern(
+async fn append_fossil_glob_pattern(
     fs: &dyn Fs,
     work_dir: &Path,
+    setting_name: &'static str,
     pattern: &str,
     environment: &HashMap<String, String>,
 ) -> Result<()> {
     let fossil_settings_path = work_dir.join(FOSSIL_SETTINGS_DIR);
-    let ignore_file_path = fossil_settings_path.join(FOSSIL_IGNORE_GLOB);
+    let setting_file_path = fossil_settings_path.join(setting_name);
     fs.create_dir(&fossil_settings_path).await?;
 
-    let existing_content = if fs.is_file(&ignore_file_path).await {
-        fs.load(&ignore_file_path).await?
+    let existing_content = if fs.is_file(&setting_file_path).await {
+        fs.load(&setting_file_path).await?
     } else {
-        fossil_ignore_glob_setting_value(work_dir, environment).await?
+        fossil_glob_setting_value(work_dir, setting_name, environment).await?
     };
 
-    if let Some(new_content) = fossil_ignore_glob_content_with_pattern(&existing_content, pattern) {
+    if let Some(new_content) = fossil_glob_content_with_pattern(&existing_content, pattern) {
         fs.save(
-            &ignore_file_path,
+            &setting_file_path,
             &text::Rope::from(new_content.as_str()),
             text::LineEnding::Unix,
         )
@@ -6661,9 +6663,10 @@ impl Repository {
                             .await
                         }
                         RepositoryKind::Fossil => {
-                            append_fossil_ignore_glob_pattern(
+                            append_fossil_glob_pattern(
                                 fs.as_ref(),
                                 &work_dir,
+                                FOSSIL_IGNORE_GLOB,
                                 &file_path_str,
                                 environment.as_ref(),
                             )
@@ -6685,6 +6688,43 @@ impl Repository {
         is_dir: bool,
     ) -> oneshot::Receiver<Result<()>> {
         self.add_path_to_repository_ignore(repo_path, is_dir)
+    }
+
+    pub fn add_path_to_fossil_binary_glob(
+        &mut self,
+        repo_path: &RepoPath,
+    ) -> oneshot::Receiver<Result<()>> {
+        let work_dir = self.snapshot.work_directory_abs_path.clone();
+        let repository_kind = self.snapshot.kind;
+        let file_path_str = repo_path.as_ref().display(PathStyle::Posix).to_string();
+
+        self.send_job(
+            "add_path_to_fossil_binary_glob",
+            None,
+            move |git_repo, _cx| async move {
+                match git_repo {
+                    RepositoryState::Local(LocalRepositoryState {
+                        fs, environment, ..
+                    }) => {
+                        if !repository_kind.is_fossil() {
+                            anyhow::bail!("Cannot modify binary-glob on a Git repository");
+                        }
+
+                        append_fossil_glob_pattern(
+                            fs.as_ref(),
+                            &work_dir,
+                            FOSSIL_BINARY_GLOB,
+                            &file_path_str,
+                            environment.as_ref(),
+                        )
+                        .await
+                    }
+                    RepositoryState::Remote(_) => Err(anyhow::anyhow!(
+                        "Cannot modify binary-glob on remote repository"
+                    )),
+                }
+            },
+        )
     }
 
     pub fn stash_drop(

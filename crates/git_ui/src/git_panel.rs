@@ -275,6 +275,10 @@ fn add_to_repository_ignore_action_title(repository_kind: RepositoryKind) -> &'s
     }
 }
 
+fn add_to_fossil_binary_glob_action_title() -> &'static str {
+    "Add to binary-glob"
+}
+
 fn should_show_uncommit_action(repository_kind: RepositoryKind, has_parent: bool) -> bool {
     !repository_kind.is_fossil() && has_parent
 }
@@ -1741,6 +1745,15 @@ impl GitPanel {
         self.add_selected_entry_to_repository_ignore(cx);
     }
 
+    fn add_to_binary_glob(
+        &mut self,
+        _: &git::fossil_actions::AddToBinaryGlob,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_selected_entry_to_fossil_binary_glob(cx);
+    }
+
     fn add_selected_entry_to_repository_ignore(&mut self, cx: &mut Context<Self>) {
         maybe!({
             let list_entry = self.entries.get(self.selected_entry?)?.clone();
@@ -1766,6 +1779,43 @@ impl GitPanel {
                             show_error_toast(
                                 workspace,
                                 add_to_repository_ignore_action_title(repository_kind),
+                                e,
+                                cx,
+                            );
+                        });
+                    }
+                }
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+
+            Some(())
+        });
+    }
+
+    fn add_selected_entry_to_fossil_binary_glob(&mut self, cx: &mut Context<Self>) {
+        maybe!({
+            let list_entry = self.entries.get(self.selected_entry?)?.clone();
+            let entry = list_entry.status_entry()?.to_owned();
+
+            let active_repository = self.active_repository.clone()?;
+            if !active_repository.read(cx).kind().is_fossil() {
+                return Some(());
+            }
+
+            let workspace = self.workspace.clone();
+            let repo_path = entry.repo_path;
+            let receiver = active_repository.update(cx, |repo, _| {
+                repo.add_path_to_fossil_binary_glob(&repo_path)
+            });
+
+            cx.spawn(async move |_, cx| {
+                if let Err(e) = receiver.await? {
+                    if let Some(workspace) = workspace.upgrade() {
+                        cx.update(|cx| {
+                            show_error_toast(
+                                workspace,
+                                add_to_fossil_binary_glob_action_title(),
                                 e,
                                 cx,
                             );
@@ -6424,6 +6474,12 @@ impl GitPanel {
                     )
                 })
                 .when(is_fossil, |context_menu| {
+                    context_menu.action(
+                        add_to_fossil_binary_glob_action_title(),
+                        git::fossil_actions::AddToBinaryGlob.boxed_clone(),
+                    )
+                })
+                .when(is_fossil, |context_menu| {
                     context_menu
                         .separator()
                         .action_disabled_when(
@@ -7195,6 +7251,7 @@ impl Render for GitPanel {
                     .on_action(cx.listener(GitPanel::toggle_signoff_enabled))
                     .on_action(cx.listener(Self::add_to_gitignore))
                     .on_action(cx.listener(Self::add_to_ignore_glob))
+                    .on_action(cx.listener(Self::add_to_binary_glob))
             })
             .when(has_restore_access && !project.is_read_only(cx), |this| {
                 this.on_action(cx.listener(Self::restore_tracked_files))
@@ -8228,6 +8285,10 @@ mod tests {
         assert_eq!(
             add_to_repository_ignore_action_title(RepositoryKind::Git),
             "Add to .gitignore"
+        );
+        assert_eq!(
+            add_to_fossil_binary_glob_action_title(),
+            "Add to binary-glob"
         );
         assert!(!should_show_uncommit_action(RepositoryKind::Fossil, true));
         assert!(should_show_uncommit_action(RepositoryKind::Git, true));

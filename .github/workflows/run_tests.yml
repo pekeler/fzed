@@ -71,7 +71,7 @@ jobs:
         run: cargo test -p project fossil --lib
 
       - name: Test Fossil project integration
-        run: cargo test -p project --test integration test_add_path_to_fossil_ignore_glob
+        run: cargo test -p project --test integration test_add_path_to_fossil_
 
       - name: Test Fossil UI
         run: cargo test -p git_ui fossil --lib

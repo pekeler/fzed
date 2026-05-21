@@ -464,6 +464,10 @@ fn add_to_repository_ignore_label(repository_kind: RepositoryKind) -> &'static s
     }
 }
 
+fn add_to_fossil_binary_glob_label() -> &'static str {
+    "Add to binary-glob"
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
@@ -1175,10 +1179,18 @@ impl ProjectPanel {
                                     },
                                 );
                                 let menu = if repository_kind.is_fossil() {
-                                    menu.action(
+                                    let menu = menu.action(
                                         add_to_repository_ignore_label(repository_kind),
                                         Box::new(git::fossil_actions::AddToIgnoreGlob),
-                                    )
+                                    );
+                                    if is_dir {
+                                        menu
+                                    } else {
+                                        menu.action(
+                                            add_to_fossil_binary_glob_label(),
+                                            Box::new(git::fossil_actions::AddToBinaryGlob),
+                                        )
+                                    }
                                 } else {
                                     menu.action(
                                         add_to_repository_ignore_label(repository_kind),
@@ -2325,6 +2337,15 @@ impl ProjectPanel {
         self.add_selection_to_repository_ignore(cx);
     }
 
+    fn add_to_binary_glob(
+        &mut self,
+        _: &git::fossil_actions::AddToBinaryGlob,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_selection_to_fossil_binary_glob(cx);
+    }
+
     fn add_selection_to_repository_ignore(&mut self, cx: &mut Context<Self>) {
         maybe!({
             let selection = self.selection?;
@@ -2354,6 +2375,53 @@ impl ProjectPanel {
                                 add_to_repository_ignore_label(repository_kind),
                                 e
                             );
+                            let toast = StatusToast::new(message, cx, |this, _| {
+                                this.icon(Icon::new(IconName::XCircle).color(Color::Error))
+                                    .dismiss_button(true)
+                            });
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.toggle_status_toast(toast, cx);
+                            });
+                        });
+                    }
+                }
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+
+            Some(())
+        });
+    }
+
+    fn add_selection_to_fossil_binary_glob(&mut self, cx: &mut Context<Self>) {
+        maybe!({
+            let selection = self.selection?;
+            let (_, entry) = self.selected_sub_entry(cx)?;
+            if entry.is_dir() {
+                return None;
+            }
+
+            let project = self.project.read(cx);
+            let project_path = project.path_for_entry(selection.entry_id, cx)?;
+            let git_store = project.git_store();
+            let (repository, repo_path) = git_store
+                .read(cx)
+                .repository_and_path_for_project_path(&project_path, cx)?;
+            if !repository.read(cx).kind().is_fossil() {
+                return None;
+            }
+
+            let workspace = self.workspace.clone();
+            let receiver = repository.update(cx, |repo, _| {
+                repo.add_path_to_fossil_binary_glob(&repo_path)
+            });
+
+            cx.spawn(async move |_, cx| {
+                if let Err(e) = receiver.await? {
+                    if let Some(workspace) = workspace.upgrade() {
+                        cx.update(|cx| {
+                            let message =
+                                format!("Failed to {}: {}", add_to_fossil_binary_glob_label(), e);
                             let toast = StatusToast::new(message, cx, |this, _| {
                                 this.icon(Icon::new(IconName::XCircle).color(Color::Error))
                                     .dismiss_button(true)
@@ -6752,6 +6820,7 @@ impl Render for ProjectPanel {
                         .on_action(cx.listener(Self::restore_file))
                         .on_action(cx.listener(Self::add_to_gitignore))
                         .on_action(cx.listener(Self::add_to_ignore_glob))
+                        .on_action(cx.listener(Self::add_to_binary_glob))
                         .when(!project.is_remote(), |el| {
                             el.on_action(cx.listener(Self::trash))
                         })
