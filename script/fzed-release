@@ -153,21 +153,19 @@ else
   git tag -a "$tag_name" -m "FZed $version"
 fi
 
+triggered_after="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 echo "Pushing main and $tag_name"
 git push origin HEAD:main "$tag_name"
 
-triggered_after="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-echo "Dispatching $workflow for $head_sha"
-gh workflow run "$workflow" --repo "$repo" --ref main
-
 run_id=""
+echo "Finding push CI run for $head_sha"
 for _ in {1..30}; do
   run_id="$(
     gh run list \
       --repo "$repo" \
       --workflow "$workflow" \
       --branch main \
-      --event workflow_dispatch \
+      --event push \
       --limit 20 \
       --json databaseId,headSha,createdAt \
       --jq "map(select(.headSha == \"$head_sha\" and .createdAt >= \"$triggered_after\")) | .[0].databaseId // empty"
@@ -178,7 +176,29 @@ for _ in {1..30}; do
   sleep 5
 done
 
-[[ -n "$run_id" ]] || fail "could not find dispatched CI run for $head_sha"
+if [[ -z "$run_id" ]]; then
+  echo "Dispatching $workflow for $head_sha"
+  gh workflow run "$workflow" --repo "$repo" --ref main
+
+  for _ in {1..30}; do
+    run_id="$(
+      gh run list \
+        --repo "$repo" \
+        --workflow "$workflow" \
+        --branch main \
+        --event workflow_dispatch \
+        --limit 20 \
+        --json databaseId,headSha,createdAt \
+        --jq "map(select(.headSha == \"$head_sha\" and .createdAt >= \"$triggered_after\")) | .[0].databaseId // empty"
+    )"
+    if [[ -n "$run_id" ]]; then
+      break
+    fi
+    sleep 5
+  done
+fi
+
+[[ -n "$run_id" ]] || fail "could not find CI run for $head_sha"
 
 build_log="$(mktemp "${TMPDIR:-/tmp}/fzed-release-${tag_name}-bundle.XXXXXX")"
 
