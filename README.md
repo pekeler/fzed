@@ -6,6 +6,15 @@ FZed is a fork of [Zed](https://zed.dev) focused on adding first-class
 [Fossil SCM](https://fossil-scm.org/) support while keeping the fork close
 enough to upstream Zed to continue merging upstream changes.
 
+<img width="200" alt="cloning a repo" src="https://github.com/user-attachments/assets/a30a433b-7ede-4c29-88c4-2043319286ad" />
+<img width="200" alt="entering a repo's URL" src="https://github.com/user-attachments/assets/e357f3df-5467-4bd3-9f95-2a441d209bb1" />
+<img width="200" alt="the source control panel with some changes" src="https://github.com/user-attachments/assets/97fea045-a971-4ab6-980d-f14a4bf512f0" />
+<img width="200" alt="viewing a file" src="https://github.com/user-attachments/assets/46489c5b-0b61-4067-bc53-076595aa42e7" />
+<img width="200" alt="viewing a file's history" src="https://github.com/user-attachments/assets/c4c9a93b-32a6-438c-aa8f-ef0643267df6" />
+<img width="200" alt="the repo's timeline" src="https://github.com/user-attachments/assets/b30743a5-b34c-498c-9756-1ffd08cb0225" />
+<img width="200" alt="the context menu" src="https://github.com/user-attachments/assets/7fddcd84-1a8b-49b3-a9a3-86cb2f97cb02" />
+<img width="200" alt="the command palette" src="https://github.com/user-attachments/assets/137266dd-b610-460d-88ed-8817ec053169" />
+
 ## Fork-Specific Documentation
 
 ### Upstream Tracking Policy
