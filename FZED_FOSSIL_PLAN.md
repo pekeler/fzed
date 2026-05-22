@@ -8,7 +8,7 @@ Date: 2026-05-12
 - Upstream: https://github.com/zed-industries/zed
 - Local checkout: `/Users/pekeler/Projects/FZed`
 - Upstream tracking policy: follow upstream release tags, not upstream `main`
-- Current upstream baseline: `v1.3.5`
+- Current upstream baseline: `v1.3.6`
 - Remotes:
   - `origin` -> `https://github.com/pekeler/fzed.git`
   - `upstream` -> `https://github.com/zed-industries/zed.git`

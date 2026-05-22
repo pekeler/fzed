@@ -11164,6 +11164,7 @@ dependencies = [
  "async-std",
  "async-tar",
  "async-trait",
+ "chrono",
  "futures 0.3.32",
  "http_client",
  "log",
@@ -19148,6 +19149,7 @@ dependencies = [
  "gpui_util",
  "icons",
  "itertools 0.14.0",
+ "log",
  "menu",
  "schemars 1.0.4",
  "serde",
@@ -22427,7 +22429,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "1.3.5-fzed.1"
+version = "1.3.6-fzed.0"
 dependencies = [
  "acp_thread",
  "acp_tools",
