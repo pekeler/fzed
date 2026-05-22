@@ -4,9 +4,17 @@ on:
   pull_request:
     branches:
       - "**"
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "screenshots/**"
   push:
     branches:
       - main
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "screenshots/**"
   workflow_dispatch: {}
 
 permissions:
@@ -33,6 +41,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/share/boost /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Install Linux dependencies
         run: |
