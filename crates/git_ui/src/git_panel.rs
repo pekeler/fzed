@@ -1730,19 +1730,19 @@ impl GitPanel {
     fn add_to_gitignore(
         &mut self,
         _: &git::AddToGitignore,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.add_selected_entry_to_repository_ignore(cx);
+        self.add_selected_entry_to_repository_ignore(window, cx);
     }
 
     fn add_to_ignore_glob(
         &mut self,
         _: &git::fossil_actions::AddToIgnoreGlob,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.add_selected_entry_to_repository_ignore(cx);
+        self.add_selected_entry_to_repository_ignore(window, cx);
     }
 
     fn add_to_binary_glob(
@@ -1754,7 +1754,11 @@ impl GitPanel {
         self.add_selected_entry_to_fossil_binary_glob(cx);
     }
 
-    fn add_selected_entry_to_repository_ignore(&mut self, cx: &mut Context<Self>) {
+    fn add_selected_entry_to_repository_ignore(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         maybe!({
             let list_entry = self.entries.get(self.selected_entry?)?.clone();
             let entry = list_entry.status_entry()?.to_owned();
@@ -1772,17 +1776,22 @@ impl GitPanel {
                 repo.add_path_to_repository_ignore(&repo_path, false)
             });
 
-            cx.spawn(async move |_, cx| {
-                if let Err(e) = receiver.await? {
-                    if let Some(workspace) = workspace.upgrade() {
-                        cx.update(|cx| {
-                            show_error_toast(
-                                workspace,
-                                add_to_repository_ignore_action_title(repository_kind),
-                                e,
-                                cx,
-                            );
-                        });
+            cx.spawn_in(window, async move |_, cx| {
+                match receiver.await? {
+                    Ok(()) => {
+                        refresh_fossil_status_if_needed(active_repository, cx).await?;
+                    }
+                    Err(e) => {
+                        if let Some(workspace) = workspace.upgrade() {
+                            cx.update(|_, cx| {
+                                show_error_toast(
+                                    workspace,
+                                    add_to_repository_ignore_action_title(repository_kind),
+                                    e,
+                                    cx,
+                                );
+                            })?;
+                        }
                     }
                 }
                 anyhow::Ok(())
@@ -7249,7 +7258,9 @@ impl Render for GitPanel {
             .when(has_mutation_access && !project.is_read_only(cx), |this| {
                 this.on_action(cx.listener(GitPanel::on_amend))
                     .on_action(cx.listener(GitPanel::toggle_signoff_enabled))
-                    .on_action(cx.listener(Self::add_to_gitignore))
+            })
+            .when(has_write_access && !project.is_read_only(cx), |this| {
+                this.on_action(cx.listener(Self::add_to_gitignore))
                     .on_action(cx.listener(Self::add_to_ignore_glob))
                     .on_action(cx.listener(Self::add_to_binary_glob))
             })
@@ -8201,6 +8212,7 @@ mod tests {
             cx.set_global(settings_store);
             theme_settings::init(LoadThemes::JustBase, cx);
             editor::init(cx);
+            language_model::init(cx);
             crate::init(cx);
         });
     }
@@ -8723,6 +8735,87 @@ mod tests {
 
         let entries = panel.read_with(cx, |panel, _| panel.entries.clone());
         assert!(entries.is_empty(), "{entries:?}");
+    }
+
+    #[gpui::test]
+    async fn test_fossil_add_to_ignore_glob_from_panel_action(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({
+                "project": {
+                    ".fslckout": {},
+                    ".fossil-settings": {
+                        "ignore-glob": "already-ignored\n"
+                    },
+                    "tracked": "tracked\n",
+                    "extra": "extra\n",
+                },
+            }),
+        )
+        .await;
+
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/root/project/.fslckout")),
+            &[("tracked", "tracked\n".into())],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        let extra_entry_index = panel.read_with(cx, |panel, _| {
+            panel
+                .entries
+                .iter()
+                .position(|entry| {
+                    entry
+                        .status_entry()
+                        .is_some_and(|entry| entry.repo_path == repo_path("extra"))
+                })
+                .expect("extra file should be visible in the Source Control Panel")
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.selected_entry = Some(extra_entry_index);
+            panel.focus_handle.focus(window, cx);
+        });
+        cx.simulate_resize(gpui::size(px(800.), px(600.)));
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(800.), px(600.)),
+            |_, _| panel.clone().into_any_element(),
+        );
+        let focus_handle = panel.read_with(cx, |panel, _| panel.focus_handle.clone());
+        cx.update(|window, cx| {
+            focus_handle.dispatch_action(&git::fossil_actions::AddToIgnoreGlob, window, cx);
+        });
+        cx.executor().run_until_parked();
+
+        let ignore_glob_path = Path::new(path!("/root/project"))
+            .join(".fossil-settings")
+            .join("ignore-glob");
+        pretty_assertions::assert_eq!(
+            fs.load(&ignore_glob_path).await.unwrap(),
+            "already-ignored\nextra\n"
+        );
     }
 
     #[gpui::test]
