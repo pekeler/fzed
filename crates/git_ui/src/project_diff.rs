@@ -650,8 +650,8 @@ impl ProjectDiff {
             .ok();
 
         ButtonStates {
-            stage: has_unstaged_hunks && repository_kind.supports_hunk_stage_and_restore(),
-            unstage: has_staged_hunks && repository_kind.supports_hunk_stage_and_restore(),
+            stage: has_unstaged_hunks && repository_kind.supports_hunk_staging(),
+            unstage: has_staged_hunks && repository_kind.supports_hunk_staging(),
             prev_next,
             selection,
             stage_all,
@@ -1478,7 +1478,7 @@ struct ButtonStates {
 
 impl ButtonStates {
     fn show_hunk_stage_controls(&self) -> bool {
-        self.repository_kind.supports_hunk_stage_and_restore()
+        self.repository_kind.supports_hunk_staging()
     }
 }
 
@@ -1879,10 +1879,16 @@ mod tests {
     use editor::test::editor_test_context::{EditorTestContext, assert_state_with_diff};
     use git::status::{TrackedStatus, UnmergedStatus, UnmergedStatusCode};
     use gpui::TestAppContext;
-    use project::FakeFs;
+    use project::{FakeFs, git_store::GitStoreEvent};
     use serde_json::json;
     use settings::{DiffViewStyle, SettingsStore};
-    use std::path::Path;
+    use std::{
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
     use unindent::Unindent as _;
     use util::{
         path,
@@ -1926,12 +1932,14 @@ mod tests {
             repository_kind: RepositoryKind::Fossil,
         };
         assert!(!button_states.show_hunk_stage_controls());
+        assert!(RepositoryKind::Fossil.supports_hunk_restore());
 
         let button_states = ButtonStates {
             repository_kind: RepositoryKind::Git,
             ..button_states
         };
         assert!(button_states.show_hunk_stage_controls());
+        assert!(RepositoryKind::Git.supports_hunk_restore());
     }
 
     #[test]
@@ -2003,6 +2011,120 @@ mod tests {
 
         let text = String::from_utf8(fs.read_file_sync("/project/foo.txt").unwrap()).unwrap();
         assert_eq!(text, "foo\n");
+    }
+
+    #[gpui::test]
+    async fn test_fossil_save_after_restore(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "foo.txt": "FOO\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("foo.txt", "foo\n".into())],
+        );
+        fs.set_error_message_for_index_write(
+            Path::new(path!("/project/.fslckout")),
+            Some("Fossil restore should not write index entries".into()),
+        );
+
+        let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
+        let saw_index_write_error = Arc::new(AtomicBool::new(false));
+        project.update(cx, |project, cx| {
+            let saw_index_write_error = saw_index_write_error.clone();
+            cx.subscribe(project.git_store(), move |_, _, event, _| {
+                if let GitStoreEvent::IndexWriteError(_) = event {
+                    saw_index_write_error.store(true, Ordering::SeqCst);
+                }
+            })
+            .detach();
+        });
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor.read(cx).rhs_editor().clone());
+        assert_state_with_diff(
+            &editor,
+            cx,
+            &"
+                - ˇfoo
+                + FOO
+            "
+            .unindent(),
+        );
+
+        editor
+            .update_in(cx, |editor, window, cx| {
+                editor.git_restore(&Default::default(), window, cx);
+                editor.save(SaveOptions::default(), project.clone(), window, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_state_with_diff(&editor, cx, &"ˇ".unindent());
+
+        let text = String::from_utf8(fs.read_file_sync("/project/foo.txt").unwrap()).unwrap();
+        assert_eq!(text, "foo\n");
+        assert!(!saw_index_write_error.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_supports_hunk_restore_without_staging(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "foo.txt": "FOO\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("foo.txt", "foo\n".into())],
+        );
+
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor.read(cx).rhs_editor().clone());
+        let (supports_hunk_staging, supports_hunk_restore) = editor.read_with(cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let buffer_id = snapshot
+                .excerpts()
+                .next()
+                .map(|excerpt| excerpt.context.start.buffer_id)
+                .expect("project diff should contain a Fossil buffer");
+            (
+                editor.supports_hunk_staging_for_buffer_id(buffer_id, cx),
+                editor.supports_hunk_restore_for_buffer_id(buffer_id, cx),
+            )
+        });
+        assert!(!supports_hunk_staging);
+        assert!(supports_hunk_restore);
     }
 
     #[gpui::test]

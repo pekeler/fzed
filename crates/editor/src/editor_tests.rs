@@ -24685,6 +24685,58 @@ async fn test_stage_and_unstage_added_file_hunk(
     cx.assert_index_text(None);
 }
 
+#[gpui::test]
+async fn test_fossil_hunk_staging_commands_are_no_ops(
+    executor: BackgroundExecutor,
+    cx: &mut TestAppContext,
+) {
+    init_test(cx, |_| {});
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/project"),
+        json!({
+            ".fslckout": {},
+            "file": "modified\n",
+        }),
+    )
+    .await;
+    fs.set_head_and_index_for_repo(
+        Path::new(path!("/project/.fslckout")),
+        &[("file", "original\n".to_string())],
+    );
+
+    let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/project/file"), cx)
+        })
+        .await
+        .expect("open test buffer");
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let multibuffer = MultiBuffer::build_from_buffer(buffer, cx);
+        let editor = build_editor_with_project(project, multibuffer, window, cx);
+        window.focus(&editor.focus_handle(cx), cx);
+        editor
+    });
+    executor.run_until_parked();
+
+    editor.update_in(cx, |editor, window, cx| {
+        editor.set_expand_all_diff_hunks(cx);
+        editor.select_all(&SelectAll, window, cx);
+        editor.toggle_staged_selected_diff_hunks(&Default::default(), window, cx);
+    });
+    executor.run_until_parked();
+
+    let file_repo_path = ::git::repository::RepoPath::from_rel_path(rel_path("file"));
+    let fossil_index_text = fs
+        .with_git_state(Path::new(path!("/project/.fslckout")), false, |state| {
+            state.index_contents.get(&file_repo_path).cloned()
+        })
+        .expect("read fossil test repository state");
+    assert_eq!(fossil_index_text.as_deref(), Some("original\n"));
+}
+
 async fn setup_indent_guides_editor(
     text: &str,
     cx: &mut TestAppContext,

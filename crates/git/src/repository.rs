@@ -793,10 +793,16 @@ impl RepositoryKind {
         self == Self::Fossil
     }
 
-    pub fn supports_hunk_stage_and_restore(self) -> bool {
+    pub fn supports_hunk_staging(self) -> bool {
         match self {
             Self::Git => true,
             Self::Fossil => false,
+        }
+    }
+
+    pub fn supports_hunk_restore(self) -> bool {
+        match self {
+            Self::Git | Self::Fossil => true,
         }
     }
 }
