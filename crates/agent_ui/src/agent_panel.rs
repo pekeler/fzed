@@ -13,6 +13,7 @@ use acp_thread::{AcpThread, AcpThreadEvent, MentionUri, ThreadStatus};
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol::schema as acp;
 use agent_servers::AgentServer;
+use agent_settings::UserAgentsMd;
 use collections::HashSet;
 use db::kvp::{Dismissable, KeyValueStore};
 use itertools::Itertools;
@@ -23,11 +24,14 @@ use settings::{LanguageModelProviderSetting, LanguageModelSelection};
 use zed_actions::{
     DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize,
     agent::{
-        AddSelectionToThread, ConflictContent, OpenSettings, ReauthenticateAgent, ResetAgentZoom,
-        ResetOnboarding, ResolveConflictedFilesWithAgent, ResolveConflictsWithAgent,
-        ReviewBranchDiff,
+        AddSelectionToThread, ConflictContent, LogoutAgent, OpenSettings, ReauthenticateAgent,
+        ResetAgentZoom, ResetOnboarding, ResolveConflictedFilesWithAgent,
+        ResolveConflictsWithAgent, ReviewBranchDiff,
     },
-    assistant::{FocusAgent, OpenRulesLibrary, Toggle, ToggleFocus},
+    assistant::{
+        CreateSkillFromUrl, FocusAgent, OpenGlobalAgentsMdRules, OpenProjectAgentsMdRules,
+        OpenRulesLibrary, OpenSkillCreator, Toggle, ToggleFocus,
+    },
 };
 
 use crate::ExpandMessageEditor;
@@ -38,9 +42,9 @@ use crate::terminal_thread_metadata_store::{TerminalThreadMetadata, TerminalThre
 use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore, ThreadMetadataStoreEvent};
 use crate::{
     AddContextServer, AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow,
-    InlineAssistant, LoadThreadFromClipboard, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff,
-    ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata,
-    ToggleNewThreadMenu, ToggleOptionsMenu,
+    LoadThreadFromClipboard, NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown,
+    OpenAgentDiff, ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
+    ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
     agent_configuration::{AgentConfiguration, AssistantConfigurationEvent},
     conversation_view::{AcpThreadViewEvent, ThreadView},
     ui::{AgentNotification, AgentNotificationEvent, EndTrialUpsell},
@@ -55,26 +59,27 @@ use anyhow::Result;
 #[cfg(feature = "audio")]
 use audio::{Audio, Sound};
 use chrono::{DateTime, Utc};
-use client::UserStore;
+use client::{UserStore, zed_urls};
 use cloud_api_types::Plan;
 use collections::HashMap;
 use editor::{Editor, MultiBuffer};
 use extension::ExtensionEvents;
 use extension_host::ExtensionStore;
+
 use fs::Fs;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
     Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
-    PlatformDisplay, Subscription, Task, TaskExt, UpdateGlobal, WeakEntity, WindowHandle,
-    prelude::*, pulsating_between,
+    PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
+    pulsating_between,
 };
 use language::LanguageRegistry;
 use language_model::LanguageModelRegistry;
 use project::{Project, ProjectPath, Worktree};
-use prompt_store::{PromptStore, UserPromptId};
-use rules_library::{RulesLibrary, open_rules_library};
+use prompt_store::PromptStore;
 use settings::TerminalDockPosition;
 use settings::{NotifyWhenAgentWaiting, Settings, update_settings_file};
+use skill_creator::{SkillCreatorOpenMode, is_supported_skill_url, open_skill_creator};
 use terminal::{Event as TerminalEvent, terminal_settings::TerminalSettings};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use theme_settings::ThemeSettings;
@@ -176,6 +181,60 @@ fn read_global_last_created_entry_kind(kvp: &KeyValueStore) -> Option<AgentPanel
         .map(|entry| entry.entry_kind)
 }
 
+fn project_agents_md_path(
+    project: &Entity<Project>,
+    require_existing_file: bool,
+    cx: &App,
+) -> Option<PathBuf> {
+    let rel_path = util::rel_path::RelPath::unix("AGENTS.md").ok()?;
+    project
+        .read(cx)
+        .visible_worktrees(cx)
+        .next()
+        .and_then(|worktree| {
+            let worktree = worktree.read(cx);
+
+            if require_existing_file {
+                let entry = worktree.entry_for_path(rel_path)?;
+                if !entry.is_file() {
+                    return None;
+                }
+            }
+
+            Some(worktree.absolutize(rel_path))
+        })
+}
+
+fn open_global_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    workspace
+        .open_abs_path(
+            paths::agents_file().clone(),
+            workspace::OpenOptions {
+                focus: Some(true),
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+        .detach_and_log_err(cx);
+}
+
+fn open_project_rules(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if let Some(path) = project_agents_md_path(workspace.project(), false, cx) {
+        workspace
+            .open_abs_path(
+                path,
+                workspace::OpenOptions {
+                    focus: Some(true),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            )
+            .detach_and_log_err(cx);
+    }
+}
+
 async fn write_global_last_created_entry_kind(kvp: KeyValueStore, entry_kind: AgentPanelEntryKind) {
     if let Some(json) = serde_json::to_string(&LastCreatedEntryKind { entry_kind }).log_err() {
         kvp.write_kvp(LAST_CREATED_ENTRY_KIND_KEY.to_string(), json)
@@ -261,6 +320,19 @@ pub fn init(cx: &mut App) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
                     }
                 })
+                .register_action(|workspace, _: &NewTerminalThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.new_terminal(
+                                Some(workspace),
+                                AgentThreadSource::AgentPanel,
+                                window,
+                                cx,
+                            )
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
                 .register_action(
                     |workspace, action: &NewNativeAgentThreadFromSummary, window, cx| {
                         if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
@@ -296,6 +368,28 @@ pub fn init(cx: &mut App) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
                         panel.update(cx, |panel, cx| {
                             panel.deploy_rules_library(action, window, cx)
+                        });
+                    }
+                })
+                .register_action(|workspace, _: &OpenGlobalAgentsMdRules, window, cx| {
+                    open_global_rules(workspace, window, cx);
+                })
+                .register_action(|workspace, _: &OpenProjectAgentsMdRules, window, cx| {
+                    open_project_rules(workspace, window, cx);
+                })
+                .register_action(|workspace, action: &OpenSkillCreator, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        panel.update(cx, |panel, cx| {
+                            panel.deploy_skill_creator(action, window, cx)
+                        });
+                    }
+                })
+                .register_action(|workspace, action: &CreateSkillFromUrl, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        panel.update(cx, |panel, cx| {
+                            panel.deploy_skill_creator_from_url(action, window, cx)
                         });
                     }
                 })
@@ -3041,16 +3135,79 @@ impl AgentPanel {
 
     fn deploy_rules_library(
         &mut self,
-        action: &OpenRulesLibrary,
+        _action: &OpenRulesLibrary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The legacy Rules action is rerouted to the skill creator so the
+        // existing keyboard shortcut (still bound to `OpenRulesLibrary` in
+        // the default keymaps) and any persisted user keymap entries keep
+        // working.
+        self.deploy_skill_creator(&OpenSkillCreator, window, cx);
+    }
+
+    fn deploy_skill_creator(
+        &mut self,
+        _action: &OpenSkillCreator,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        open_rules_library(
+        self.open_skill_creator(SkillCreatorOpenMode::Form, cx);
+    }
+
+    fn deploy_skill_creator_from_url(
+        &mut self,
+        _action: &CreateSkillFromUrl,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let initial_url = cx
+            .read_from_clipboard()
+            .and_then(|clipboard| clipboard.text())
+            .map(|text| text.trim().to_string())
+            .filter(|text| is_supported_skill_url(text));
+
+        self.open_skill_creator(SkillCreatorOpenMode::Url { initial_url }, cx);
+    }
+
+    fn open_skill_creator(&mut self, open_mode: SkillCreatorOpenMode, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        let on_saved: Rc<dyn Fn(&mut App)> = Rc::new(move |cx: &mut App| {
+            this.update(cx, |this, cx| {
+                if !this.has_open_project(cx) {
+                    return;
+                }
+
+                this.ensure_native_agent_connection(cx);
+                let Some(connect_task) = this.connection_store.update(cx, |store, cx| {
+                    store
+                        .entry(&Agent::NativeAgent)
+                        .map(|entry| entry.read(cx).wait_for_connection())
+                }) else {
+                    return;
+                };
+                let project = this.project.clone();
+                cx.spawn(async move |_this, cx| -> Result<()> {
+                    let connected = connect_task.await?;
+                    if let Some(native_connection) = connected
+                        .connection
+                        .downcast::<agent::NativeAgentConnection>()
+                    {
+                        cx.update(|cx| native_connection.refresh_skills_for_project(project, cx));
+                    }
+                    Ok(())
+                })
+                .detach_and_log_err(cx);
+            })
+            .log_err();
+        });
+
+        open_skill_creator(
+            Some(self.workspace.clone()),
             self.language_registry.clone(),
-            Box::new(PromptLibraryInlineAssist::new(self.workspace.clone())),
-            action
-                .prompt_to_select
-                .map(|uuid| UserPromptId(uuid).into()),
+            self.fs.clone(),
+            open_mode,
+            Some(on_saved),
             cx,
         )
         .detach_and_log_err(cx);
@@ -4738,6 +4895,16 @@ impl AgentPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
+        // Resolve menu shortcuts at the thread root; the active editor can
+        // shadow panel-level commands such as OpenRulesLibrary.
+        let menu_action_context = match &self.base_view {
+            BaseView::AgentThread { conversation_view } => conversation_view
+                .read(cx)
+                .active_thread()
+                .map(|thread| thread.read(cx).focus_handle.clone())
+                .unwrap_or_else(|| focus_handle.clone()),
+            _ => focus_handle.clone(),
+        };
         let showing_terminal = matches!(self.visible_surface(), VisibleSurface::Terminal(_));
 
         let conversation_view = match &self.base_view {
@@ -4758,21 +4925,29 @@ impl AgentPanel {
             }
             _ => false,
         };
+        let supports_logout = self
+            .active_conversation_view()
+            .is_some_and(|conversation_view| conversation_view.read(cx).supports_logout(cx));
+
+        let project_agents_md_path = project_agents_md_path(&self.project, true, cx);
+
+        let global_agents_md_loaded = UserAgentsMd::global(cx)
+            .and_then(|md| md.content())
+            .is_some();
+
+        let workspace = self.workspace.clone();
 
         PopoverMenu::new("agent-options-menu")
             .trigger_with_tooltip(
                 IconButton::new("agent-options-menu", IconName::Ellipsis)
                     .icon_size(IconSize::Small),
-                {
-                    let focus_handle = focus_handle.clone();
-                    move |_window, cx| {
-                        Tooltip::for_action_in(
-                            "Toggle Agent Menu",
-                            &ToggleOptionsMenu,
-                            &focus_handle,
-                            cx,
-                        )
-                    }
+                move |_window, cx| {
+                    Tooltip::for_action_in(
+                        "Toggle Agent Menu",
+                        &ToggleOptionsMenu,
+                        &focus_handle,
+                        cx,
+                    )
                 },
             )
             .anchor(Anchor::TopRight)
@@ -4780,7 +4955,7 @@ impl AgentPanel {
             .menu({
                 move |window, cx| {
                     Some(ContextMenu::build(window, cx, |mut menu, _window, _| {
-                        menu = menu.context(focus_handle.clone());
+                        menu = menu.context(menu_action_context.clone());
 
                         if can_regenerate_thread_title {
                             menu = menu.header("Current Thread");
@@ -4803,8 +4978,9 @@ impl AgentPanel {
                         if !showing_terminal {
                             menu = menu
                                 .header("MCP Servers")
+                                .action("Add Custom Server…", Box::new(AddContextServer))
                                 .action(
-                                    "View Server Extensions",
+                                    "Install New Servers…",
                                     Box::new(zed_actions::Extensions {
                                         category_filter: Some(
                                             zed_actions::ExtensionCategoryFilter::ContextServers,
@@ -4812,10 +4988,87 @@ impl AgentPanel {
                                         id: None,
                                     }),
                                 )
-                                .action("Add Custom Server…", Box::new(AddContextServer))
                                 .separator()
-                                .action("Rules", Box::new(OpenRulesLibrary::default()))
-                                .action("Profiles", Box::new(ManageProfiles::default()));
+                                .header("Skills")
+                                .entry(
+                                    "Create Skill…",
+                                    Some(Box::new(OpenRulesLibrary::default())),
+                                    |window, cx| {
+                                        window.dispatch_action(Box::new(OpenSkillCreator), cx);
+                                    },
+                                )
+                                .entry("Manage Skills…", None, |window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(zed_actions::OpenSettingsAt {
+                                            path: "agent.skills".to_string(),
+                                        }),
+                                        cx,
+                                    );
+                                })
+                                .separator();
+
+                            if project_agents_md_path.is_some() || global_agents_md_loaded {
+                                menu = menu.header("Rules");
+
+                                if global_agents_md_loaded {
+                                    let workspace = workspace.clone();
+
+                                    menu = menu.custom_entry(
+                                        |_window, _cx| {
+                                            h_flex()
+                                                .w_full()
+                                                .gap_1()
+                                                .child(Label::new("Open Global Rules"))
+                                                .child(
+                                                    Label::new("(AGENTS.md)")
+                                                        .color(Color::Muted)
+                                                        .size(LabelSize::Small),
+                                                )
+                                                .into_any_element()
+                                        },
+                                        move |window, cx| {
+                                            workspace
+                                                .update(cx, |workspace, cx| {
+                                                    open_global_rules(workspace, window, cx);
+                                                })
+                                                .log_err();
+                                        },
+                                    );
+                                }
+
+                                if project_agents_md_path.is_some() {
+                                    let workspace = workspace.clone();
+                                    menu = menu.custom_entry(
+                                        |_window, _cx| {
+                                            h_flex()
+                                                .w_full()
+                                                .gap_1()
+                                                .child(Label::new("Open Project Rules"))
+                                                .child(
+                                                    Label::new("(AGENTS.md)")
+                                                        .color(Color::Muted)
+                                                        .size(LabelSize::Small),
+                                                )
+                                                .into_any_element()
+                                        },
+                                        move |window, cx| {
+                                            workspace
+                                                .update(cx, |workspace, cx| {
+                                                    open_project_rules(workspace, window, cx);
+                                                })
+                                                .log_err();
+                                        },
+                                    );
+                                }
+
+                                menu = menu.entry("Rules Library", None, |_window, cx| {
+                                    cx.open_url(&zed_urls::rules_docs(cx));
+                                });
+
+                                menu = menu.separator();
+                            }
+
+                            menu = menu.action("Profiles", Box::new(ManageProfiles::default()));
                         }
 
                         menu = menu
@@ -4823,8 +5076,14 @@ impl AgentPanel {
                             .separator()
                             .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
 
+                        if has_auth_methods || supports_logout {
+                            menu = menu.separator()
+                        }
                         if has_auth_methods {
                             menu = menu.action("Reauthenticate", Box::new(ReauthenticateAgent))
+                        }
+                        if supports_logout {
+                            menu = menu.action("Log Out", Box::new(LogoutAgent))
                         }
 
                         menu
@@ -4973,6 +5232,9 @@ impl AgentPanel {
                             menu.item(
                                 ContextMenuEntry::new("Terminal")
                                     .when(showing_terminal, |this| this.action(Box::new(NewThread)))
+                                    .when(!showing_terminal, |this| {
+                                        this.action(Box::new(NewTerminalThread))
+                                    })
                                     .icon(IconName::Terminal)
                                     .icon_color(Color::Muted)
                                     .handler({
@@ -5632,11 +5894,16 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, action: &NewThread, window, cx| {
                 this.new_thread(action, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &NewTerminalThread, window, cx| {
+                cx.stop_propagation();
+                this.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_configuration(window, cx);
             }))
             .on_action(cx.listener(Self::open_active_thread_as_markdown))
             .on_action(cx.listener(Self::deploy_rules_library))
+            .on_action(cx.listener(Self::deploy_skill_creator))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::toggle_options_menu))
             .on_action(cx.listener(Self::increase_font_size))
@@ -5647,6 +5914,13 @@ impl Render for AgentPanel {
                 if let Some(conversation_view) = this.active_conversation_view() {
                     conversation_view.update(cx, |conversation_view, cx| {
                         conversation_view.reauthenticate(window, cx)
+                    })
+                }
+            }))
+            .on_action(cx.listener(|this, _: &LogoutAgent, window, cx| {
+                if let Some(conversation_view) = this.active_conversation_view() {
+                    conversation_view.update(cx, |conversation_view, cx| {
+                        conversation_view.logout(window, cx)
                     })
                 }
             }))
@@ -5678,57 +5952,6 @@ impl Render for AgentPanel {
             }
             _ => content.into_any(),
         }
-    }
-}
-
-struct PromptLibraryInlineAssist {
-    workspace: WeakEntity<Workspace>,
-}
-
-impl PromptLibraryInlineAssist {
-    pub fn new(workspace: WeakEntity<Workspace>) -> Self {
-        Self { workspace }
-    }
-}
-
-impl rules_library::InlineAssistDelegate for PromptLibraryInlineAssist {
-    fn assist(
-        &self,
-        prompt_editor: &Entity<Editor>,
-        initial_prompt: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<RulesLibrary>,
-    ) {
-        InlineAssistant::update_global(cx, |assistant, cx| {
-            let Some(workspace) = self.workspace.upgrade() else {
-                return;
-            };
-            let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
-                return;
-            };
-            let project = workspace.read(cx).project().downgrade();
-            let panel = panel.read(cx);
-            let thread_store = panel.thread_store().clone();
-            assistant.assist(
-                prompt_editor,
-                self.workspace.clone(),
-                project,
-                thread_store,
-                None,
-                initial_prompt,
-                window,
-                cx,
-            );
-        })
-    }
-
-    fn focus_agent_panel(
-        &self,
-        workspace: &mut Workspace,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) -> bool {
-        workspace.focus_panel::<AgentPanel>(window, cx).is_some()
     }
 }
 
@@ -6013,7 +6236,7 @@ mod tests {
     use anyhow::{Result, anyhow};
     use feature_flags::FeatureFlagAppExt;
     use fs::FakeFs;
-    use gpui::{App, TestAppContext, VisualTestContext};
+    use gpui::{App, TestAppContext, UpdateGlobal, VisualTestContext};
     use parking_lot::Mutex;
     use project::{Project, WorktreePaths};
     use std::any::Any;
@@ -8137,12 +8360,152 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_skills_menu_entry_shows_rules_shortcut(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let default_key_bindings = settings::KeymapFile::load_asset_allow_partial_failure(
+                "keymaps/default-macos.json",
+                cx,
+            )
+            .unwrap();
+            cx.bind_keys(default_key_bindings);
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        fs.insert_tree("/project", json!({ "file.txt": "" })).await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(multi_workspace.into(), cx);
+
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, None, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        open_thread_with_connection(&panel, StubAgentConnection::new(), &mut cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.toggle_options_menu(&ToggleOptionsMenu, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("MENU_ITEM-Create Skill…").is_some(),
+            "Create Skill… menu item should be visible"
+        );
+        assert!(
+            cx.debug_bounds("KEY_BINDING-l").is_some(),
+            "Create Skill… menu item should show the OpenRulesLibrary shortcut"
+        );
+    }
+
+    #[gpui::test]
     async fn test_terminal_close_event_closes_without_sidebar(cx: &mut TestAppContext) {
         let (panel, mut cx) = setup_panel(cx).await;
         cx.update(|_, cx| {
             TerminalThreadMetadataStore::init_global(cx);
         });
 
+        let terminal_id = panel
+            .update_in(&mut cx, |panel, window, cx| {
+                panel.insert_test_terminal("Dev Server", true, window, cx)
+            })
+            .expect("test terminal should be inserted");
+        cx.run_until_parked();
+
+        panel.update(&mut cx, |panel, cx| {
+            panel.emit_test_terminal_close(terminal_id, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(!panel.has_terminal(terminal_id));
+        });
+        cx.update(|_, cx| {
+            assert!(
+                TerminalThreadMetadataStore::global(cx)
+                    .read(cx)
+                    .entry(terminal_id)
+                    .is_none(),
+                "terminal metadata should be deleted by the fallback close"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_new_thread_dismisses_settings_overlay(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        // Put the panel on its ephemeral new-draft view so the base view
+        // already contains the draft that `NewThread` would activate.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            assert!(
+                panel.active_view_is_new_draft(cx),
+                "precondition: base view should be the ephemeral draft"
+            );
+            assert!(!panel.is_overlay_open());
+        });
+
+        // Simulate the Settings overlay being open on top of the draft.
+        // We don't go through `open_configuration` here because it would
+        // build provider configuration views, which call into
+        // `LanguageModelProvider::configuration_view` — unimplemented for
+        // the fake provider used in tests. The bug being exercised lives
+        // entirely in the overlay/base-view bookkeeping, so toggling the
+        // overlay flag directly is sufficient.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.set_overlay(OverlayView::Configuration, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, _cx| {
+            assert!(
+                panel.is_overlay_open(),
+                "precondition: Settings overlay should be open"
+            );
+        });
+
+        // Dispatching `NewThread` while Settings is open must dismiss the
+        // overlay so the user actually sees the new thread. Previously
+        // this was a silent no-op: `activate_draft` early-returned without
+        // clearing the overlay because the base view already held the
+        // draft.
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.new_thread(&NewThread, window, cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            assert!(
+                !panel.is_overlay_open(),
+                "Settings overlay should be dismissed when invoking NewThread"
+            );
+            assert!(panel.active_view_is_new_draft(cx));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_terminal_title_omits_placeholder_title(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
         let terminal_id = panel
             .update_in(&mut cx, |panel, window, cx| {
                 panel.insert_test_terminal("Dev Server", true, window, cx)
@@ -9237,63 +9600,6 @@ mod tests {
                 .find(|terminal| terminal.id == first_terminal_id)
                 .expect("first terminal should remain in the panel");
             assert!(!first_terminal.has_notification);
-        });
-    }
-
-    #[gpui::test]
-    async fn test_new_thread_dismisses_settings_overlay(cx: &mut TestAppContext) {
-        let (panel, mut cx) = setup_panel(cx).await;
-
-        // Put the panel on its ephemeral new-draft view so the base view
-        // already contains the draft that `NewThread` would activate.
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.activate_draft(true, "agent_panel", window, cx);
-        });
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, cx| {
-            assert!(
-                panel.active_thread_is_draft(cx),
-                "precondition: base view should be the ephemeral draft"
-            );
-            assert!(!panel.is_overlay_open());
-        });
-
-        // Simulate the Settings overlay being open on top of the draft.
-        // We don't go through `open_configuration` here because it would
-        // build provider configuration views, which call into
-        // `LanguageModelProvider::configuration_view` — unimplemented for
-        // the fake provider used in tests. The bug being exercised lives
-        // entirely in the overlay/base-view bookkeeping, so toggling the
-        // overlay flag directly is sufficient.
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.set_overlay(OverlayView::Configuration, true, window, cx);
-        });
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, _cx| {
-            assert!(
-                panel.is_overlay_open(),
-                "precondition: Settings overlay should be open"
-            );
-        });
-
-        // Dispatching `NewThread` while Settings is open must dismiss the
-        // overlay so the user actually sees the new thread. Previously
-        // this was a silent no-op: `activate_draft` early-returned without
-        // clearing the overlay because the base view already held the
-        // draft.
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.new_thread(&NewThread, window, cx);
-        });
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, cx| {
-            assert!(
-                !panel.is_overlay_open(),
-                "Settings overlay should be dismissed when invoking NewThread"
-            );
-            assert!(panel.active_thread_is_draft(cx));
         });
     }
 

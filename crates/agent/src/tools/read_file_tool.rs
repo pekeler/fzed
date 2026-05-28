@@ -86,11 +86,13 @@ use crate::{AgentTool, ToolCallEventStream, ToolInput, outline};
 ///   Do NOT retry reading the same file without line numbers if you receive an outline.
 /// - This tool supports reading image files. Supported formats: PNG, JPEG, WebP, GIF, BMP, TIFF.
 ///   Image files are returned as visual content that you can analyze directly.
+///
+/// The only supported path outside the project is `~/.agents/skills` or a descendant, for global agent skills.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadFileToolInput {
     /// The relative path of the file to read.
     ///
-    /// This path should never be absolute, and the first component of the path should always be a root directory in a project.
+    /// This path should never be absolute, and the first component of the path should always be a root directory in a project, unless it's a global agent skill under `~/.agents/skills`.
     ///
     /// <example>
     /// If the project has the following root directories:
@@ -100,6 +102,10 @@ pub struct ReadFileToolInput {
     ///
     /// If you want to access `file.txt` in `directory1`, you should use the path `directory1/file.txt`.
     /// If you want to access `file.txt` in `directory2`, you should use the path `directory2/file.txt`.
+    /// </example>
+    ///
+    /// <example>
+    /// To read a global agent skill file, you may provide a path under `~/.agents/skills`, such as `~/.agents/skills/my-skill/SKILL.md`.
     /// </example>
     pub path: String,
     /// Optional line number to start reading on (1-based index)
@@ -182,8 +188,8 @@ impl AgentTool for ReadFileTool {
                 .map_err(tool_content_err)?;
             let fs = project.read_with(cx, |project, _cx| project.fs().clone());
 
-            // Fast path: if the model passes an absolute path that resolves
-            // under the global skills directory, read it directly via the
+            // Fast path: if the model passes a path that resolves under the
+            // global skills directory, read it directly via the
             // filesystem. Global skills live outside any worktree, so the
             // standard project-path machinery would refuse them.
             if let Some(skill_path) =
@@ -608,6 +614,47 @@ mod test {
                 .collect::<Vec<_>>(),
             expected_content
         );
+    }
+
+    // When a worktree is named "foo" and contains a subdirectory also named "foo",
+    // read_file({"path": "foo/test.txt"}) should return the file at the worktree
+    // root (as the tool schema promises), not the one inside the foo/ subdirectory.
+    #[gpui::test]
+    async fn test_read_file_worktree_root_not_shadowed_by_subdir(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/foo"),
+            json!({
+                "test.txt": "root content",
+                "foo": {
+                    "test.txt": "subdir content"
+                }
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [path!("/foo").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+
+        // The tool schema says the first component must be the worktree root name,
+        // so "foo/test.txt" means test.txt at the root of the "foo" worktree.
+        let result = cx
+            .update(|cx| {
+                let input = ReadFileToolInput {
+                    path: "foo/test.txt".into(),
+                    start_line: None,
+                    end_line: None,
+                };
+                tool.run(
+                    ToolInput::resolved(input),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await;
+        assert_eq!(result.unwrap(), "root content".into());
     }
 
     #[gpui::test]

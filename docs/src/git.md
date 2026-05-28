@@ -277,7 +277,7 @@ You can ask AI to generate a commit message by focusing on the message editor wi
 > Note that you need to have an LLM provider configured either via your own API keys or through Zed's hosted AI models.
 > Visit [the AI configuration page](./ai/configuration.md) to learn how to do so.
 
-You can specify your preferred model to use by providing a `commit_message_model` agent setting.
+You can specify your preferred model for this task by adding a `commit_message_model` field to your agent settings.
 See [Feature-specific models](./ai/agent-settings.md#feature-specific-models) for more information.
 
 ```json [settings]
@@ -285,18 +285,16 @@ See [Feature-specific models](./ai/agent-settings.md#feature-specific-models) fo
   "agent": {
     "commit_message_model": {
       "provider": "anthropic",
-      "model": "claude-3-5-haiku"
+      "model": "claude-4-5-haiku"
     }
   }
 }
 ```
 
-To customize the format of generated commit messages, run {#action agent::OpenRulesLibrary} and select the "Commit message" rule on the left side.
-From there, you can modify the prompt to match your desired format.
+To add custom commit instructions for the model, use the global `AGENTS.md` file located `~/.config/zed/AGENTS.md` on macOS and Linux, `%APPDATA%\Zed\AGENTS.md` on Windows.
 
-<!-- Add media -->
-
-Any specific instructions for commit messages added to [Rules files](./ai/rules.md) are also picked up by the model tasked with writing your commit message.
+> Before Zed v1.4.0, this was done through the Rules Library, which has been removed.
+> See [the "Migrating to Skills" docs](./ai/rules.md#migrating-to-skills) in the Rules page for more information.
 
 ## Git Integrations
 

@@ -26,10 +26,10 @@ use gpui::{
 use indoc::indoc;
 use language_model::{
     CompletionIntent, LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent,
-    LanguageModelId, LanguageModelProviderId, LanguageModelProviderName, LanguageModelRegistry,
-    LanguageModelRequest, LanguageModelRequestMessage, LanguageModelToolResult,
-    LanguageModelToolSchemaFormat, LanguageModelToolUse, MessageContent, Role, StopReason,
-    TokenUsage,
+    LanguageModelId, LanguageModelImageExt, LanguageModelProviderId, LanguageModelProviderName,
+    LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
+    LanguageModelToolResult, LanguageModelToolSchemaFormat, LanguageModelToolUse, MessageContent,
+    Role, StopReason, TokenUsage,
     fake_provider::{FakeLanguageModel, FakeLanguageModelProvider},
 };
 use pretty_assertions::assert_eq;
@@ -1656,6 +1656,7 @@ async fn test_mcp_tool_multi_content_response(cx: &mut TestAppContext) {
 
     let (tool_call_params, tool_call_response) = mcp_tool_calls.next().await.unwrap();
     assert_eq!(tool_call_params.name, "screenshot");
+    let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     tool_call_response
         .send(context_server::types::CallToolResponse {
             content: vec![
@@ -1663,7 +1664,7 @@ async fn test_mcp_tool_multi_content_response(cx: &mut TestAppContext) {
                     text: "Some text".into(),
                 },
                 context_server::types::ToolResponseContent::Image {
-                    data: "aGVsbG8=".into(),
+                    data: image_data.into(),
                     mime_type: "image/png".into(),
                 },
                 context_server::types::ToolResponseContent::Text {
@@ -1691,13 +1692,25 @@ async fn test_mcp_tool_multi_content_response(cx: &mut TestAppContext) {
         })
         .expect("expected a tool result");
     assert_eq!(tool_result.tool_use_id, "tool_1".into());
-    assert_eq!(tool_result.content.len(), 2);
+    assert_eq!(tool_result.content.len(), 3);
+    assert_eq!(
+        tool_result.content[0],
+        language_model::LanguageModelToolResultContent::Text(Arc::from("Some text"))
+    );
+    let expected_image =
+        language_model::LanguageModelImage::from_base64_image(image_data, "image/png")
+            .expect("image conversion should not error")
+            .expect("image conversion should succeed");
     assert_eq!(
         tool_result.content[0],
         language_model::LanguageModelToolResultContent::Text(Arc::from("Some text"))
     );
     assert_eq!(
         tool_result.content[1],
+        language_model::LanguageModelToolResultContent::Image(expected_image)
+    );
+    assert_eq!(
+        tool_result.content[2],
         language_model::LanguageModelToolResultContent::Text(Arc::from("Some more text"))
     );
     fake_model.end_last_completion_stream();
@@ -3507,8 +3520,8 @@ async fn test_agent_connection(cx: &mut TestAppContext) {
     let thread_store = cx.new(|cx| ThreadStore::new(cx));
 
     // Create agent and connection
-    let agent = cx
-        .update(|cx| NativeAgent::new(thread_store, templates.clone(), None, fake_fs.clone(), cx));
+    let agent =
+        cx.update(|cx| NativeAgent::new(thread_store, templates.clone(), fake_fs.clone(), cx));
     let connection = NativeAgentConnection(agent.clone());
 
     // Create a thread using new_thread
@@ -4928,9 +4941,8 @@ async fn test_subagent_tool_call_end_to_end(cx: &mut TestAppContext) {
     .await;
     let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
     let thread_store = cx.new(|cx| ThreadStore::new(cx));
-    let agent = cx.update(|cx| {
-        NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-    });
+    let agent =
+        cx.update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
     let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
     let acp_thread = cx
@@ -5063,9 +5075,8 @@ async fn test_subagent_tool_output_does_not_include_thinking(cx: &mut TestAppCon
     .await;
     let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
     let thread_store = cx.new(|cx| ThreadStore::new(cx));
-    let agent = cx.update(|cx| {
-        NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-    });
+    let agent =
+        cx.update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
     let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
     let acp_thread = cx
@@ -5211,9 +5222,8 @@ async fn test_subagent_tool_call_cancellation_during_task_prompt(cx: &mut TestAp
     .await;
     let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
     let thread_store = cx.new(|cx| ThreadStore::new(cx));
-    let agent = cx.update(|cx| {
-        NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-    });
+    let agent =
+        cx.update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
     let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
     let acp_thread = cx
@@ -5341,9 +5351,8 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
     .await;
     let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
     let thread_store = cx.new(|cx| ThreadStore::new(cx));
-    let agent = cx.update(|cx| {
-        NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-    });
+    let agent =
+        cx.update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
     let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
     let acp_thread = cx
@@ -5874,9 +5883,8 @@ async fn test_subagent_context_window_warning(cx: &mut TestAppContext) {
     .await;
     let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
     let thread_store = cx.new(|cx| ThreadStore::new(cx));
-    let agent = cx.update(|cx| {
-        NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-    });
+    let agent =
+        cx.update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
     let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
     let acp_thread = cx
@@ -6000,9 +6008,8 @@ async fn test_subagent_no_context_window_warning_when_already_at_warning(cx: &mu
     .await;
     let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
     let thread_store = cx.new(|cx| ThreadStore::new(cx));
-    let agent = cx.update(|cx| {
-        NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-    });
+    let agent =
+        cx.update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
     let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
     let acp_thread = cx
@@ -6174,9 +6181,8 @@ async fn test_subagent_error_propagation(cx: &mut TestAppContext) {
     .await;
     let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
     let thread_store = cx.new(|cx| ThreadStore::new(cx));
-    let agent = cx.update(|cx| {
-        NativeAgent::new(thread_store.clone(), Templates::new(), None, fs.clone(), cx)
-    });
+    let agent =
+        cx.update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
     let connection = Rc::new(NativeAgentConnection(agent.clone()));
 
     let acp_thread = cx

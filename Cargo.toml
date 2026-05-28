@@ -172,6 +172,7 @@ members = [
     "crates/rope",
     "crates/rpc",
     "crates/rules_library",
+    "crates/skill_creator",
     "crates/scheduler",
     "crates/schema_generator",
     "crates/search",
@@ -432,6 +433,7 @@ rodio = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9
 rope = { path = "crates/rope" }
 rpc = { path = "crates/rpc" }
 rules_library = { path = "crates/rules_library" }
+skill_creator = { path = "crates/skill_creator" }
 scheduler = { path = "crates/scheduler" }
 search = { path = "crates/search" }
 session = { path = "crates/session" }
@@ -500,7 +502,7 @@ ztracing_macro = { path = "crates/ztracing_macro" }
 # External crates
 #
 
-agent-client-protocol = { version = "=0.11.1", features = ["unstable"] }
+agent-client-protocol = { version = "=0.12.1", features = ["unstable"] }
 aho-corasick = "1.1"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "9d9640d4" }
 any_vec = "0.14"
@@ -553,6 +555,7 @@ circular-buffer = "1.0"
 clap = { version = "4.4", features = ["derive", "wrap_help"] }
 cocoa = "=0.26.0"
 cocoa-foundation = "=0.2.0"
+const_format = "0.2"
 convert_case = "0.8.0"
 core-foundation = "=0.10.0"
 core-foundation-sys = "0.8.6"
@@ -761,7 +764,7 @@ toml_edit = { version = "0.22", default-features = false, features = [
     "serde",
 ] }
 tower-http = "0.4.4"
-tree-sitter = { version = "0.26.8", features = ["wasm"] }
+tree-sitter = { version = "0.26.9", features = ["wasm"] }
 tree-sitter-bash = "0.25.1"
 tree-sitter-c = "0.24.1"
 tree-sitter-cpp = { git = "https://github.com/tree-sitter/tree-sitter-cpp", rev = "5cb9b693cfd7bfacab1d9ff4acac1a4150700609" }

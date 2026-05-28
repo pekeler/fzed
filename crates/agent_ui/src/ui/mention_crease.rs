@@ -7,6 +7,7 @@ use gpui::{
     Animation, AnimationExt, AnyView, Context, IntoElement, TaskExt, WeakEntity, Window,
     pulsating_between,
 };
+use language::Buffer;
 use prompt_store::PromptId;
 use rope::Point;
 use settings::Settings;
@@ -180,6 +181,11 @@ fn open_mention_uri(
         MentionUri::Rule { id, .. } => {
             open_rule(workspace, id, window, cx);
         }
+        MentionUri::Skill {
+            skill_file_path, ..
+        } => {
+            open_skill_file(workspace, skill_file_path, window, cx);
+        }
         MentionUri::Fetch { url } => {
             cx.open_url(url.as_str());
         }
@@ -190,6 +196,65 @@ fn open_mention_uri(
         | MentionUri::GitDiff { .. }
         | MentionUri::MergeConflict { .. } => {}
     });
+}
+
+fn open_skill_file(
+    workspace: &mut Workspace,
+    skill_file_path: PathBuf,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    // Built-in skills have synthetic paths that don't exist on disk.
+    // Open a read-only buffer with the embedded content instead.
+    //
+    // The buffer is intentionally not registered with the project's buffer
+    // store: it has no on-disk backing, isn't searchable, and `Project::
+    // create_local_buffer` panics for remote projects (SSH/collab), which
+    // would crash Zed if a user clicked a built-in skill mention while
+    // connected to a remote project.
+    if let Some(content) = agent_skills::builtin_skill_content(&skill_file_path) {
+        let languages = workspace.project().read(cx).languages().clone();
+        let buffer = cx.new(|cx| Buffer::local(content, cx));
+        // Set markdown highlighting asynchronously — the buffer
+        // opens instantly and the highlighting appears once loaded.
+        cx.spawn({
+            let buffer = buffer.clone();
+            async move |_, cx| {
+                if let Ok(markdown) = languages.language_for_name("Markdown").await {
+                    buffer.update(cx, |buffer, cx| buffer.set_language(Some(markdown), cx));
+                }
+            }
+        })
+        .detach();
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::for_buffer(buffer, None, window, cx);
+            editor.set_read_only(true);
+            let title = skill_file_path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "built-in skill".into());
+            editor
+                .buffer()
+                .update(cx, |buffer, cx| buffer.set_title(title, cx));
+            editor
+        });
+        let pane = workspace.active_pane().clone();
+        workspace.add_item(pane, Box::new(editor), None, true, true, window, cx);
+        return;
+    }
+
+    workspace
+        .open_abs_path(
+            skill_file_path,
+            OpenOptions {
+                focus: Some(true),
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+        .detach_and_log_err(cx);
 }
 
 fn open_file(

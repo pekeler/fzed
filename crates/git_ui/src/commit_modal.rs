@@ -1,6 +1,7 @@
 use crate::branch_picker::{self, BranchList};
 use crate::git_panel::{
-    GitPanel, commit_message_editor, fossil_command_with_sync_state, panel_editor_style,
+    GitPanel, commit_message_editor, commit_title_exceeds_limit, fossil_command_with_sync_state,
+    panel_editor_style,
 };
 use crate::git_panel_settings::GitPanelSettings;
 use git::repository::CommitOptions;
@@ -573,7 +574,7 @@ impl Render for CommitModal {
                 .text(cx)
                 .lines()
                 .next()
-                .is_some_and(|title| title.len() > max_title_length)
+                .is_some_and(|title| commit_title_exceeds_limit(title, max_title_length))
         } else {
             false
         };

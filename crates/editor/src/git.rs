@@ -764,6 +764,19 @@ impl Editor {
         });
     }
 
+    pub fn toggle_all_diff_hunks(
+        &mut self,
+        _: &ToggleAllDiffHunks,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.has_any_expanded_diff_hunks(cx) {
+            self.collapse_all_diff_hunks(&CollapseAllDiffHunks, window, cx);
+        } else {
+            self.expand_all_diff_hunks(&ExpandAllDiffHunks, window, cx);
+        }
+    }
+
     pub(super) fn toggle_selected_diff_hunks(
         &mut self,
         _: &ToggleSelectedDiffHunks,
@@ -2683,6 +2696,9 @@ pub(super) fn render_diff_hunk_controls(
 ) -> AnyElement {
     let (supports_hunk_staging, supports_hunk_restore) =
         editor_hunk_control_support(editor, &hunk_range, cx);
+    let show_stage_restore = ProjectSettings::get_global(cx)
+        .git
+        .show_stage_restore_buttons;
 
     h_flex()
         .h(line_height)
@@ -2698,7 +2714,7 @@ pub(super) fn render_diff_hunk_controls(
         .gap_1()
         .block_mouse_except_scroll()
         .shadow_md()
-        .when(supports_hunk_staging, |el| {
+        .when(show_stage_restore && supports_hunk_staging, |el| {
             el.child(if status.has_secondary_hunk() {
                 Button::new(("stage", row as u64), "Stage")
                     .alpha(if status.is_pending() { 0.66 } else { 1.0 })
@@ -2753,7 +2769,7 @@ pub(super) fn render_diff_hunk_controls(
                     })
             })
         })
-        .when(supports_hunk_restore, |el| {
+        .when(show_stage_restore && supports_hunk_restore, |el| {
             el.child(
                 Button::new(("restore", row as u64), "Restore")
                     .tooltip({

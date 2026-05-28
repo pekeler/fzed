@@ -2,6 +2,7 @@ mod components;
 mod page_data;
 pub mod pages;
 
+use agent_skills::SkillIndex;
 use anyhow::{Context as _, Result};
 use editor::{Editor, EditorEvent};
 use futures::{StreamExt, channel::mpsc};
@@ -29,6 +30,7 @@ use std::{
     collections::{HashMap, HashSet},
     num::{NonZero, NonZeroU32},
     ops::Range,
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, LazyLock, RwLock},
     time::Duration,
@@ -763,6 +765,7 @@ pub struct SettingsWindow {
     search_index: Option<Arc<SearchIndex>>,
     list_state: ListState,
     shown_errors: HashSet<String>,
+    pub(crate) hidden_deleted_skill_directory_paths: HashSet<PathBuf>,
     pub(crate) regex_validation_error: Option<String>,
     last_copied_link_path: Option<&'static str>,
 }
@@ -1538,6 +1541,28 @@ impl SettingsWindow {
         })
         .detach();
 
+        cx.observe_global_in::<SkillIndex>(window, |this, _window, cx| {
+            if let Some(skill_index) = cx.try_global::<SkillIndex>() {
+                this.hidden_deleted_skill_directory_paths
+                    .retain(|directory_path| {
+                        skill_index
+                            .global_skills
+                            .iter()
+                            .chain(
+                                skill_index
+                                    .project_skills
+                                    .iter()
+                                    .flat_map(|group| group.skills.iter()),
+                            )
+                            .any(|skill| skill.directory_path.as_path() == directory_path.as_path())
+                    });
+            } else {
+                this.hidden_deleted_skill_directory_paths.clear();
+            }
+            cx.notify();
+        })
+        .detach();
+
         cx.on_window_closed(|cx, _window_id| {
             if let Some(existing_window) = cx
                 .windows()
@@ -1685,6 +1710,7 @@ impl SettingsWindow {
                 .tab_stop(false),
             search_index: None,
             shown_errors: HashSet::default(),
+            hidden_deleted_skill_directory_paths: HashSet::default(),
             regex_validation_error: None,
             list_state,
             last_copied_link_path: None,
@@ -1982,11 +2008,14 @@ impl SettingsWindow {
                 async move {
                     let query_lower = query.to_lowercase();
                     let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+                    if query_words.is_empty() {
+                        return Vec::new();
+                    }
                     search_index
                         .documents
                         .iter()
                         .filter(|doc| {
-                            query_words.iter().any(|query_word| {
+                            query_words.iter().all(|query_word| {
                                 doc.words
                                     .iter()
                                     .any(|doc_word| doc_word.starts_with(query_word))
@@ -3347,6 +3376,65 @@ impl SettingsWindow {
                 .into_any_element()
         }
 
+        let mut restricted_banner = gpui::Empty.into_any_element();
+        if let SettingsUiFile::Project((worktree_id, _)) = &self.current_file {
+            let worktree_id = *worktree_id;
+            let is_restricted = all_projects(self.original_window.as_ref(), cx)
+                .find(|project| project.read(cx).worktree_for_id(worktree_id, cx).is_some())
+                .map(|project| {
+                    let worktree_store = project.read(cx).worktree_store();
+                    project::trusted_worktrees::TrustedWorktrees::has_restricted_worktrees(
+                        &worktree_store,
+                        cx,
+                    )
+                })
+                .unwrap_or(false);
+
+            if is_restricted {
+                let original_window = self.original_window;
+                restricted_banner = Banner::new()
+                    .severity(Severity::Warning)
+                    .child(
+                        v_flex()
+                            .my_0p5()
+                            .gap_0p5()
+                            .child(Label::new("Restricted Mode"))
+                            .child(
+                                Label::new(
+                                    "This project is in restricted mode. Some project settings may not apply.",
+                                )
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                            ),
+                    )
+                    .action_slot(
+                        div().pr_2().pb_1().child(
+                            Button::new("manage-trust", "Manage Trust")
+                                .style(ButtonStyle::Tinted(ui::TintColor::Warning))
+                                .on_click(cx.listener(move |_this, _, window, cx| {
+                                    if let Some(original_window) = original_window {
+                                        original_window
+                                            .update(cx, |multi_workspace, window, cx| {
+                                                multi_workspace
+                                                    .workspace()
+                                                    .update(cx, |workspace, cx| {
+                                                        workspace
+                                                            .show_worktree_trust_security_modal(
+                                                                true, window, cx,
+                                                            );
+                                                    });
+                                            })
+                                            .log_err();
+                                    }
+                                    // Close the settings window
+                                    window.remove_window();
+                                })),
+                        ),
+                    )
+                    .into_any_element();
+            }
+        }
+
         v_flex()
             .id("settings-ui-page")
             .on_action(cx.listener(|this, _: &menu::SelectNext, window, cx| {
@@ -3437,7 +3525,8 @@ impl SettingsWindow {
                     .px_8()
                     .gap_2()
                     .child(page_header)
-                    .child(warning_banner),
+                    .child(warning_banner)
+                    .child(restricted_banner),
             )
             .child(
                 div()
@@ -4474,6 +4563,7 @@ pub mod test {
                 search_index: None,
                 list_state: ListState::new(0, gpui::ListAlignment::Top, px(0.0)),
                 shown_errors: HashSet::default(),
+                hidden_deleted_skill_directory_paths: HashSet::default(),
                 regex_validation_error: None,
                 last_copied_link_path: None,
             }
@@ -4600,6 +4690,7 @@ pub mod test {
             search_index: None,
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(0.0)),
             shown_errors: HashSet::default(),
+            hidden_deleted_skill_directory_paths: HashSet::default(),
             regex_validation_error: None,
             last_copied_link_path: None,
         };
