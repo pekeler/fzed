@@ -1043,8 +1043,8 @@
   {
     "context": "GitPanel",
     "bindings": {
-      "cmd-1": "git_panel::ActivateChangesTab",
-      "cmd-2": "git_panel::ActivateHistoryTab",
+      "cmd-1": "source_control_panel::ActivateChangesTab",
+      "cmd-2": "source_control_panel::ActivateHistoryTab",
     },
   },
   {

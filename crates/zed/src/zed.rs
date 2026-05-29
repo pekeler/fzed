@@ -4924,6 +4924,22 @@ mod tests {
     actions!(test_only, [ActionA, ActionB]);
 
     #[gpui::test]
+    async fn test_default_keymaps_load(cx: &mut gpui::TestAppContext) {
+        init_keymap_test(cx);
+
+        cx.update(|cx| {
+            for asset_path in [
+                "keymaps/default-linux.json",
+                "keymaps/default-macos.json",
+                "keymaps/default-windows.json",
+            ] {
+                KeymapFile::load_asset(asset_path, Some(KeybindSource::Default), cx)
+                    .unwrap_or_else(|error| panic!("failed to load {asset_path}: {error}"));
+            }
+        });
+    }
+
+    #[gpui::test]
     async fn test_base_keymap(cx: &mut gpui::TestAppContext) {
         let executor = cx.executor();
         let app_state = init_keymap_test(cx);

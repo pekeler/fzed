@@ -138,8 +138,10 @@ actions!(
         #[action(deprecated_aliases = ["git_panel::CollapseSelectedEntry"])]
         CollapseSelectedEntry,
         /// Activates the Changes tab.
+        #[action(deprecated_aliases = ["git_panel::ActivateChangesTab"])]
         ActivateChangesTab,
         /// Activates the History tab.
+        #[action(deprecated_aliases = ["git_panel::ActivateHistoryTab"])]
         ActivateHistoryTab,
     ]
 );
