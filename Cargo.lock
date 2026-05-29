@@ -3703,6 +3703,8 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "sqlez",
+ "tempfile",
 ]
 
 [[package]]
@@ -22480,7 +22482,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "1.4.2-fzed.0"
+version = "1.4.4-fzed.0"
 dependencies = [
  "acp_thread",
  "acp_tools",
