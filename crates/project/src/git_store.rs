@@ -6532,33 +6532,47 @@ impl Repository {
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
         let id = self.id;
+        let weak_repository = self.this.clone();
 
-        cx.spawn(async move |this, cx| {
-            this.update(cx, |this, _| {
-                this.send_job("stash_entries", None, move |git_repo, _cx| async move {
-                    match git_repo {
-                        RepositoryState::Local(LocalRepositoryState {
-                            backend,
-                            environment,
-                            ..
-                        }) => backend.stash_paths(entries, environment).await,
-                        RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                            client
-                                .request(proto::Stash {
-                                    project_id: project_id.0,
-                                    repository_id: id.to_proto(),
-                                    paths: entries
-                                        .into_iter()
-                                        .map(|repo_path| repo_path.to_proto())
-                                        .collect(),
-                                })
+        cx.spawn(async move |repository, cx| {
+            repository
+                .update(cx, |repository, _| {
+                    repository.send_job("stash_entries", None, move |git_repo, mut cx| async move {
+                        match git_repo {
+                            RepositoryState::Local(LocalRepositoryState {
+                                backend,
+                                environment,
+                                ..
+                            }) => {
+                                backend.stash_paths(entries, environment).await?;
+                                refresh_fossil_snapshot_after_command(
+                                    weak_repository,
+                                    backend,
+                                    &mut cx,
+                                )
                                 .await?;
-                            Ok(())
+                                Ok::<(), anyhow::Error>(())
+                            }
+                            RepositoryState::Remote(RemoteRepositoryState {
+                                project_id,
+                                client,
+                            }) => {
+                                client
+                                    .request(proto::Stash {
+                                        project_id: project_id.0,
+                                        repository_id: id.to_proto(),
+                                        paths: entries
+                                            .into_iter()
+                                            .map(|repo_path| repo_path.to_proto())
+                                            .collect(),
+                                    })
+                                    .await?;
+                                Ok::<(), anyhow::Error>(())
+                            }
                         }
-                    }
-                })
-            })?
-            .await??;
+                    })
+                })?
+                .await??;
             Ok(())
         })
     }
@@ -6569,30 +6583,44 @@ impl Repository {
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
         let id = self.id;
-        cx.spawn(async move |this, cx| {
-            this.update(cx, |this, _| {
-                this.send_job("stash_pop", None, move |git_repo, _cx| async move {
-                    match git_repo {
-                        RepositoryState::Local(LocalRepositoryState {
-                            backend,
-                            environment,
-                            ..
-                        }) => backend.stash_pop(index, environment).await,
-                        RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                            client
-                                .request(proto::StashPop {
-                                    project_id: project_id.0,
-                                    repository_id: id.to_proto(),
-                                    stash_index: index.map(|i| i as u64),
-                                })
-                                .await
-                                .context("sending stash pop request")?;
-                            Ok(())
+        let weak_repository = self.this.clone();
+        cx.spawn(async move |repository, cx| {
+            repository
+                .update(cx, |repository, _| {
+                    repository.send_job("stash_pop", None, move |git_repo, mut cx| async move {
+                        match git_repo {
+                            RepositoryState::Local(LocalRepositoryState {
+                                backend,
+                                environment,
+                                ..
+                            }) => {
+                                backend.stash_pop(index, environment).await?;
+                                refresh_fossil_snapshot_after_command(
+                                    weak_repository,
+                                    backend,
+                                    &mut cx,
+                                )
+                                .await?;
+                                Ok::<(), anyhow::Error>(())
+                            }
+                            RepositoryState::Remote(RemoteRepositoryState {
+                                project_id,
+                                client,
+                            }) => {
+                                client
+                                    .request(proto::StashPop {
+                                        project_id: project_id.0,
+                                        repository_id: id.to_proto(),
+                                        stash_index: index.map(|i| i as u64),
+                                    })
+                                    .await
+                                    .context("sending stash pop request")?;
+                                Ok::<(), anyhow::Error>(())
+                            }
                         }
-                    }
-                })
-            })?
-            .await??;
+                    })
+                })?
+                .await??;
             Ok(())
         })
     }
@@ -6603,30 +6631,44 @@ impl Repository {
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
         let id = self.id;
-        cx.spawn(async move |this, cx| {
-            this.update(cx, |this, _| {
-                this.send_job("stash_apply", None, move |git_repo, _cx| async move {
-                    match git_repo {
-                        RepositoryState::Local(LocalRepositoryState {
-                            backend,
-                            environment,
-                            ..
-                        }) => backend.stash_apply(index, environment).await,
-                        RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                            client
-                                .request(proto::StashApply {
-                                    project_id: project_id.0,
-                                    repository_id: id.to_proto(),
-                                    stash_index: index.map(|i| i as u64),
-                                })
-                                .await
-                                .context("sending stash apply request")?;
-                            Ok(())
+        let weak_repository = self.this.clone();
+        cx.spawn(async move |repository, cx| {
+            repository
+                .update(cx, |repository, _| {
+                    repository.send_job("stash_apply", None, move |git_repo, mut cx| async move {
+                        match git_repo {
+                            RepositoryState::Local(LocalRepositoryState {
+                                backend,
+                                environment,
+                                ..
+                            }) => {
+                                backend.stash_apply(index, environment).await?;
+                                refresh_fossil_snapshot_after_command(
+                                    weak_repository,
+                                    backend,
+                                    &mut cx,
+                                )
+                                .await?;
+                                Ok::<(), anyhow::Error>(())
+                            }
+                            RepositoryState::Remote(RemoteRepositoryState {
+                                project_id,
+                                client,
+                            }) => {
+                                client
+                                    .request(proto::StashApply {
+                                        project_id: project_id.0,
+                                        repository_id: id.to_proto(),
+                                        stash_index: index.map(|i| i as u64),
+                                    })
+                                    .await
+                                    .context("sending stash apply request")?;
+                                Ok::<(), anyhow::Error>(())
+                            }
                         }
-                    }
-                })
-            })?
-            .await??;
+                    })
+                })?
+                .await??;
             Ok(())
         })
     }

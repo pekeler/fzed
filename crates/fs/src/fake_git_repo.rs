@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{FakeFs, FakeFsEntry, Fs, RemoveOptions, RenameOptions};
 use anyhow::{Context as _, Result, bail};
@@ -16,7 +16,7 @@ use git::{
         GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, RefEdit,
         Remote, RepoPath, RepositoryKind, ResetMode, SearchCommitArgs, Worktree,
     },
-    stash::GitStash,
+    stash::{GitStash, StashEntry},
     status::{
         DiffTreeType, FileStatus, GitStatus, StatusCode, TrackedStatus, TreeDiff, TreeDiffStatus,
         UnmergedStatus,
@@ -26,7 +26,7 @@ use gpui::{AsyncApp, BackgroundExecutor, SharedString, Task};
 use ignore::gitignore::GitignoreBuilder;
 use parking_lot::Mutex;
 use rope::Rope;
-use std::{path::PathBuf, sync::Arc, sync::atomic::AtomicBool};
+use std::sync::{Arc, atomic::AtomicBool};
 use text::LineEnding;
 use util::{paths::PathStyle, rel_path::RelPath};
 
@@ -78,6 +78,7 @@ pub struct FakeGitRepositoryState {
     pub graph_commits: Vec<Arc<InitialGraphCommitData>>,
     pub commit_data: HashMap<Oid, FakeCommitDataEntry>,
     pub stash_entries: GitStash,
+    pub stash_contents: Vec<HashMap<RepoPath, Option<String>>>,
 }
 
 impl FakeGitRepositoryState {
@@ -103,6 +104,7 @@ impl FakeGitRepositoryState {
             commit_data: Default::default(),
             commit_history: Vec::new(),
             stash_entries: Default::default(),
+            stash_contents: Default::default(),
         }
     }
 }
@@ -157,6 +159,80 @@ impl FakeGitRepository {
             }
         }
         None
+    }
+
+    fn workdir_path(&self) -> Result<&Path> {
+        self.dot_git_path
+            .parent()
+            .context("repository has no working directory")
+    }
+
+    fn read_worktree_contents(&self, path: &RepoPath) -> Option<String> {
+        let workdir_path = self.workdir_path().ok()?;
+        self.fs
+            .read_file_sync(workdir_path.join(path.as_std_path()))
+            .ok()
+            .and_then(|content| String::from_utf8(content).ok())
+    }
+
+    fn write_worktree_contents_without_event(
+        &self,
+        contents: impl IntoIterator<Item = (RepoPath, Option<String>)>,
+    ) -> Result<()> {
+        let workdir_path = self.workdir_path()?.to_path_buf();
+        let mut fs_state = self.fs.state.lock();
+
+        for (repo_path, content) in contents {
+            let path = workdir_path.join(repo_path.as_std_path());
+            match content {
+                Some(content) => {
+                    let inode = fs_state.get_and_increment_inode();
+                    let mtime = fs_state.get_and_increment_mtime();
+                    let content = content.into_bytes();
+                    let len = content.len() as u64;
+                    fs_state.write_path(&path, |entry| {
+                        match entry {
+                            std::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(FakeFsEntry::File {
+                                    inode,
+                                    mtime,
+                                    len,
+                                    content,
+                                    git_dir_path: None,
+                                });
+                            }
+                            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                                let FakeFsEntry::File {
+                                    inode: existing_inode,
+                                    mtime: existing_mtime,
+                                    len: existing_len,
+                                    content: existing_content,
+                                    ..
+                                } = entry.get_mut()
+                                else {
+                                    bail!("not a file: {}", path.display());
+                                };
+                                *existing_inode = inode;
+                                *existing_mtime = mtime;
+                                *existing_len = len;
+                                *existing_content = content;
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
+                None => {
+                    fs_state.write_path(&path, |entry| {
+                        if let std::collections::btree_map::Entry::Occupied(entry) = entry {
+                            entry.remove();
+                        }
+                        Ok(())
+                    })?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -1056,26 +1132,113 @@ impl GitRepository for FakeGitRepository {
 
     fn stash_paths(
         &self,
-        _paths: Vec<RepoPath>,
+        paths: Vec<RepoPath>,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
-        unimplemented!()
+        let stashed_contents = paths
+            .iter()
+            .cloned()
+            .map(|path| {
+                let content = self.read_worktree_contents(&path);
+                (path, content)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let checkout_contents = self.fs.with_git_state(&self.dot_git_path, false, |state| {
+            let stash_number = state.stash_contents.len() + 1;
+            let oid_bytes = [stash_number as u8; 20];
+            let oid = Oid::from_bytes(&oid_bytes)?;
+            let mut entries = state.stash_entries.entries.to_vec();
+            entries.insert(
+                0,
+                StashEntry {
+                    index: 0,
+                    oid,
+                    message: "fake stash".into(),
+                    branch: state.current_branch_name.clone(),
+                    timestamp: 0,
+                },
+            );
+            for (index, entry) in entries.iter_mut().enumerate() {
+                entry.index = index;
+            }
+            state.stash_entries.entries = entries.into();
+            state.stash_contents.insert(0, stashed_contents);
+
+            Ok(paths
+                .into_iter()
+                .map(|path| {
+                    let content = state.index_contents.get(&path).cloned();
+                    (path, content)
+                })
+                .collect::<Vec<_>>())
+        });
+
+        let result = checkout_contents
+            .and_then(|checkout_contents| checkout_contents)
+            .and_then(|checkout_contents| {
+                self.write_worktree_contents_without_event(checkout_contents)
+            });
+        future::ready(result).boxed()
     }
 
     fn stash_pop(
         &self,
-        _index: Option<usize>,
+        index: Option<usize>,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
-        unimplemented!()
+        let stashed_contents = self.fs.with_git_state(&self.dot_git_path, false, |state| {
+            let index = index.unwrap_or(0);
+            let entries = state.stash_entries.entries.to_vec();
+            let Some(position) = entries.iter().position(|entry| entry.index == index) else {
+                bail!("stash entry {index} not found");
+            };
+            let Some(stashed_contents) = state.stash_contents.get(position).cloned() else {
+                bail!("stash contents for entry {index} not found");
+            };
+
+            let mut entries = entries;
+            entries.remove(position);
+            for (index, entry) in entries.iter_mut().enumerate() {
+                entry.index = index;
+            }
+            state.stash_entries.entries = entries.into();
+            state.stash_contents.remove(position);
+            Ok(stashed_contents)
+        });
+
+        let result = stashed_contents
+            .and_then(|stashed_contents| stashed_contents)
+            .and_then(|stashed_contents| {
+                self.write_worktree_contents_without_event(stashed_contents)
+            });
+        future::ready(result).boxed()
     }
 
     fn stash_apply(
         &self,
-        _index: Option<usize>,
+        index: Option<usize>,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
-        unimplemented!()
+        let stashed_contents = self.fs.with_git_state(&self.dot_git_path, false, |state| {
+            let index = index.unwrap_or(0);
+            let entries = state.stash_entries.entries.to_vec();
+            let Some(position) = entries.iter().position(|entry| entry.index == index) else {
+                bail!("stash entry {index} not found");
+            };
+
+            let Some(stashed_contents) = state.stash_contents.get(position).cloned() else {
+                bail!("stash contents for entry {index} not found");
+            };
+            Ok(stashed_contents)
+        });
+
+        let result = stashed_contents
+            .and_then(|stashed_contents| stashed_contents)
+            .and_then(|stashed_contents| {
+                self.write_worktree_contents_without_event(stashed_contents)
+            });
+        future::ready(result).boxed()
     }
 
     fn stash_drop(

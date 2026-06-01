@@ -2198,6 +2198,89 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_fossil_project_diff_updates_after_undoing_deleted_added_text(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "foo.txt": "line 1\nadded first\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nadded second\nline 8\nline 9\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[(
+                "foo.txt",
+                "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\n".into(),
+            )],
+        );
+
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor.read(cx).rhs_editor().clone());
+        let mut cx = EditorTestContext::for_editor_in(editor, cx).await;
+
+        cx.assert_state_with_diff(
+            "
+              ˇline 1
+            + added first
+              line 2
+              line 3
+              line 4
+              line 6
+              line 7
+            + added second
+              line 8
+              line 9
+            "
+            .unindent(),
+        );
+
+        cx.set_selections_state(
+            "line 1\n«added first\nˇ»line 2\nline 3\nline 4\nline 6\nline 7\nadded second\nline 8\nline 9\n",
+        );
+        cx.update_editor(|editor, window, cx| {
+            editor.delete(&editor::actions::Delete, window, cx);
+        });
+        cx.run_until_parked();
+        cx.update_editor(|editor, window, cx| {
+            editor.undo(&editor::actions::Undo, window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.set_selections_state(
+            "ˇline 1\nadded first\nline 2\nline 3\nline 4\nline 6\nline 7\nadded second\nline 8\nline 9\n",
+        );
+        cx.assert_state_with_diff(
+            "
+              ˇline 1
+            + added first
+              line 2
+              line 3
+              line 4
+              line 6
+              line 7
+            + added second
+              line 8
+              line 9
+            "
+            .unindent(),
+        );
+    }
+
+    #[gpui::test]
     async fn test_scroll_to_beginning_with_deletion(cx: &mut TestAppContext) {
         init_test(cx);
 

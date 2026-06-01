@@ -11041,6 +11041,72 @@ async fn test_fossil_repository_file_selection_state(
 }
 
 #[gpui::test]
+async fn test_fossil_stash_commands_refresh_repository_status(
+    executor: gpui::BackgroundExecutor,
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "my-repo": {
+                ".fslckout": {},
+                "tracked.txt": "stashed\n",
+            }
+        }),
+    )
+    .await;
+    fs.set_head_and_index_for_repo(
+        path!("/root/my-repo/.fslckout").as_ref(),
+        &[("tracked.txt", "initial\n".into())],
+    );
+
+    let project = Project::test(fs.clone(), [path!("/root/my-repo").as_ref()], cx).await;
+    project
+        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .await;
+    cx.run_until_parked();
+
+    let repo = project.read_with(cx, |project, cx| {
+        project.repositories(cx).values().next().unwrap().clone()
+    });
+    repo.read_with(cx, |repo, _| {
+        assert_eq!(repo.kind(), RepositoryKind::Fossil);
+        assert_eq!(
+            repo.status_for_path(&repo_path("tracked.txt"))
+                .map(|entry| entry.status),
+            Some(StatusCode::Modified.worktree())
+        );
+    });
+
+    repo.update(cx, |repo, cx| repo.stash_all(cx))
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    repo.read_with(cx, |repo, _| {
+        assert_eq!(repo.status_for_path(&repo_path("tracked.txt")), None);
+        assert_eq!(repo.cached_stash().entries.len(), 1);
+    });
+
+    repo.update(cx, |repo, cx| repo.stash_pop(None, cx))
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    repo.read_with(cx, |repo, _| {
+        assert_eq!(
+            repo.status_for_path(&repo_path("tracked.txt"))
+                .map(|entry| entry.status),
+            Some(StatusCode::Modified.worktree())
+        );
+        assert!(repo.cached_stash().entries.is_empty());
+    });
+}
+
+#[gpui::test]
 async fn test_add_path_to_fossil_ignore_glob(
     executor: gpui::BackgroundExecutor,
     cx: &mut gpui::TestAppContext,
