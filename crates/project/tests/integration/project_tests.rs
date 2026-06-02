@@ -11064,6 +11064,7 @@ async fn test_fossil_stash_commands_refresh_repository_status(
     );
 
     let project = Project::test(fs.clone(), [path!("/root/my-repo").as_ref()], cx).await;
+    let tree = project.read_with(cx, |project, cx| project.worktrees(cx).next().unwrap());
     project
         .update(cx, |project, cx| project.git_scans_complete(cx))
         .await;
@@ -11091,7 +11092,30 @@ async fn test_fossil_stash_commands_refresh_repository_status(
         assert_eq!(repo.cached_stash().entries.len(), 1);
     });
 
-    repo.update(cx, |repo, cx| repo.stash_pop(None, cx))
+    fs.insert_file(
+        path!("/root/my-repo/tracked.txt"),
+        b"second stashed\n".to_vec(),
+    )
+    .await;
+    tree.flush_fs_events(cx).await;
+    project
+        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .await;
+    cx.run_until_parked();
+
+    repo.update(cx, |repo, cx| repo.stash_all(cx))
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    repo.read_with(cx, |repo, _| {
+        assert_eq!(repo.status_for_path(&repo_path("tracked.txt")), None);
+        assert_eq!(repo.cached_stash().entries.len(), 2);
+        assert_eq!(repo.cached_stash().entries[0].index, 0);
+        assert_eq!(repo.cached_stash().entries[1].index, 1);
+    });
+
+    repo.update(cx, |repo, cx| repo.stash_pop(Some(1), cx))
         .await
         .unwrap();
     cx.run_until_parked();
@@ -11102,8 +11126,15 @@ async fn test_fossil_stash_commands_refresh_repository_status(
                 .map(|entry| entry.status),
             Some(StatusCode::Modified.worktree())
         );
-        assert!(repo.cached_stash().entries.is_empty());
+        assert_eq!(repo.cached_stash().entries.len(), 1);
+        assert_eq!(repo.cached_stash().entries[0].index, 0);
     });
+    assert_eq!(
+        fs.load(path!("/root/my-repo/tracked.txt").as_ref())
+            .await
+            .unwrap(),
+        "stashed\n"
+    );
 }
 
 #[gpui::test]

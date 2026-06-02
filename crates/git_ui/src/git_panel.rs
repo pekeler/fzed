@@ -351,6 +351,11 @@ fn git_panel_context_menu(
                 "Pop Stash",
                 StashPop.boxed_clone(),
             )
+            .action_disabled_when(
+                !state.can_stash || !state.has_stash_items,
+                "Apply Stash",
+                StashApply.boxed_clone(),
+            )
             .action("View Stash", zed_actions::git::ViewStash.boxed_clone())
             .separator()
             .action("Open Diff", project_diff::Diff.boxed_clone())
@@ -7379,6 +7384,7 @@ impl Render for GitPanel {
             .when(has_stash_access && !project.is_read_only(cx), |this| {
                 this.on_action(cx.listener(Self::stash_all))
                     .on_action(cx.listener(Self::stash_pop))
+                    .on_action(cx.listener(Self::stash_apply))
             })
             .on_action(cx.listener(Self::collapse_selected_entry))
             .on_action(cx.listener(Self::expand_selected_entry))
