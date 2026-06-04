@@ -1133,8 +1133,12 @@ impl GitRepository for FakeGitRepository {
     fn stash_paths(
         &self,
         paths: Vec<RepoPath>,
+        message: Option<String>,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
+        let message = message
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| "fake stash".to_string());
         let stashed_contents = paths
             .iter()
             .cloned()
@@ -1154,7 +1158,7 @@ impl GitRepository for FakeGitRepository {
                 StashEntry {
                     index: 0,
                     oid,
-                    message: "fake stash".into(),
+                    message: message.into(),
                     branch: state.current_branch_name.clone(),
                     timestamp: 0,
                 },

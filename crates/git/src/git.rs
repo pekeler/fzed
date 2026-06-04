@@ -66,6 +66,8 @@ actions!(
         UnstageAll,
         /// Stashes all changes in the repository, including untracked files.
         StashAll,
+        /// Saves a stash using the current commit/check-in selection and message editor.
+        SaveStash,
         /// Pops the most recent stash.
         StashPop,
         /// Apply the most recent stash.

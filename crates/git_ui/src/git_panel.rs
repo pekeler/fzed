@@ -35,9 +35,9 @@ use git::stash::GitStash;
 use git::status::{DiffStat, StageStatus};
 use git::{Amend, Commit, Signoff, ToggleStaged, repository::RepoPath, status::FileStatus};
 use git::{
-    ExpandCommitEditor, GitHostingProviderRegistry, GitRemote, RestoreTrackedFiles, StageAll,
-    StashAll, StashApply, StashPop, ToggleFillCommitEditor, TrashUntrackedFiles, UnstageAll,
-    parse_git_remote_url,
+    ExpandCommitEditor, GitHostingProviderRegistry, GitRemote, RestoreTrackedFiles, SaveStash,
+    StageAll, StashAll, StashApply, StashPop, ToggleFillCommitEditor, TrashUntrackedFiles,
+    UnstageAll, parse_git_remote_url,
 };
 use gpui::{
     AbsoluteLength, Action, Anchor, AsyncApp, AsyncWindowContext, Bounds, ClickEvent, DismissEvent,
@@ -2466,6 +2466,59 @@ impl GitPanel {
         .detach();
     }
 
+    pub fn save_stash(&mut self, _: &SaveStash, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active_repository) = self.active_repository.clone() else {
+            return;
+        };
+
+        let (paths, repository_kind) = {
+            let repository = active_repository.read(cx);
+            (self.stash_selection_paths(repository), repository.kind())
+        };
+
+        if paths.is_empty() {
+            let prompt = window.prompt(
+                PromptLevel::Warning,
+                "No changes to stash",
+                None,
+                &["Ok"],
+                cx,
+            );
+            cx.spawn(async move |_, _| {
+                prompt.await.ok();
+            })
+            .detach();
+            return;
+        }
+
+        let message = self.custom_stash_message(window, cx);
+        let stash_error_action = if repository_kind.is_fossil() {
+            "fossil stash"
+        } else {
+            "stash"
+        };
+        let stash_task = active_repository.update(cx, |repo, cx| {
+            repo.stash_entries_with_message(paths, message, cx)
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = stash_task.await;
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {
+                        this.commit_editor
+                            .update(cx, |editor, cx| editor.clear(window, cx));
+                        this.original_commit_message = None;
+                    }
+                    Err(e) => this.show_error_toast(stash_error_action, e, cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn commit_message_buffer(&self, cx: &App) -> Entity<Buffer> {
         self.commit_editor
             .read(cx)
@@ -2702,10 +2755,6 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        let git_commit_language = self
-            .commit_editor
-            .read(cx)
-            .language_at(MultiBufferOffset(0), cx);
         let message = self.commit_editor.read(cx).text(cx);
         if message.is_empty() {
             return self
@@ -2714,6 +2763,27 @@ impl GitPanel {
         } else if message.trim().is_empty() {
             return None;
         }
+        self.rewrap_commit_editor_text(message, window, cx)
+    }
+
+    fn custom_stash_message(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
+        let message = self.commit_editor.read(cx).text(cx);
+        if message.trim().is_empty() {
+            return None;
+        }
+        self.rewrap_commit_editor_text(message, window, cx)
+    }
+
+    fn rewrap_commit_editor_text(
+        &self,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let git_commit_language = self
+            .commit_editor
+            .read(cx)
+            .language_at(MultiBufferOffset(0), cx);
         let buffer = cx.new(|cx| {
             let mut buffer = Buffer::local(message, cx);
             buffer.set_language(git_commit_language, cx);
@@ -4503,6 +4573,27 @@ impl GitPanel {
         self.tracked_count > 0
     }
 
+    fn stash_selection_paths(&self, repository: &Repository) -> Vec<RepoPath> {
+        let use_staged_selection = self.has_staged_changes();
+
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.status_entry())
+            .filter(|status_entry| {
+                if repository.kind().is_fossil() && status_entry.status.is_created() {
+                    return false;
+                }
+
+                if use_staged_selection {
+                    Self::stage_status_for_entry(status_entry, repository).has_staged()
+                } else {
+                    !status_entry.status.is_created()
+                }
+            })
+            .map(|status_entry| status_entry.repo_path.clone())
+            .collect()
+    }
+
     pub fn has_unstaged_conflicts(&self) -> bool {
         self.conflicted_count > 0 && self.conflicted_count != self.conflicted_staged_count
     }
@@ -4663,6 +4754,29 @@ impl GitPanel {
             } else {
                 !self.has_unstaged_conflicts()
             }
+    }
+
+    fn can_save_stash_from_commit_selection(&self, cx: &App) -> bool {
+        if !self.has_write_access(cx)
+            || !self.can_stash_active_repository(cx)
+            || self.pending_commit.is_some()
+            || self.amend_pending
+        {
+            return false;
+        }
+
+        if self.active_repository_kind(cx).is_fossil() {
+            if self.conflicted_count > 0 {
+                return false;
+            }
+        } else if self.has_unstaged_conflicts() {
+            return false;
+        }
+
+        let Some(repository) = self.active_repository.as_ref() else {
+            return false;
+        };
+        !self.stash_selection_paths(repository.read(cx)).is_empty()
     }
 
     pub fn can_stage_all(&self, cx: &App) -> bool {
@@ -4928,6 +5042,7 @@ impl GitPanel {
                 let amend = self.amend_pending();
                 let signoff = self.signoff_enabled;
                 let repository_kind = self.active_repository_kind(cx);
+                let can_save_stash = self.can_save_stash_from_commit_selection(cx);
 
                 move |window, cx| {
                     Some(ContextMenu::build(window, cx, |context_menu, _, _| {
@@ -4965,6 +5080,12 @@ impl GitPanel {
                                     move |window, cx| window.dispatch_action(Box::new(Signoff), cx),
                                 )
                             })
+                            .when(!repository_kind.is_fossil(), |this| this.separator())
+                            .action_disabled_when(
+                                !can_save_stash,
+                                "Save Stash",
+                                SaveStash.boxed_clone(),
+                            )
                     }))
                 }
             })
@@ -7385,6 +7506,7 @@ impl Render for GitPanel {
                 this.on_action(cx.listener(Self::stash_all))
                     .on_action(cx.listener(Self::stash_pop))
                     .on_action(cx.listener(Self::stash_apply))
+                    .on_action(cx.listener(Self::save_stash))
             })
             .on_action(cx.listener(Self::collapse_selected_entry))
             .on_action(cx.listener(Self::expand_selected_entry))
@@ -8782,6 +8904,150 @@ mod tests {
         assert_eq!(
             panel.update(cx, |panel, cx| panel.configure_commit_button(cx)),
             (true, "Check In")
+        );
+    }
+
+    #[gpui::test]
+    async fn test_fossil_save_stash_uses_check_in_selection_and_message(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/root",
+            json!({
+                "project": {
+                    ".fslckout": {},
+                    "tracked": "tracked\n",
+                    "other": "other\n",
+                    "extra": "extra\n",
+                },
+            }),
+        )
+        .await;
+
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/root/project/.fslckout")),
+            &[
+                ("tracked", "old tracked\n".into()),
+                ("other", "old other\n".into()),
+            ],
+        );
+
+        let project = Project::test(fs.clone(), [Path::new(path!("/root/project"))], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+        cx.executor().run_until_parked();
+
+        let panel = workspace.update_in(cx, GitPanel::new);
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        panel.update(cx, |panel, cx| {
+            panel.commit_message_buffer(cx).update(cx, |buffer, cx| {
+                buffer.set_text("stash selected tracked", cx);
+            });
+        });
+
+        let tracked_entry = panel
+            .read_with(cx, |panel, _| {
+                panel.entries.iter().find_map(|entry| match entry {
+                    GitListEntry::Status(entry) if entry.repo_path == repo_path("tracked") => {
+                        Some(GitListEntry::Status(entry.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap();
+        panel.update_in(cx, |panel, window, cx| {
+            panel.toggle_staged_for_entry(&tracked_entry, window, cx);
+        });
+
+        cx.read(|cx| {
+            project
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .as_local()
+                .unwrap()
+                .scan_complete()
+        })
+        .await;
+        cx.executor().run_until_parked();
+
+        let handle = cx.update_window_entity(&panel, |panel, _, _| {
+            std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+        });
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        handle.await;
+
+        panel.read_with(cx, |panel, cx| {
+            let repository = panel.active_repository().unwrap().read(cx);
+            assert!(repository.fossil_path_included_for_check_in(&repo_path("tracked")));
+            assert!(panel.can_save_stash_from_commit_selection(cx));
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.save_stash(&git::SaveStash, window, cx);
+        });
+        cx.executor().run_until_parked();
+
+        let repo = project.read_with(cx, |project, cx| {
+            project.repositories(cx).values().next().unwrap().clone()
+        });
+        repo.read_with(cx, |repo, _| {
+            assert_eq!(repo.cached_stash().entries.len(), 1);
+            assert_eq!(
+                repo.cached_stash().entries[0].message,
+                "stash selected tracked"
+            );
+            assert_eq!(repo.status_for_path(&repo_path("tracked")), None);
+            assert_eq!(
+                repo.status_for_path(&repo_path("other"))
+                    .map(|entry| entry.status),
+                Some(StatusCode::Modified.worktree())
+            );
+            assert!(
+                repo.status_for_path(&repo_path("extra"))
+                    .is_some_and(|entry| entry.status.is_created())
+            );
+        });
+
+        assert_eq!(
+            fs.load(path!("/root/project/tracked").as_ref())
+                .await
+                .unwrap(),
+            "old tracked\n"
+        );
+        assert_eq!(
+            fs.load(path!("/root/project/other").as_ref())
+                .await
+                .unwrap(),
+            "other\n"
+        );
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.commit_editor.read(cx).text(cx)),
+            ""
         );
     }
 

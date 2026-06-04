@@ -999,6 +999,7 @@ pub trait GitRepository: Send + Sync {
     fn stash_paths(
         &self,
         paths: Vec<RepoPath>,
+        message: Option<String>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
 
@@ -2319,14 +2320,27 @@ impl GitRepository for RealGitRepository {
     fn stash_paths(
         &self,
         paths: Vec<RepoPath>,
+        message: Option<String>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary_in_worktree();
         self.executor
             .spawn(async move {
                 let git = git_binary?;
+                let mut args = vec![
+                    "stash".to_string(),
+                    "push".to_string(),
+                    "--quiet".to_string(),
+                    "--include-untracked".to_string(),
+                ];
+                if let Some(message) = message.filter(|message| !message.trim().is_empty()) {
+                    args.push("-m".to_string());
+                    args.push(message);
+                }
+                args.push("--".to_string());
+
                 let output = git
-                    .build_command(&["stash", "push", "--quiet", "--include-untracked", "--"])
+                    .build_command(&args)
                     .envs(env.iter())
                     .args(paths.iter().map(|p| p.as_unix_str()))
                     .output()

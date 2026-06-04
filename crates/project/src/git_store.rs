@@ -2384,7 +2384,12 @@ impl GitStore {
 
         repository_handle
             .update(&mut cx, |repository_handle, cx| {
-                repository_handle.stash_entries(entries, cx)
+                repository_handle.stash_entries_with_message(
+                    entries,
+                    (!envelope.payload.message.trim().is_empty())
+                        .then_some(envelope.payload.message),
+                    cx,
+                )
             })
             .await?;
 
@@ -6531,8 +6536,18 @@ impl Repository {
         entries: Vec<RepoPath>,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<()>> {
+        self.stash_entries_with_message(entries, None, cx)
+    }
+
+    pub fn stash_entries_with_message(
+        &mut self,
+        entries: Vec<RepoPath>,
+        message: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
         let id = self.id;
         let weak_repository = self.this.clone();
+        let message = message.filter(|message| !message.trim().is_empty());
 
         cx.spawn(async move |repository, cx| {
             repository
@@ -6544,7 +6559,7 @@ impl Repository {
                                 environment,
                                 ..
                             }) => {
-                                backend.stash_paths(entries, environment).await?;
+                                backend.stash_paths(entries, message, environment).await?;
                                 refresh_fossil_snapshot_after_command(
                                     weak_repository,
                                     backend,
@@ -6565,6 +6580,7 @@ impl Repository {
                                             .into_iter()
                                             .map(|repo_path| repo_path.to_proto())
                                             .collect(),
+                                        message: message.unwrap_or_default(),
                                     })
                                     .await?;
                                 Ok::<(), anyhow::Error>(())

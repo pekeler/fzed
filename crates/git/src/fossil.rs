@@ -918,16 +918,20 @@ impl GitRepository for FossilRepository {
     fn stash_paths(
         &self,
         paths: Vec<RepoPath>,
+        message: Option<String>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
         let fossil = self.fossil_binary();
         self.executor
             .spawn(async move {
+                let message = message
+                    .filter(|message| !message.trim().is_empty())
+                    .unwrap_or_else(|| "fzed stash".to_string());
                 let mut args = vec![
                     OsString::from("stash"),
                     OsString::from("save"),
                     OsString::from("--comment"),
-                    OsString::from("fzed stash"),
+                    OsString::from(message),
                 ];
                 args.extend(repo_paths_to_args(paths));
                 fossil.run_with_env(&args, env).await?;
@@ -3067,6 +3071,7 @@ mod tests {
         repository
             .stash_paths(
                 vec![RepoPath::new("notes.txt").unwrap()],
+                Some("notes stash".to_string()),
                 Arc::new(HashMap::default()),
             )
             .await
@@ -3074,6 +3079,7 @@ mod tests {
         let stash_entries = repository.stash_entries().await.unwrap();
         assert_eq!(stash_entries.entries.len(), 1);
         let stash_entry = stash_entries.entries[0].clone();
+        assert_eq!(stash_entry.message, "notes stash");
         let stash_diff = repository
             .load_commit(stash_entry.oid.to_string(), cx.to_async())
             .await
