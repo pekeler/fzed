@@ -11,13 +11,15 @@ A skill is a folder containing a `SKILL.md` file with metadata and instructions.
 
 ## Adding Skills {#adding-skills}
 
-### Create Your Own {#create-your-own}
+### Create your own {#create-your-own}
 
-Zed includes a built-in `create-skill` skill that guides the agent through creating a new skill. Invoke it with `/create-skill`, or let the agent pick it up automatically when you ask it to help create a skill.
+Zed includes a built-in `create-skill` skill — invoke it with `/create-skill` and the agent walks you through the process.
+
+You can also open the Skill Creator from the Agent Panel using {#kb agent::OpenRulesLibrary}, or by clicking `...` and selecting **Skills**. Outside the panel, use the {#action agent::OpenSkillCreator} action from the command palette. It opens a window where you fill in the skill's name, description, scope (global or project-local), body, and optionally toggle `disable-model-invocation`.
 
 Lastly, it's also possible to add a skill through importing it from an existing GitHub Markdown file. Open the command palette and look for the {#action agent::CreateSkillFromUrl} action. If your clipboard contains a supported GitHub `.md` URL, Zed pre-fills and fetches it automatically.
 
-See [Skill format](#skill-format) below for the folder structure and `SKILL.md` reference.
+See [Skill format](#skill-format) below for the full format reference.
 
 ### From the skills.sh Registry {#from-the-registry}
 
@@ -27,18 +29,33 @@ See [Skill format](#skill-format) below for the folder structure and `SKILL.md` 
 - [`frontend-design`](https://skills.sh/anthropics/skills/frontend-design): production-grade frontend interfaces with design polish
 - [`pdf`](https://skills.sh/anthropics/skills/pdf): PDF text extraction, merging, splitting, form filling, and OCR
 
-To install a skill from it, copy or clone its folder into your global or project-local skills folder.
+To install a skill, copy the skill's folder into `~/.agents/skills/` for global use, or into your project's `.agents/skills/` folder for project-local use.
 
-For example, to install the `frontend-design` skill from GitHub globally:
+## Managing Skills {#managing-skills}
 
-```sh
-cd ~/.agents/skills
-git clone --filter=blob:none --sparse https://github.com/anthropics/skills
-cd skills
-git sparse-checkout set frontend-design
-```
+Open the Settings Editor (`Cmd+,` on macOS, `Ctrl+,` on Linux/Windows) and navigate to **AI > Skills**, or go directly to [agent.skills](zed://settings/agent.skills).
 
-For a project-local install, do the same inside your project's `.agents/skills/` folder.
+The **User** tab shows your global skills. The **Project** tab shows skills for the current project.
+
+For each skill you can:
+
+- **Open** — opens the skill's `SKILL.md` file in the editor
+- **Delete** — removes the skill folder from disk
+
+If no skills are installed, the page shows a **Create a Skill** button that opens the Skill Creator.
+
+## Managing Skills {#managing-skills}
+
+Open the Settings Editor (`Cmd+,` on macOS, `Ctrl+,` on Linux/Windows) and navigate to **AI > Skills**, or go directly to [agent.skills](zed://settings/agent.skills).
+
+The **User** tab shows your global skills. The **Project** tab shows skills for the current project.
+
+For each skill you can:
+
+- **Open** — opens the skill's `SKILL.md` file in the editor
+- **Delete** — removes the skill folder from disk
+
+If no skills are installed, the page shows a **Create a Skill** button that opens the Skill Creator.
 
 ## Using Skills {#using-skills}
 

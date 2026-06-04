@@ -41,6 +41,21 @@
   "lsp": {
     "rust-analyzer": {
       "initialization_options": {
+        "cargo": {
+          "allTargets": false,
+          "extraEnv": {
+            "CARGO_INCREMENTAL": "0",
+          },
+          "targetDir": "target/rust-analyzer",
+        },
+        "check": {
+          "allTargets": false,
+          "extraEnv": {
+            "CARGO_INCREMENTAL": "0",
+          },
+          "workspace": false,
+        },
+        "checkOnSave": false,
         "procMacro": {
           "processes": 4,
         },

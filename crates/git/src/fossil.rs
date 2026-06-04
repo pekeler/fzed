@@ -2,11 +2,11 @@ use crate::{
     Oid, RunHook,
     blame::Blame,
     repository::{
-        Branch, CommitData, CommitDataReader, CommitDetails, CommitDiff, CommitFile, CommitOptions,
-        CommitSummary, CreateWorktreeTarget, DiffType, FetchOptions, FossilSyncState,
-        GRAPH_CHUNK_SIZE, GitCommitTemplate, GitRepository, GitRepositoryCheckpoint,
-        InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput,
-        RepoPath, RepositoryKind, ResetMode, SearchCommitArgs, Worktree,
+        Branch, BranchesScanResult, CommitData, CommitDataReader, CommitDetails, CommitDiff,
+        CommitFile, CommitOptions, CommitSummary, CreateWorktreeTarget, DiffType, FetchOptions,
+        FossilSyncState, GRAPH_CHUNK_SIZE, GitCommitTemplate, GitRepository,
+        GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote,
+        RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode, SearchCommitArgs, Worktree,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -302,7 +302,7 @@ impl GitRepository for FossilRepository {
         .boxed()
     }
 
-    fn stash_entries(&self) -> BoxFuture<'_, Result<GitStash>> {
+    fn stash_entries(&self) -> BoxFuture<'static, Result<GitStash>> {
         let fossil = self.fossil_binary();
         self.executor
             .spawn(async move {
@@ -312,7 +312,7 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
-    fn branches(&self) -> BoxFuture<'_, Result<Vec<Branch>>> {
+    fn branches(&self) -> BoxFuture<'_, Result<BranchesScanResult>> {
         let fossil = self.fossil_binary();
         self.executor
             .spawn(async move {
@@ -359,7 +359,7 @@ impl GitRepository for FossilRepository {
                         most_recent_commit: current_commit,
                     });
                 }
-                Ok(branches)
+                Ok(BranchesScanResult::from(branches))
             })
             .boxed()
     }
@@ -1152,7 +1152,7 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
-    fn diff_stat(&self, path_prefixes: &[RepoPath]) -> BoxFuture<'_, Result<GitDiffStat>> {
+    fn diff_stat(&self, path_prefixes: &[RepoPath]) -> BoxFuture<'static, Result<GitDiffStat>> {
         let fossil = self.fossil_binary();
         let path_prefixes = path_prefixes.to_vec();
         self.executor
@@ -2541,7 +2541,7 @@ mod tests {
         )
         .unwrap();
 
-        let branches = repository.branches().await.unwrap();
+        let branches = repository.branches().await.unwrap().branches;
         assert_eq!(branches.len(), 1);
         assert_eq!(branches[0].name(), "feature");
         assert!(branches[0].is_head);
@@ -2837,7 +2837,7 @@ mod tests {
         std::fs::write(checkout.join("tracked.txt"), "modified\n").unwrap();
 
         let head = repository.head_sha().await.unwrap();
-        let branches = repository.branches().await.unwrap();
+        let branches = repository.branches().await.unwrap().branches;
         let head_branch = branches
             .iter()
             .find(|branch| branch.is_head && branch.name() == "trunk")
@@ -2856,6 +2856,7 @@ mod tests {
                 .branches()
                 .await
                 .unwrap()
+                .branches
                 .iter()
                 .any(|branch| branch.is_head && branch.name() == "feature")
         );
@@ -2896,6 +2897,7 @@ mod tests {
                 .branches()
                 .await
                 .unwrap()
+                .branches
                 .iter()
                 .any(|branch| branch.is_head && branch.name() == "trunk")
         );

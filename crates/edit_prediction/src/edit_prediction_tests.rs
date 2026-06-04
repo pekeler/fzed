@@ -3107,11 +3107,18 @@ async fn test_unauthenticated_without_custom_url_blocks_prediction_impl(cx: &mut
 
     let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
 
-    let http_client = FakeHttpClient::create(|_req| async move {
-        Ok(gpui::http_client::Response::builder()
-            .status(401)
-            .body("Unauthorized".into())
-            .unwrap())
+    let request_count = Arc::new(std::sync::atomic::AtomicUsize::default());
+    let http_client = FakeHttpClient::create({
+        let request_count = request_count.clone();
+        move |_req| {
+            request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Ok(gpui::http_client::Response::builder()
+                    .status(401)
+                    .body("Unauthorized".into())
+                    .unwrap())
+            }
+        }
     });
 
     let client =
@@ -3144,11 +3151,8 @@ async fn test_unauthenticated_without_custom_url_blocks_prediction_impl(cx: &mut
         ep_store.request_prediction(&project, &buffer, cursor, Default::default(), cx)
     });
 
-    let result = completion_task.await;
-    assert!(
-        result.is_err(),
-        "Without authentication and without custom URL, prediction should fail"
-    );
+    assert!(completion_task.await.unwrap().is_none());
+    assert_eq!(request_count.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[gpui::test]
@@ -3603,6 +3607,9 @@ async fn test_edit_prediction_settled_omits_body_when_data_collection_is_disable
                 tags: Vec::new(),
                 reasoning: None,
                 uncommitted_diff: String::new(),
+                recently_opened_files: Vec::new(),
+                recently_viewed_files: Vec::new(),
+                uncommitted_diff_contains_edit_history: false,
                 cursor_path: Path::new("foo.md").into(),
                 cursor_position: "0".to_string(),
                 edit_history: "sensitive edit history".to_string(),
@@ -3901,7 +3908,7 @@ async fn test_upsell_dismissed_via_dismissable_api(cx: &mut TestAppContext) {
     kvp.delete_kvp(ZedPredictUpsell::KEY.into()).await.unwrap();
 }
 
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn init_logger() {
     zlog::init_test();
 }

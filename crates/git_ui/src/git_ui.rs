@@ -42,6 +42,7 @@ pub mod fossil_setup;
 pub mod git_panel;
 mod git_panel_settings;
 pub mod git_picker;
+mod git_runtime_diagnostics;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
@@ -96,6 +97,18 @@ fn open_worktree_picker(
             cx,
         )
     });
+}
+
+pub fn get_provider_icon(name: &str) -> IconName {
+    match name {
+        "Bitbucket" => IconName::Bitbucket,
+        "Codeberg" => IconName::Codeberg,
+        "Forgejo Self-Hosted" => IconName::Forgejo,
+        "GitHub" => IconName::Github,
+        "GitLab" => IconName::Gitlab,
+        "Gitea" => IconName::Gitea,
+        _ => IconName::Link,
+    }
 }
 
 pub fn init(cx: &mut App) {

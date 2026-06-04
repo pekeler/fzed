@@ -11790,9 +11790,9 @@ async fn test_fold_function_bodies(cx: &mut TestAppContext) {
             fn b() {
                 c();
             }
-
-      -     // this is another uncommitted comment
       -
+      -     // this is another uncommitted comment
+
             fn d() {
                 // e
                 // f
@@ -28065,7 +28065,7 @@ async fn test_breakpoint_toggling(cx: &mut TestAppContext) {
         )
     });
 
-    let project_path = editor.update(cx, |editor, cx| editor.project_path(cx).unwrap());
+    let project_path = editor.update(cx, |editor, cx| editor.active_project_path(cx).unwrap());
     let abs_path = project.read_with(cx, |project, cx| {
         project
             .absolute_path(&project_path, cx)
@@ -28215,7 +28215,8 @@ async fn test_breakpoint_after_save_as_existing_path(cx: &mut TestAppContext) {
         editor.toggle_breakpoint(&actions::ToggleBreakpoint, window, cx);
     });
 
-    let project_path = first_editor.update(cx, |editor, cx| editor.project_path(cx).unwrap());
+    let project_path =
+        first_editor.update(cx, |editor, cx| editor.active_project_path(cx).unwrap());
     let abs_path = project.read_with(cx, |project, cx| {
         project
             .absolute_path(&project_path, cx)
@@ -28283,7 +28284,7 @@ async fn test_log_breakpoint_editing(cx: &mut TestAppContext) {
         )
     });
 
-    let project_path = editor.update(cx, |editor, cx| editor.project_path(cx).unwrap());
+    let project_path = editor.update(cx, |editor, cx| editor.active_project_path(cx).unwrap());
     let abs_path = project.read_with(cx, |project, cx| {
         project
             .absolute_path(&project_path, cx)
@@ -28454,7 +28455,7 @@ async fn test_breakpoint_enabling_and_disabling(cx: &mut TestAppContext) {
         )
     });
 
-    let project_path = editor.update(cx, |editor, cx| editor.project_path(cx).unwrap());
+    let project_path = editor.update(cx, |editor, cx| editor.active_project_path(cx).unwrap());
     let abs_path = project.read_with(cx, |project, cx| {
         project
             .absolute_path(&project_path, cx)
@@ -28615,9 +28616,9 @@ impl BookmarkTestContext {
     }
 
     fn abs_path(&self) -> Arc<Path> {
-        let project_path = self
-            .editor
-            .read_with(&self.cx, |editor, cx| editor.project_path(cx).unwrap());
+        let project_path = self.editor.read_with(&self.cx, |editor, cx| {
+            editor.active_project_path(cx).unwrap()
+        });
         self.project.read_with(&self.cx, |project, cx| {
             project
                 .absolute_path(&project_path, cx)

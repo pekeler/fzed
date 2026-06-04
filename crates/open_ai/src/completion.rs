@@ -21,11 +21,21 @@ use crate::responses::{
 };
 use crate::{
     FunctionContent, FunctionDefinition, ImageUrl, MessagePart, ReasoningEffort,
-    ResponseStreamEvent, ToolCall, ToolCallContent,
+    ResponseStreamEvent, ServiceTier, ToolCall, ToolCallContent,
 };
 
 const RESPONSE_MESSAGE_PHASE_COMMENTARY: &str = "commentary";
 const RESPONSE_MESSAGE_PHASE_FINAL_ANSWER: &str = "final_answer";
+
+/// Translates the request's `Speed` into the corresponding OpenAI service tier.
+/// Only `Fast` produces a value; `Standard` leaves the field unset so that the
+/// project's default tier applies.
+fn service_tier_for(speed: Option<language_model_core::Speed>) -> Option<ServiceTier> {
+    match speed? {
+        language_model_core::Speed::Fast => Some(ServiceTier::Priority),
+        language_model_core::Speed::Standard => None,
+    }
+}
 
 pub fn into_open_ai(
     request: LanguageModelRequest,
@@ -37,6 +47,7 @@ pub fn into_open_ai(
     interleaved_reasoning: bool,
 ) -> crate::Request {
     let stream = !model_id.starts_with("o1-");
+    let service_tier = service_tier_for(request.speed);
 
     let mut messages = Vec::new();
     let mut current_reasoning: Option<String> = None;
@@ -173,6 +184,7 @@ pub fn into_open_ai(
             LanguageModelToolChoice::None => crate::ToolChoice::None,
         }),
         reasoning_effort,
+        service_tier,
     }
 }
 
@@ -198,8 +210,10 @@ pub fn into_open_ai_response(
         temperature,
         thinking_allowed,
         thinking_effort,
-        speed: _,
+        speed,
     } = request;
+
+    let service_tier = service_tier_for(speed);
 
     let mut input_items = Vec::new();
     let mut replayed_reasoning_item_indexes = HashMap::default();
@@ -284,6 +298,7 @@ pub fn into_open_ai_response(
             None
         },
         reasoning,
+        service_tier,
     }
 }
 
@@ -302,14 +317,14 @@ fn append_message_to_response_items(
         ..
     } = message;
     let phase = if role == Role::Assistant {
-        response_message_phase_from_details(reasoning_details.as_ref())
+        response_message_phase_from_details(reasoning_details.as_deref())
     } else {
         None
     };
 
     if role == Role::Assistant {
         append_reasoning_details_to_response_items(
-            reasoning_details.as_ref(),
+            reasoning_details.as_deref(),
             replayed_reasoning_item_indexes,
             input_items,
         );
@@ -1175,7 +1190,7 @@ mod tests {
     use language_model_core::{
         LanguageModelImage, LanguageModelRequestMessage, LanguageModelRequestTool,
         LanguageModelToolResult, LanguageModelToolResultContent, LanguageModelToolUse,
-        LanguageModelToolUseId, SharedString,
+        LanguageModelToolUseId, SharedString, Speed,
     };
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -1488,7 +1503,7 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![MessageContent::ToolUse(tool_use)],
                 cache: false,
-                reasoning_details: Some(json!({
+                reasoning_details: Some(Arc::new(json!({
                     "reasoning_items": [
                         {
                             "id": "rs_123",
@@ -1508,7 +1523,7 @@ mod tests {
                             "status": "completed",
                         }
                     ]
-                })),
+                }))),
             }],
             tools: Vec::new(),
             tool_choice: None,
@@ -1576,7 +1591,7 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![MessageContent::Text("Done.".into())],
                 cache: false,
-                reasoning_details: Some(json!({
+                reasoning_details: Some(Arc::new(json!({
                     "reasoning_items": [
                         {
                             "id": "rs_123",
@@ -1590,7 +1605,7 @@ mod tests {
                             "status": "completed"
                         }
                     ]
-                })),
+                }))),
             }],
             tools: Vec::new(),
             tool_choice: None,
@@ -1669,6 +1684,90 @@ mod tests {
 
         let serialized = serde_json::to_value(&response).unwrap();
         assert_eq!(serialized.get("reasoning"), None);
+    }
+
+    /// `Speed::Fast` should translate to `service_tier: "priority"` on the
+    /// outgoing Responses request, while `Standard` / `None` should leave the
+    /// field unset so the project's default tier wins.
+    #[test]
+    fn into_open_ai_response_sets_service_tier_for_fast_speed() -> Result<()> {
+        for (speed, expected) in [
+            (None, None),
+            (Some(Speed::Standard), None),
+            (Some(Speed::Fast), Some("priority")),
+        ] {
+            let request = LanguageModelRequest {
+                thread_id: None,
+                prompt_id: None,
+                intent: None,
+                messages: vec![LanguageModelRequestMessage {
+                    role: Role::User,
+                    content: vec![MessageContent::Text("Hello".into())],
+                    cache: false,
+                    reasoning_details: None,
+                }],
+                tools: Vec::new(),
+                tool_choice: None,
+                stop: Vec::new(),
+                temperature: None,
+                thinking_allowed: false,
+                thinking_effort: None,
+                speed,
+            };
+
+            let response = into_open_ai_response(request, "gpt-5.4", true, true, None, None, true);
+
+            let serialized = serde_json::to_value(&response)?;
+            assert_eq!(
+                serialized
+                    .get("service_tier")
+                    .and_then(|value| value.as_str()),
+                expected,
+                "speed = {speed:?} should produce service_tier = {expected:?}",
+            );
+        }
+        Ok(())
+    }
+
+    /// Same as above but for the Chat Completions code path.
+    #[test]
+    fn into_open_ai_sets_service_tier_for_fast_speed() -> Result<()> {
+        for (speed, expected) in [
+            (None, None),
+            (Some(Speed::Standard), None),
+            (Some(Speed::Fast), Some("priority")),
+        ] {
+            let request = LanguageModelRequest {
+                thread_id: None,
+                prompt_id: None,
+                intent: None,
+                messages: vec![LanguageModelRequestMessage {
+                    role: Role::User,
+                    content: vec![MessageContent::Text("Hello".into())],
+                    cache: false,
+                    reasoning_details: None,
+                }],
+                tools: Vec::new(),
+                tool_choice: None,
+                stop: Vec::new(),
+                temperature: None,
+                thinking_allowed: false,
+                thinking_effort: None,
+                speed,
+            };
+
+            let chat = into_open_ai(request, "gpt-5.4", true, true, None, None, false);
+
+            let serialized = serde_json::to_value(&chat)?;
+            assert_eq!(
+                serialized
+                    .get("service_tier")
+                    .and_then(|value| value.as_str()),
+                expected,
+                "speed = {speed:?} should produce service_tier = {expected:?}",
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -1759,7 +1858,7 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![MessageContent::Text("Done.".into())],
                 cache: false,
-                reasoning_details: Some(json!({
+                reasoning_details: Some(Arc::new(json!({
                     "phase": "final_answer",
                     "reasoning_items": [
                         {
@@ -1769,7 +1868,7 @@ mod tests {
                             "status": "completed"
                         }
                     ]
-                })),
+                }))),
             }],
             tools: Vec::new(),
             tool_choice: None,
@@ -1851,13 +1950,13 @@ mod tests {
                     role: Role::Assistant,
                     content: vec![MessageContent::Text("First.".into())],
                     cache: false,
-                    reasoning_details: Some(first_reasoning_details),
+                    reasoning_details: Some(Arc::new(first_reasoning_details)),
                 },
                 LanguageModelRequestMessage {
                     role: Role::Assistant,
                     content: vec![MessageContent::Text("Second.".into())],
                     cache: false,
-                    reasoning_details: Some(second_reasoning_details),
+                    reasoning_details: Some(Arc::new(second_reasoning_details)),
                 },
             ],
             tools: Vec::new(),
@@ -1931,7 +2030,7 @@ mod tests {
                     MessageContent::Text("This is visible assistant output.".into()),
                 ],
                 cache: false,
-                reasoning_details: Some(json!({
+                reasoning_details: Some(Arc::new(json!({
                     "reasoning_items": [
                         {
                             "id": "rs_123",
@@ -1945,7 +2044,7 @@ mod tests {
                             "status": "completed"
                         }
                     ]
-                })),
+                }))),
             }],
             tools: Vec::new(),
             tool_choice: None,

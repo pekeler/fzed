@@ -43,10 +43,10 @@ use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore, ThreadMetadata
 use crate::{
     AddContextServer, AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow,
     LoadThreadFromClipboard, NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown,
-    OpenAgentDiff, ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
-    ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
+    OpenAgentDiff, ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell,
+    ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
     agent_configuration::{AgentConfiguration, AssistantConfigurationEvent},
-    conversation_view::{AcpThreadViewEvent, ThreadView},
+    conversation_view::{AcpThreadViewEvent, ThreadView, reset_fast_mode_warnings},
     ui::{AgentNotification, AgentNotificationEvent, EndTrialUpsell},
 };
 use crate::{
@@ -63,7 +63,6 @@ use client::{UserStore, zed_urls};
 use cloud_api_types::Plan;
 use collections::HashMap;
 use editor::{Editor, MultiBuffer};
-use extension::ExtensionEvents;
 use extension_host::ExtensionStore;
 
 use fs::Fs;
@@ -443,6 +442,9 @@ pub fn init(cx: &mut App) {
                 })
                 .register_action(|_workspace, _: &ResetTrialEndUpsell, _window, cx| {
                     TrialEndUpsell::set_dismissed(false, cx);
+                })
+                .register_action(|_workspace, _: &ResetFastModeWarnings, _window, cx| {
+                    reset_fast_mode_warnings(cx);
                 })
                 .register_action(|workspace, _: &ResetAgentZoom, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
@@ -1319,21 +1321,14 @@ impl AgentPanel {
         });
 
         // Subscribe to extension events to sync agent servers when extensions change
-        let extension_subscription = if let Some(extension_events) = ExtensionEvents::try_global(cx)
-        {
-            Some(
-                cx.subscribe(&extension_events, |this, _source, event, cx| match event {
-                    extension::Event::ExtensionInstalled(_)
-                    | extension::Event::ExtensionUninstalled(_)
-                    | extension::Event::ExtensionsInstalledChanged => {
-                        this.sync_agent_servers_from_extensions(cx);
-                    }
-                    _ => {}
-                }),
-            )
-        } else {
-            None
-        };
+        let extension_subscription = ExtensionStore::try_global(cx).map(|store| {
+            cx.subscribe(&store, |this, _source, event, cx| match event {
+                extension_host::Event::ExtensionUninstalled(id) => {
+                    this.migrate_agent_server_from_extensions(id.clone(), cx);
+                }
+                _ => {}
+            })
+        });
 
         let connection_store = cx.new(|cx| AgentConnectionStore::new(project.clone(), cx));
         let _project_subscription =
@@ -1365,7 +1360,7 @@ impl AgentPanel {
         })
         .detach();
 
-        let mut panel = Self {
+        let panel = Self {
             workspace_id,
             base_view,
             last_created_entry_kind: AgentPanelEntryKind::Thread,
@@ -1406,8 +1401,6 @@ impl AgentPanel {
             is_active: false,
         };
 
-        // Initial sync of agent servers from extensions
-        panel.sync_agent_servers_from_extensions(cx);
         panel.ensure_native_agent_connection(cx);
         panel
     }
@@ -3718,6 +3711,22 @@ impl AgentPanel {
         }
     }
 
+    pub fn conversation_view_for_id(
+        &self,
+        thread_id: &ThreadId,
+        cx: &App,
+    ) -> Option<&Entity<ConversationView>> {
+        self.retained_threads.get(thread_id).or_else(|| {
+            if let Some(view) = self.active_conversation_view()
+                && view.read(cx).thread_id == *thread_id
+            {
+                Some(view)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn conversation_views(&self) -> Vec<Entity<ConversationView>> {
         self.active_conversation_view()
             .into_iter()
@@ -4038,29 +4047,12 @@ impl AgentPanel {
         })
     }
 
-    fn sync_agent_servers_from_extensions(&mut self, cx: &mut Context<Self>) {
-        if let Some(extension_store) = ExtensionStore::try_global(cx) {
-            let (manifests, extensions_dir) = {
-                let store = extension_store.read(cx);
-                let installed = store.installed_extensions();
-                let manifests: Vec<_> = installed
-                    .iter()
-                    .map(|(id, entry)| (id.clone(), entry.manifest.clone()))
-                    .collect();
-                let extensions_dir = paths::extensions_dir().join("installed");
-                (manifests, extensions_dir)
-            };
-
-            self.project.update(cx, |project, cx| {
-                project.agent_server_store().update(cx, |store, cx| {
-                    let manifest_refs: Vec<_> = manifests
-                        .iter()
-                        .map(|(id, manifest)| (id.as_ref(), manifest.as_ref()))
-                        .collect();
-                    store.sync_extension_agents(manifest_refs, extensions_dir, cx);
-                });
+    fn migrate_agent_server_from_extensions(&mut self, id: Arc<str>, cx: &mut Context<Self>) {
+        self.project.update(cx, |project, cx| {
+            project.agent_server_store().update(cx, |store, cx| {
+                store.migrate_agent_server_from_extensions(id, project.fs().clone(), cx);
             });
-        }
+        });
     }
 
     pub fn new_agent_thread_with_external_source_prompt(
@@ -4880,7 +4872,7 @@ impl AgentPanel {
         conversation_view.update(cx, |conversation_view, cx| {
             if let Some(thread) = conversation_view.as_native_thread(cx) {
                 thread.update(cx, |thread, cx| {
-                    if !thread.is_generating_title() {
+                    if thread.can_generate_title(cx) {
                         thread.generate_title(cx);
                         cx.notify();
                     }
@@ -4916,7 +4908,9 @@ impl AgentPanel {
             conversation_view.as_ref().is_some_and(|conversation_view| {
                 let conversation_view = conversation_view.read(cx);
                 conversation_view.has_user_submitted_prompt(cx)
-                    && conversation_view.as_native_thread(cx).is_some()
+                    && conversation_view
+                        .as_native_thread(cx)
+                        .is_some_and(|thread| thread.read(cx).can_generate_title(cx))
             });
 
         let has_auth_methods = match &self.base_view {
@@ -4927,7 +4921,7 @@ impl AgentPanel {
         };
         let supports_logout = self
             .active_conversation_view()
-            .is_some_and(|conversation_view| conversation_view.read(cx).supports_logout(cx));
+            .is_some_and(|conversation_view| conversation_view.read(cx).supports_logout());
 
         let project_agents_md_path = project_agents_md_path(&self.project, true, cx);
 
@@ -8508,92 +8502,6 @@ mod tests {
         let (panel, mut cx) = setup_panel(cx).await;
         let terminal_id = panel
             .update_in(&mut cx, |panel, window, cx| {
-                panel.insert_test_terminal("Dev Server", true, window, cx)
-            })
-            .expect("test terminal should be inserted");
-        cx.run_until_parked();
-
-        panel.update(&mut cx, |panel, cx| {
-            panel.emit_test_terminal_close(terminal_id, cx);
-        });
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, _cx| {
-            assert!(!panel.has_terminal(terminal_id));
-        });
-        cx.update(|_, cx| {
-            assert!(
-                TerminalThreadMetadataStore::global(cx)
-                    .read(cx)
-                    .entry(terminal_id)
-                    .is_none(),
-                "terminal metadata should be deleted by the fallback close"
-            );
-        });
-    }
-
-    #[gpui::test]
-    async fn test_new_thread_dismisses_settings_overlay(cx: &mut TestAppContext) {
-        let (panel, mut cx) = setup_panel(cx).await;
-
-        // Put the panel on its ephemeral new-draft view so the base view
-        // already contains the draft that `NewThread` would activate.
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
-        });
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, cx| {
-            assert!(
-                panel.active_view_is_new_draft(cx),
-                "precondition: base view should be the ephemeral draft"
-            );
-            assert!(!panel.is_overlay_open());
-        });
-
-        // Simulate the Settings overlay being open on top of the draft.
-        // We don't go through `open_configuration` here because it would
-        // build provider configuration views, which call into
-        // `LanguageModelProvider::configuration_view` — unimplemented for
-        // the fake provider used in tests. The bug being exercised lives
-        // entirely in the overlay/base-view bookkeeping, so toggling the
-        // overlay flag directly is sufficient.
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.set_overlay(OverlayView::Configuration, true, window, cx);
-        });
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, _cx| {
-            assert!(
-                panel.is_overlay_open(),
-                "precondition: Settings overlay should be open"
-            );
-        });
-
-        // Dispatching `NewThread` while Settings is open must dismiss the
-        // overlay so the user actually sees the new thread. Previously
-        // this was a silent no-op: `activate_draft` early-returned without
-        // clearing the overlay because the base view already held the
-        // draft.
-        panel.update_in(&mut cx, |panel, window, cx| {
-            panel.new_thread(&NewThread, window, cx);
-        });
-        cx.run_until_parked();
-
-        panel.read_with(&cx, |panel, cx| {
-            assert!(
-                !panel.is_overlay_open(),
-                "Settings overlay should be dismissed when invoking NewThread"
-            );
-            assert!(panel.active_view_is_new_draft(cx));
-        });
-    }
-
-    #[gpui::test]
-    async fn test_terminal_title_omits_placeholder_title(cx: &mut TestAppContext) {
-        let (panel, mut cx) = setup_panel(cx).await;
-        let terminal_id = panel
-            .update_in(&mut cx, |panel, window, cx| {
                 panel.insert_test_terminal("", true, window, cx)
             })
             .expect("test terminal should be inserted");
@@ -10098,6 +10006,14 @@ mod tests {
             &NewWorktreeBranchTarget::CurrentBranch,
         );
         assert_eq!(resolved, None);
+
+        let resolved = git_ui::worktree_service::resolve_worktree_branch_target(
+            &NewWorktreeBranchTarget::RemoteBranch {
+                remote_name: "origin".to_string(),
+                branch_name: "main".to_string(),
+            },
+        );
+        assert_eq!(resolved, Some("refs/remotes/origin/main".to_string()));
     }
 
     #[gpui::test]

@@ -30,7 +30,7 @@ Before each upstream merge, review
 [FZed Upstream Differences](./FZED_UPSTREAM_DIFFERENCES.md). It lists the
 intentional fork differences that should be preserved while resolving conflicts.
 
-Current upstream baseline: `v1.4.4`.
+Current upstream baseline: `v1.5.3`.
 
 ### Versioning
 
@@ -180,7 +180,7 @@ On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/dow
 
 Other platforms are not yet available:
 
-- Web ([tracking issue](https://github.com/zed-industries/zed/issues/5396))
+- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
 
 ### Developing Zed
 

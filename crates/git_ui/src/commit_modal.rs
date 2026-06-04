@@ -1,7 +1,7 @@
 use crate::branch_picker::{self, BranchList};
 use crate::git_panel::{
     GitPanel, commit_message_editor, commit_title_exceeds_limit, fossil_command_with_sync_state,
-    panel_editor_style,
+    git_commit_editor_style,
 };
 use crate::git_panel_settings::GitPanelSettings;
 use git::repository::CommitOptions;
@@ -11,6 +11,7 @@ use settings::Settings;
 use ui::{
     ContextMenu, KeybindingHint, PopoverMenu, PopoverMenuHandle, SplitButton, Tooltip, prelude::*,
 };
+use zed_actions::{DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize};
 
 use editor::{Editor, EditorElement};
 use gpui::*;
@@ -229,8 +230,9 @@ impl CommitModal {
         }
     }
 
-    fn commit_editor_element(&self, window: &mut Window, cx: &mut Context<Self>) -> EditorElement {
-        let editor_style = panel_editor_style(true, window, cx);
+    fn commit_editor_element(&self, _window: &mut Window, cx: &mut Context<Self>) -> EditorElement {
+        let settings = theme_settings::ThemeSettings::get_global(cx);
+        let editor_style = git_commit_editor_style(settings.git_commit_buffer_font_size(cx), cx);
         EditorElement::new(&self.commit_editor, editor_style)
     }
 
@@ -557,6 +559,39 @@ impl CommitModal {
             self.branch_list_handle.toggle(window, cx);
         }
     }
+
+    fn increase_font_size(
+        &mut self,
+        action: &IncreaseBufferFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.git_panel.update(cx, |git_panel, cx| {
+            git_panel.increase_font_size(action, window, cx);
+        });
+    }
+
+    fn decrease_font_size(
+        &mut self,
+        action: &DecreaseBufferFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.git_panel.update(cx, |git_panel, cx| {
+            git_panel.decrease_font_size(action, window, cx);
+        });
+    }
+
+    fn reset_font_size(
+        &mut self,
+        action: &ResetBufferFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.git_panel.update(cx, |git_panel, cx| {
+            git_panel.reset_font_size(action, window, cx);
+        });
+    }
 }
 
 impl Render for CommitModal {
@@ -585,6 +620,9 @@ impl Render for CommitModal {
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::on_commit))
             .on_action(cx.listener(Self::on_amend))
+            .on_action(cx.listener(Self::increase_font_size))
+            .on_action(cx.listener(Self::decrease_font_size))
+            .on_action(cx.listener(Self::reset_font_size))
             .when(!DisableAiSettings::get_global(cx).disable_ai, |this| {
                 this.on_action(cx.listener(|this, _: &GenerateCommitMessage, _, cx| {
                     this.git_panel.update(cx, |panel, cx| {
@@ -608,7 +646,7 @@ impl Render for CommitModal {
                 }),
             )
             .w(width)
-            .h_112()
+            .min_h_112()
             .p(container_padding)
             .elevation_3(cx)
             .overflow_hidden()

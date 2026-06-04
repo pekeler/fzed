@@ -595,7 +595,7 @@ pub struct DiffStat {
     pub deleted: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct GitDiffStat {
     pub entries: Arc<[(RepoPath, DiffStat)]>,
 }

@@ -6,6 +6,7 @@ import "worktree.proto";
 
 message GitBranchesResponse {
   repeated Branch branches = 1;
+  optional string error = 2;
 }
 
 message UpdateDiffBases {
@@ -133,6 +134,7 @@ message UpdateRepository {
   optional RepositoryKind repository_kind = 21;
   repeated string fossil_included_paths = 22;
   optional FossilSyncState fossil_sync_state = 23;
+  optional string branch_list_error = 24;
 }
 
 message RemoveRepository {
