@@ -1,7 +1,7 @@
 use crate::{
-    CurrentEditPrediction, DebugEvent, EditPredictionFinishedDebugEvent, EditPredictionId,
-    EditPredictionModelInput, EditPredictionStartedDebugEvent, EditPredictionStore,
-    ZedUpdateRequiredError, buffer_path_with_id_fallback,
+    CloudRequestTimeoutError, CurrentEditPrediction, DebugEvent, EditPredictionFinishedDebugEvent,
+    EditPredictionId, EditPredictionModelInput, EditPredictionStartedDebugEvent,
+    EditPredictionStore, ZedUpdateRequiredError, buffer_path_with_id_fallback,
     cursor_excerpt::{self, compute_cursor_excerpt, compute_syntax_ranges},
     prediction::EditPredictionResult,
 };
@@ -53,6 +53,7 @@ pub fn request_prediction_with_zeta(
         Vec<crate::StoredEvent>,
         Task<Result<collections::HashMap<Arc<Path>, Entity<BufferDiff>>>>,
     )>,
+    repo_url: Option<String>,
     cx: &mut Context<EditPredictionStore>,
 ) -> Task<Result<Option<EditPredictionResult>>> {
     let settings = &all_language_settings(None, cx).edit_predictions;
@@ -73,17 +74,7 @@ pub fn request_prediction_with_zeta(
 
     let excerpt_path = buffer_path_with_id_fallback(snapshot.file(), &snapshot.text, cx);
 
-    let repo_url = if can_collect_data {
-        let buffer_id = buffer.read(cx).remote_id();
-        project
-            .read(cx)
-            .git_store()
-            .read(cx)
-            .repository_and_path_for_buffer_id(buffer_id, cx)
-            .and_then(|(repo, _)| repo.read(cx).default_remote_url())
-    } else {
-        None
-    };
+    let repo_url = repo_url.filter(|_| can_collect_data);
     let client = store.client.clone();
     let llm_token = store.llm_token.clone();
     let organization_id = store
@@ -493,6 +484,11 @@ fn handle_api_response<T>(
             Ok(data)
         }
         Err(err) => {
+            if err.is::<CloudRequestTimeoutError>() {
+                this.update(cx, |this, cx| this.back_off_requests_after_timeout(cx))
+                    .ok();
+            }
+
             if err.is::<ZedUpdateRequiredError>() {
                 cx.update(|cx| {
                     this.update(cx, |this, _cx| {

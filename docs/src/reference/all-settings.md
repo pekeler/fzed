@@ -2098,6 +2098,7 @@ To interpret all `.c` files as C++, files called `MyLockFile` as TOML and files 
 ```json [settings]
 {
   "diagnostics": {
+    "button": true,
     "include_warnings": true,
     "inline": {
       "enabled": false
@@ -2105,6 +2106,11 @@ To interpret all `.c` files as C++, files called `MyLockFile` as TOML and files 
   }
 }
 ```
+
+**Options**
+
+- `button`: Whether to show the project diagnostics button in the status bar
+- `include_warnings`: Whether to show warnings or not by default
 
 ### Inline Diagnostics
 
@@ -5275,7 +5281,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 ## Agent
 
-Visit [the Configuration page](../ai/configuration.md) under the AI section to learn more about all the agent-related settings.
+Visit [AI Quick Start](../ai/quick-start.md) under the AI section to learn more about AI setup.
 
 ## Collaboration Panel
 
