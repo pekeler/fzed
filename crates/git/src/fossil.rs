@@ -2348,16 +2348,26 @@ mod tests {
     use text::{LineEnding, Rope};
 
     #[cfg(unix)]
+    fn write_executable_script(path: &Path, contents: &str) -> std::io::Result<()> {
+        use std::{io::Write as _, os::unix::fs::PermissionsExt};
+
+        {
+            let mut script = std::fs::File::create(path)?;
+            script.write_all(contents.as_bytes())?;
+            script.sync_all()?;
+        }
+
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions)
+    }
+
+    #[cfg(unix)]
     #[test]
     fn resolves_fossil_binary_from_search_path() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp_dir = tempfile::tempdir().unwrap();
         let fossil_path = temp_dir.path().join("fossil");
-        std::fs::write(&fossil_path, "#!/bin/sh\nexit 0\n").unwrap();
-        let mut permissions = std::fs::metadata(&fossil_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fossil_path, permissions).unwrap();
+        write_executable_script(&fossil_path, "#!/bin/sh\nexit 0\n").unwrap();
 
         assert_eq!(
             resolve_fossil_binary(temp_dir.path().to_str(), temp_dir.path()).unwrap(),
@@ -2496,8 +2506,6 @@ mod tests {
     #[cfg(unix)]
     #[gpui::test]
     async fn fossil_branches_fall_back_to_checkout_tags(cx: &mut TestAppContext) {
-        use std::os::unix::fs::PermissionsExt;
-
         cx.executor().allow_parking();
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2506,7 +2514,7 @@ mod tests {
         std::fs::write(checkout.join(".fslckout"), "").unwrap();
 
         let script_path = temp_dir.path().join("fossil");
-        std::fs::write(
+        write_executable_script(
             &script_path,
             "#!/bin/sh\n\
              checkout='1234567890abcdef1234567890abcdef12345678'\n\
@@ -2529,9 +2537,6 @@ mod tests {
              exit 1\n",
         )
         .unwrap();
-        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script_path, permissions).unwrap();
 
         let repository = FossilRepository::new_for_test(
             &checkout.join(".fslckout"),
@@ -2575,21 +2580,18 @@ mod tests {
     async fn fossil_commit_retries_without_legacy_comment_verification_flag(
         cx: &mut TestAppContext,
     ) {
-        use std::{ffi::OsString, os::unix::fs::PermissionsExt};
+        use std::ffi::OsString;
 
         cx.executor().allow_parking();
 
         let temp_dir = tempfile::tempdir().unwrap();
         let script_path = temp_dir.path().join("fossil");
         let captured_args_path = temp_dir.path().join("args");
-        std::fs::write(
+        write_executable_script(
             &script_path,
             "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--no-verify-comment\" ]; then\n    echo 'unrecognized command-line option or missing argument: --no-verify-comment' >&2\n    exit 1\n  fi\ndone\nprintf '%s\\n' \"$@\" > \"$FZED_FOSSIL_TEST_ARGS\"\n",
         )
         .unwrap();
-        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script_path, permissions).unwrap();
 
         let fossil = FossilBinary::new(
             script_path,
