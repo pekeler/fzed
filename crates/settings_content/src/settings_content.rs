@@ -532,6 +532,11 @@ pub struct TelemetrySettingsContent {
     ///
     /// Default: false
     pub metrics: Option<bool>,
+    /// Allow sending requests to Anthropic models that cannot be offered with
+    /// Zero Data Retention.
+    ///
+    /// Default: false
+    pub anthropic_retention: Option<bool>,
 }
 
 impl Default for TelemetrySettingsContent {
@@ -539,6 +544,7 @@ impl Default for TelemetrySettingsContent {
         Self {
             diagnostics: Some(false),
             metrics: Some(false),
+            anthropic_retention: Some(false),
         }
     }
 }
