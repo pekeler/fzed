@@ -4,9 +4,10 @@ use crate::{
     repository::{
         Branch, BranchesScanResult, CommitData, CommitDataReader, CommitDetails, CommitDiff,
         CommitFile, CommitOptions, CommitSummary, CreateWorktreeTarget, DiffType, FetchOptions,
-        FossilSyncState, GRAPH_CHUNK_SIZE, GitCommitTemplate, GitRepository,
-        GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote,
-        RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode, SearchCommitArgs, Worktree,
+        FileHistoryChangedFileSets, FossilSyncState, GRAPH_CHUNK_SIZE, GitCommitTemplate,
+        GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
+        PushOptions, Remote, RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode,
+        SearchCommitArgs, Worktree,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -160,10 +161,6 @@ fn common_macos_fossil_paths() -> impl IntoIterator<Item = PathBuf> {
 impl GitRepository for FossilRepository {
     fn kind(&self) -> RepositoryKind {
         RepositoryKind::Fossil
-    }
-
-    fn reload_index(&self) {
-        *self.cached_info.lock() = None;
     }
 
     fn load_index_text(&self, _path: RepoPath) -> BoxFuture<'_, Option<String>> {
@@ -1315,6 +1312,14 @@ impl GitRepository for FossilRepository {
                 Ok(())
             })
             .boxed()
+    }
+
+    fn file_history_changed_files(
+        &self,
+        _paths: Vec<RepoPath>,
+        _commit_limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<FileHistoryChangedFileSets>>> {
+        Self::unsupported("file history changed files")
     }
 
     fn commit_data_reader(&self) -> Result<CommitDataReader> {

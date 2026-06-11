@@ -526,11 +526,11 @@ impl From<Option<String>> for AudioOutputDeviceName {
 pub struct TelemetrySettingsContent {
     /// Send debug info like crash reports.
     ///
-    /// Default: false
+    /// Default: true
     pub diagnostics: Option<bool>,
     /// Send anonymized usage data like what languages you're using Zed with.
     ///
-    /// Default: false
+    /// Default: true
     pub metrics: Option<bool>,
     /// Allow sending requests to Anthropic models that cannot be offered with
     /// Zero Data Retention.
@@ -542,8 +542,8 @@ pub struct TelemetrySettingsContent {
 impl Default for TelemetrySettingsContent {
     fn default() -> Self {
         Self {
-            diagnostics: Some(false),
-            metrics: Some(false),
+            diagnostics: Some(true),
+            metrics: Some(true),
             anthropic_retention: Some(false),
         }
     }
@@ -665,12 +665,12 @@ pub struct GitPanelSettingsContent {
     /// Default: icon
     pub status_style: Option<StatusStyle>,
 
-    /// Whether to show file icons in the source control panel.
+    /// Whether to show file icons in the git panel.
     ///
     /// Default: false
     pub file_icons: Option<bool>,
 
-    /// Whether to show folder icons or chevrons for directories in the source control panel.
+    /// Whether to show folder icons or chevrons for directories in the git panel.
     ///
     /// Default: true
     pub folder_icons: Option<bool>,
@@ -702,17 +702,17 @@ pub struct GitPanelSettingsContent {
     /// Default: false
     pub tree_view: Option<bool>,
 
-    /// Whether to show the addition/deletion change count next to each file in the source control panel.
+    /// Whether to show the addition/deletion change count next to each file in the Git panel.
     ///
     /// Default: true
     pub diff_stats: Option<bool>,
 
-    /// Whether to show a badge on the source control panel icon with the count of uncommitted changes.
+    /// Whether to show a badge on the git panel icon with the count of uncommitted changes.
     ///
     /// Default: false
     pub show_count_badge: Option<bool>,
 
-    /// Whether the source control panel should open on startup.
+    /// Whether the git panel should open on startup.
     ///
     /// Default: false
     pub starts_open: Option<bool>,

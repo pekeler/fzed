@@ -38,7 +38,18 @@ Some Zed AI features have their own model or prompt settings in `settings.json`,
 - `agent.commit_message_model`
 - `agent.thread_summary_model`
 - `agent.subagent_model`
+- `agent.commit_message_instructions`
 - `agent.inline_alternatives`
+
+Use `agent.commit_message_instructions` for instructions that apply only to generated Git commit messages:
+
+```json [settings]
+{
+  "agent": {
+    "commit_message_instructions": "Use the Conventional Commits format: <type>(<scope>): <description>."
+  }
+}
+```
 
 For feature-specific model examples, see [Feature-specific Models](#feature-specific-models).
 
