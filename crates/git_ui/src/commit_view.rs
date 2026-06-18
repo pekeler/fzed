@@ -82,6 +82,7 @@ pub struct CommitView {
     stash: Option<usize>,
     multibuffer: Entity<MultiBuffer>,
     repository: Entity<Repository>,
+    project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
     remote: Option<GitRemote>,
 }
@@ -298,6 +299,7 @@ impl CommitView {
                 window,
                 cx,
             );
+            editor.disable_diff_hunk_controls(cx);
 
             editor.rhs_editor().update(cx, |editor, cx| {
                 editor.set_show_bookmarks(false, cx);
@@ -347,7 +349,9 @@ impl CommitView {
                             .or(first_worktree_id)
                     })
                     .context("project has no worktrees")?;
-                let short_sha = commit_sha.get(0..7).unwrap_or(&commit_sha);
+                let short_sha = commit_sha
+                    .get(0..git::SHORT_SHA_LENGTH)
+                    .unwrap_or(&commit_sha);
                 let file_name = file
                     .path
                     .file_name()
@@ -388,7 +392,14 @@ impl CommitView {
                 let buffer_diff = if is_binary {
                     cx.update(|_, cx| {
                         let snapshot = buffer.read(cx).snapshot();
-                        cx.new(|cx| BufferDiff::new_unchanged(&snapshot, cx))
+                        cx.new(|cx| {
+                            BufferDiff::new_unchanged(
+                                &snapshot,
+                                snapshot.language().cloned(),
+                                Some(language_registry.clone()),
+                                cx,
+                            )
+                        })
                     })?
                 } else {
                     build_buffer_diff(old_text, &buffer, &language_registry, cx).await?
@@ -492,6 +503,7 @@ impl CommitView {
             multibuffer,
             stash,
             repository,
+            project,
             workspace,
             remote,
         }
@@ -1016,23 +1028,15 @@ async fn build_buffer_diff(
     let language = cx.update(|_, cx| buffer.read(cx).language().cloned())?;
     let buffer = cx.update(|_, cx| buffer.read(cx).snapshot())?;
 
-    let diff = cx.new(|cx| BufferDiff::new(&buffer.text, cx));
-
-    let update = diff
-        .update(cx, |diff, cx| {
-            diff.update_diff(
-                buffer.text.clone(),
-                old_text.map(|old_text| Arc::from(old_text.as_str())),
-                Some(true),
-                language.clone(),
-                cx,
-            )
-        })
-        .await;
+    let diff =
+        cx.new(|cx| BufferDiff::new(&buffer.text, language, Some(language_registry.clone()), cx));
 
     diff.update(cx, |diff, cx| {
-        diff.language_changed(language, Some(language_registry.clone()), cx);
-        diff.set_snapshot(update, &buffer.text, cx)
+        diff.set_base_text(
+            old_text.map(|old_text| Arc::from(old_text.as_str())),
+            buffer.text.clone(),
+            cx,
+        )
     })
     .await;
 
@@ -1195,7 +1199,7 @@ impl Item for CommitView {
         let Some(workspace_entity) = self.workspace.upgrade() else {
             return Task::ready(None);
         };
-        let project = workspace_entity.read(cx).project().clone();
+        let project = self.project.clone();
         let diff_view_style = self.editor.read(cx).diff_view_style();
         let multibuffer = self.multibuffer.clone();
         Task::ready(Some(cx.new(|cx| {
@@ -1214,6 +1218,7 @@ impl Item for CommitView {
                         window,
                         cx,
                     );
+                    editor.disable_diff_hunk_controls(cx);
                     editor.rhs_editor().update(cx, |editor, cx| {
                         editor.set_show_bookmarks(false, cx);
                         editor.set_show_breakpoints(false, cx);
@@ -1244,6 +1249,7 @@ impl Item for CommitView {
                 commit: self.commit.clone(),
                 stash: self.stash,
                 repository: self.repository.clone(),
+                project: self.project.clone(),
                 workspace: self.workspace.clone(),
                 remote: self.remote.clone(),
             }
