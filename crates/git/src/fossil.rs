@@ -2356,15 +2356,17 @@ mod tests {
     fn write_executable_script(path: &Path, contents: &str) -> std::io::Result<()> {
         use std::{io::Write as _, os::unix::fs::PermissionsExt};
 
+        let temp_path = path.with_extension("tmp");
         {
-            let mut script = std::fs::File::create(path)?;
+            let mut script = std::fs::File::create(&temp_path)?;
             script.write_all(contents.as_bytes())?;
             script.sync_all()?;
         }
 
-        let mut permissions = std::fs::metadata(path)?.permissions();
+        let mut permissions = std::fs::metadata(&temp_path)?.permissions();
         permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions)
+        std::fs::set_permissions(&temp_path, permissions)?;
+        std::fs::rename(temp_path, path)
     }
 
     #[cfg(unix)]
