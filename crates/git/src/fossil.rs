@@ -2186,6 +2186,8 @@ struct FossilBinary {
 }
 
 impl FossilBinary {
+    const EXECUTABLE_FILE_BUSY_RETRY_ATTEMPTS: usize = 3;
+
     fn new(
         fossil_binary_path: PathBuf,
         working_directory: PathBuf,
@@ -2260,11 +2262,7 @@ impl FossilBinary {
         S: AsRef<OsStr>,
     {
         let _lock = self.command_lock.lock().await;
-        let mut command = self.build_command(args);
-        if let Some(env) = env {
-            command.envs(env.iter());
-        }
-        let output = command.output().await?;
+        let output = self.run_command_output_with_retries(args, env).await?;
         anyhow::ensure!(
             output.status.success(),
             FossilBinaryCommandError {
@@ -2277,6 +2275,35 @@ impl FossilBinary {
             stdout: String::from_utf8(output.stdout)?,
             stderr: String::from_utf8(output.stderr)?,
         })
+    }
+
+    async fn run_command_output_with_retries<S>(
+        &self,
+        args: &[S],
+        env: Option<Arc<HashMap<String, String>>>,
+    ) -> std::io::Result<std::process::Output>
+    where
+        S: AsRef<OsStr>,
+    {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let mut command = self.build_command(args);
+            if let Some(env) = env.as_ref() {
+                command.envs(env.iter());
+            }
+
+            match command.output().await {
+                Ok(output) => return Ok(output),
+                Err(error)
+                    if executable_file_is_busy(&error)
+                        && attempts < Self::EXECUTABLE_FILE_BUSY_RETRY_ATTEMPTS =>
+                {
+                    smol::future::yield_now().await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn build_command<S>(&self, args: &[S]) -> util::command::Command
@@ -2297,6 +2324,19 @@ impl FossilBinary {
             command_lock: self.command_lock.clone(),
             envs: self.envs.clone(),
         }
+    }
+}
+
+fn executable_file_is_busy(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(26)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
     }
 }
 
