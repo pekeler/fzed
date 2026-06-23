@@ -43,7 +43,7 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, actions, anchored, deferred, point, size, uniform_list,
 };
 use itertools::Itertools;
-use language::{Buffer, File};
+use language::{Buffer, BufferId, File};
 use language_model::{
     CompletionIntent, ConfiguredModel, LanguageModelRegistry, LanguageModelRequest,
     LanguageModelRequestMessage, Role,
@@ -65,9 +65,11 @@ use proto::RpcError;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, StatusStyle, update_settings_file};
 use smallvec::SmallVec;
+use std::cell::RefCell;
 use std::future::Future;
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 use std::{sync::Arc, time::Duration, usize};
 use strum::{IntoEnumIterator, VariantNames};
 use theme_settings::ThemeSettings;
@@ -7729,6 +7731,7 @@ impl EventEmitter<PanelEvent> for GitPanel {}
 
 pub(crate) struct GitPanelAddon {
     pub(crate) workspace: WeakEntity<Workspace>,
+    pub(crate) buffer_rename_sources: Option<Rc<RefCell<HashMap<BufferId, RepoPath>>>>,
 }
 
 impl editor::Addon for GitPanelAddon {
@@ -7746,9 +7749,32 @@ impl editor::Addon for GitPanelAddon {
         let file = buffer.file()?;
         let git_panel = self.workspace.upgrade()?.read(cx).panel::<GitPanel>(cx)?;
 
-        git_panel
+        let controls = git_panel
             .read(cx)
-            .render_buffer_header_controls(&git_panel, file, window, cx)
+            .render_buffer_header_controls(&git_panel, file, window, cx)?;
+
+        let rename_source = self
+            .buffer_rename_sources
+            .as_ref()
+            .and_then(|sources| sources.borrow().get(&buffer.remote_id()).cloned());
+        let Some(rename_source) = rename_source else {
+            return Some(controls);
+        };
+
+        Some(
+            h_flex()
+                .gap_1()
+                .child(controls)
+                .child(
+                    Label::new(format!(
+                        "renamed from {}",
+                        rename_source.display(file.path_style(cx))
+                    ))
+                    .single_line()
+                    .color(Color::Muted),
+                )
+                .into_any_element(),
+        )
     }
 }
 

@@ -146,6 +146,7 @@ struct BufferGitState {
 
     head_text: Option<Arc<str>>,
     index_text: Option<Arc<str>>,
+    head_text_repo_path: Option<RepoPath>,
     oid_texts: HashMap<git::Oid, Arc<str>>,
     head_text_buffer: WeakEntity<Buffer>,
     index_text_buffer: WeakEntity<Buffer>,
@@ -166,11 +167,11 @@ enum DiffBasesChange {
     SetBoth(Option<String>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum DiffKind {
     Unstaged,
     Staged,
-    Uncommitted,
+    Uncommitted { head_path: Option<RepoPath> },
     SinceOid(Option<git::Oid>),
 }
 
@@ -953,6 +954,7 @@ impl GitStore {
                     Self::open_diff_internal(
                         this,
                         DiffKind::Unstaged,
+                        None,
                         staged_text.await.map(DiffBasesChange::SetIndex),
                         buffer,
                         cx,
@@ -1003,9 +1005,16 @@ impl GitStore {
                 });
 
                 cx.spawn(async move |this, cx| {
-                    Self::open_diff_internal(this, DiffKind::Staged, changes.await, buffer, cx)
-                        .await
-                        .map_err(Arc::new)
+                    Self::open_diff_internal(
+                        this,
+                        DiffKind::Staged,
+                        None,
+                        changes.await,
+                        buffer,
+                        cx,
+                    )
+                    .await
+                    .map_err(Arc::new)
                 })
                 .shared()
             })
@@ -1038,11 +1047,12 @@ impl GitStore {
         }
 
         let diff_kind = DiffKind::SinceOid(oid);
-        if let Some(task) = self.loading_diffs.get(&(buffer_id, diff_kind)) {
+        if let Some(task) = self.loading_diffs.get(&(buffer_id, diff_kind.clone())) {
             let task = task.clone();
             return cx.background_spawn(async move { task.await.map_err(|e| anyhow!("{e}")) });
         }
 
+        let loading_diff_kind = diff_kind.clone();
         let task = cx
             .spawn(async move |this, cx| {
                 let result: Result<Entity<BufferDiff>> = async {
@@ -1084,7 +1094,8 @@ impl GitStore {
                         cx.subscribe(&buffer_diff, Self::on_buffer_diff_event)
                             .detach();
 
-                        this.loading_diffs.remove(&(buffer_id, diff_kind));
+                        this.loading_diffs
+                            .remove(&(buffer_id, loading_diff_kind.clone()));
 
                         let git_store = cx.weak_entity();
                         let diff_state = this
@@ -1120,6 +1131,15 @@ impl GitStore {
         buffer: Entity<Buffer>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<BufferDiff>>> {
+        self.open_uncommitted_diff_with_head_path(buffer, None, cx)
+    }
+
+    pub fn open_uncommitted_diff_with_head_path(
+        &mut self,
+        buffer: Entity<Buffer>,
+        head_path: Option<RepoPath>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<BufferDiff>>> {
         let buffer_id = buffer.read(cx).remote_id();
 
         if let Some(diff_state) = self.diffs.get(&buffer_id)
@@ -1128,6 +1148,7 @@ impl GitStore {
                 .uncommitted_diff
                 .as_ref()
                 .and_then(|weak| weak.upgrade())
+            && diff_state.read(cx).head_text_repo_path == head_path
         {
             if let Some(task) =
                 diff_state.update(cx, |diff_state, _| diff_state.wait_for_recalculation())
@@ -1147,21 +1168,30 @@ impl GitStore {
         };
 
         let is_symlink = Self::buffer_is_symlink(&buffer, cx);
+        let head_path = head_path.filter(|head_path| head_path != &repo_path);
+        let diff_kind = DiffKind::Uncommitted {
+            head_path: head_path.clone(),
+        };
         let task = self
             .loading_diffs
-            .entry((buffer_id, DiffKind::Uncommitted))
+            .entry((buffer_id, diff_kind.clone()))
             .or_insert_with(|| {
                 let changes = if is_symlink {
                     Task::ready(Ok(DiffBasesChange::SetBoth(None)))
                 } else {
                     repo.update(cx, |repo, cx| {
-                        repo.load_committed_text(buffer_id, repo_path, cx)
+                        repo.load_committed_text_for_paths(
+                            buffer_id,
+                            repo_path,
+                            head_path.clone(),
+                            cx,
+                        )
                     })
                 };
 
                 // todo(lw): hot foreground spawn
                 cx.spawn(async move |this, cx| {
-                    Self::open_diff_internal(this, DiffKind::Uncommitted, changes.await, buffer, cx)
+                    Self::open_diff_internal(this, diff_kind, head_path, changes.await, buffer, cx)
                         .await
                         .map_err(Arc::new)
                 })
@@ -1176,6 +1206,7 @@ impl GitStore {
     async fn open_diff_internal(
         this: WeakEntity<Self>,
         kind: DiffKind,
+        head_text_repo_path: Option<RepoPath>,
         texts: Result<DiffBasesChange>,
         buffer_entity: Entity<Buffer>,
         cx: &mut AsyncApp,
@@ -1185,7 +1216,7 @@ impl GitStore {
                 this.update(cx, |this, cx| {
                     let buffer = buffer_entity.read(cx);
                     let buffer_id = buffer.remote_id();
-                    this.loading_diffs.remove(&(buffer_id, kind));
+                    this.loading_diffs.remove(&(buffer_id, kind.clone()));
                 })?;
                 return Err(e);
             }
@@ -1198,7 +1229,7 @@ impl GitStore {
             let language = buffer.language().cloned();
             let language_registry = buffer.language_registry();
             let text_snapshot = buffer.text_snapshot();
-            this.loading_diffs.remove(&(buffer_id, kind));
+            this.loading_diffs.remove(&(buffer_id, kind.clone()));
 
             let git_store = cx.weak_entity();
             let diff_state = this
@@ -1251,7 +1282,7 @@ impl GitStore {
                             )
                         })
                     }
-                    DiffKind::Uncommitted => {
+                    DiffKind::Uncommitted { .. } => {
                         let base_text_buffer = diff_state.update(cx, |diff_state, cx| {
                             diff_state.get_or_create_head_text_buffer(cx)
                         });
@@ -1285,7 +1316,8 @@ impl GitStore {
                             .context("index text buffer was not created for staged diff")?;
                         diff_state.staged_diff = Some((diff.downgrade(), index_text_buffer));
                     }
-                    DiffKind::Uncommitted => {
+                    DiffKind::Uncommitted { .. } => {
+                        diff_state.head_text_repo_path = head_text_repo_path;
                         let unstaged_diff = if let Some(diff) = existing_unstaged_diff {
                             diff
                         } else {
@@ -3984,6 +4016,7 @@ impl BufferGitState {
             hunk_staging_operation_count_as_of_write: 0,
             head_text: Default::default(),
             index_text: Default::default(),
+            head_text_repo_path: Default::default(),
             oid_texts: Default::default(),
             head_text_buffer: WeakEntity::new_invalid(),
             index_text_buffer: WeakEntity::new_invalid(),
@@ -5366,6 +5399,7 @@ impl Repository {
                                     Some((
                                         buffer,
                                         repo_path,
+                                        diff_state.head_text_repo_path.clone(),
                                         is_symlink,
                                         (has_unstaged_diff || has_staged_diff)
                                             .then(|| diff_state.index_text.clone()),
@@ -5384,6 +5418,7 @@ impl Repository {
                         for (
                             buffer,
                             repo_path,
+                            head_text_repo_path,
                             is_symlink,
                             current_index_text,
                             current_head_text,
@@ -5395,7 +5430,11 @@ impl Repository {
                                 future::ready(None).boxed()
                             };
                             let head_text = if current_head_text.is_some() && !*is_symlink {
-                                backend.load_committed_text(repo_path.clone())
+                                backend.load_committed_text(
+                                    head_text_repo_path
+                                        .clone()
+                                        .unwrap_or_else(|| repo_path.clone()),
+                                )
                             } else {
                                 future::ready(None).boxed()
                             };
@@ -9218,10 +9257,21 @@ impl Repository {
         repo_path: RepoPath,
         cx: &App,
     ) -> Task<Result<DiffBasesChange>> {
+        self.load_committed_text_for_paths(buffer_id, repo_path, None, cx)
+    }
+
+    fn load_committed_text_for_paths(
+        &mut self,
+        buffer_id: BufferId,
+        repo_path: RepoPath,
+        head_path: Option<RepoPath>,
+        cx: &App,
+    ) -> Task<Result<DiffBasesChange>> {
         let rx = self.send_job("load_committed_text", None, move |state, _| async move {
             match state {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    let committed_text = backend.load_committed_text(repo_path.clone()).await;
+                    let head_path = head_path.unwrap_or_else(|| repo_path.clone());
+                    let committed_text = backend.load_committed_text(head_path).await;
                     let staged_text = backend.load_index_text(repo_path).await;
                     let diff_bases_change = if committed_text == staged_text {
                         DiffBasesChange::SetBoth(committed_text)

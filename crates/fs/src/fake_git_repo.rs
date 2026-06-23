@@ -19,8 +19,8 @@ use git::{
     },
     stash::{GitStash, StashEntry},
     status::{
-        DiffTreeType, FileStatus, GitStatus, StatusCode, TrackedStatus, TreeDiff, TreeDiffStatus,
-        UnmergedStatus,
+        DiffTreeType, FileStatus, GitStatus, StatusCode, StatusRename, TrackedStatus, TreeDiff,
+        TreeDiffStatus, UnmergedStatus,
     },
 };
 use gpui::{AsyncApp, BackgroundExecutor, SharedString, Task};
@@ -60,6 +60,7 @@ pub struct FakeGitRepositoryState {
     pub commit_history: Vec<FakeCommitSnapshot>,
     pub event_emitter: async_channel::Sender<PathBuf>,
     pub unmerged_paths: HashMap<RepoPath, UnmergedStatus>,
+    pub status_renames: Vec<StatusRename>,
     pub head_contents: HashMap<RepoPath, String>,
     pub index_contents: HashMap<RepoPath, String>,
     // everything in commit contents is in oids
@@ -89,6 +90,7 @@ impl FakeGitRepositoryState {
             head_contents: Default::default(),
             index_contents: Default::default(),
             unmerged_paths: Default::default(),
+            status_renames: Default::default(),
             blames: Default::default(),
             current_branch_name: Default::default(),
             branches: Default::default(),
@@ -251,6 +253,10 @@ impl GitRepository for FakeGitRepository {
     }
 
     fn load_index_text(&self, path: RepoPath) -> BoxFuture<'_, Option<String>> {
+        if self.kind() == RepositoryKind::Fossil {
+            return async move { None }.boxed();
+        }
+
         let fut = self.with_state_async(false, move |state| {
             state
                 .index_contents
@@ -538,6 +544,11 @@ impl GitRepository for FakeGitRepository {
 
         let result = self.fs.with_git_state(&self.dot_git_path, false, |state| {
             let mut entries = Vec::new();
+            let rename_sources = state
+                .status_renames
+                .iter()
+                .map(|rename| &rename.source)
+                .collect::<HashSet<_>>();
             let paths = state
                 .head_contents
                 .keys()
@@ -545,6 +556,9 @@ impl GitRepository for FakeGitRepository {
                 .chain(git_files.keys())
                 .collect::<HashSet<_>>();
             for path in paths {
+                if rename_sources.contains(path) {
+                    continue;
+                }
                 if !path_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
                     continue;
                 }
@@ -619,7 +633,7 @@ impl GitRepository for FakeGitRepository {
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             anyhow::Ok(GitStatus {
                 entries: entries.into(),
-                renames: Arc::default(),
+                renames: state.status_renames.clone().into(),
             })
         });
         Task::ready(match result {

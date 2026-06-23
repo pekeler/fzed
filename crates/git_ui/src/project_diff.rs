@@ -6,7 +6,7 @@ use crate::{
 use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow};
 use buffer_diff::{BufferDiff, DiffHunkSecondaryStatus};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::{
     Addon, Editor, EditorEvent, EditorSettings, SelectionEffects, SplittableEditor,
     actions::{GoToHunk, GoToPreviousHunk, SendReviewToAgent},
@@ -35,7 +35,9 @@ use project::{
 };
 use settings::{Settings, SettingsStore};
 use std::any::{Any, TypeId};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use theme::ActiveTheme;
 use ui::{
@@ -84,6 +86,7 @@ pub struct ProjectDiff {
     branch_diff: Entity<branch_diff::BranchDiff>,
     editor: Entity<SplittableEditor>,
     buffer_subscriptions: HashMap<Arc<RelPath>, BufferSubscriptions>,
+    buffer_rename_sources: Rc<RefCell<HashMap<BufferId, RepoPath>>>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     pending_scroll: Option<PathKey>,
@@ -512,6 +515,8 @@ impl ProjectDiff {
             multibuffer.set_all_diff_hunks_expanded(cx);
             multibuffer
         });
+        let buffer_rename_sources = Rc::new(RefCell::new(HashMap::default()));
+        let addon_buffer_rename_sources = buffer_rename_sources.clone();
 
         let editor = cx.new(|cx| {
             let diff_display_editor = SplittableEditor::new(
@@ -533,6 +538,7 @@ impl ProjectDiff {
                     DiffBase::Head => {
                         editor.register_addon(GitPanelAddon {
                             workspace: workspace.downgrade(),
+                            buffer_rename_sources: Some(addon_buffer_rename_sources.clone()),
                         });
                     }
                     DiffBase::Merge { .. } => {
@@ -610,6 +616,7 @@ impl ProjectDiff {
             editor,
             multibuffer,
             buffer_subscriptions: Default::default(),
+            buffer_rename_sources,
             pending_scroll: None,
             review_comment_count: 0,
             _task: task,
@@ -984,7 +991,7 @@ impl ProjectDiff {
 
     #[instrument(skip(this, cx))]
     pub async fn refresh(this: WeakEntity<Self>, cx: &mut AsyncWindowContext) -> Result<()> {
-        let entries = this.update(cx, |this, cx| {
+        let (entries, paths_to_replace_excerpts) = this.update(cx, |this, cx| {
             let (repo, buffers_to_load) = this.branch_diff.update(cx, |branch_diff, cx| {
                 let load_buffers = branch_diff.load_buffers(cx);
                 (branch_diff.repo().cloned(), load_buffers)
@@ -998,6 +1005,7 @@ impl ProjectDiff {
                 .collect::<HashMap<_, _>>();
 
             let mut entries = BTreeMap::new();
+            let mut paths_to_replace_excerpts = HashSet::default();
             if let Some(repo) = repo {
                 let repo = repo.read(cx);
 
@@ -1008,7 +1016,19 @@ impl ProjectDiff {
                         sort_prefix,
                         diff_buffer.repo_path.as_ref().clone(),
                     );
-                    previous_paths.remove(&path_key);
+                    let previous_buffer_id = previous_paths.remove(&path_key);
+                    if let Some(previous_buffer_id) = previous_buffer_id {
+                        let previous_rename_source = this
+                            .buffer_rename_sources
+                            .borrow()
+                            .get(&previous_buffer_id)
+                            .cloned();
+                        if diff_buffer.rename_source.is_some()
+                            && previous_rename_source != diff_buffer.rename_source
+                        {
+                            paths_to_replace_excerpts.insert(path_key.clone());
+                        }
+                    }
                     entries.insert(path_key, diff_buffer);
                 }
             }
@@ -1016,6 +1036,7 @@ impl ProjectDiff {
             this.editor.update(cx, |editor, cx| {
                 for (path, buffer_id) in previous_paths {
                     this.buffer_subscriptions.remove(&path.path);
+                    this.buffer_rename_sources.borrow_mut().remove(&buffer_id);
                     editor.rhs_editor().update(cx, |editor, cx| {
                         conflict_view::buffers_removed(editor, &[buffer_id], cx);
                     });
@@ -1025,7 +1046,7 @@ impl ProjectDiff {
                 }
             });
 
-            entries
+            (entries, paths_to_replace_excerpts)
         })?;
 
         let mut buffers_to_fold = Vec::new();
@@ -1048,12 +1069,32 @@ impl ProjectDiff {
                     continue;
                 }
             };
+            if let Some(rename_source) = entry.rename_source.clone() {
+                this.update(cx, |this, cx| {
+                    this.buffer_rename_sources
+                        .borrow_mut()
+                        .insert(buffer.read(cx).remote_id(), rename_source);
+                })?;
+            } else {
+                this.update(cx, |this, cx| {
+                    this.buffer_rename_sources
+                        .borrow_mut()
+                        .remove(&buffer.read(cx).remote_id());
+                })?;
+            }
 
             // We might be lagging behind enough that all future entry.load futures are no longer pending.
             // If that is the case, this task will never yield, starving the foreground thread of execution time.
             yield_now().await;
             cx.update(|window, cx| {
                 this.update(cx, |this, cx| {
+                    if paths_to_replace_excerpts.contains(&path_key) {
+                        let _span = ztracing::info_span!("remove_excerpts_for_path");
+                        _span.enter();
+                        this.editor.update(cx, |editor, cx| {
+                            editor.remove_excerpts_for_path(path_key.clone(), cx)
+                        });
+                    }
                     if let Some(buffer_id) = this.register_buffer(
                         path_key,
                         entry.file_status,
@@ -2104,7 +2145,7 @@ mod tests {
     use collections::HashMap;
     use db::indoc;
     use editor::test::editor_test_context::{EditorTestContext, assert_state_with_diff};
-    use git::status::{TrackedStatus, UnmergedStatus, UnmergedStatusCode};
+    use git::status::{StatusRename, TrackedStatus, UnmergedStatus, UnmergedStatusCode};
     use gpui::TestAppContext;
     use project::{FakeFs, git_store::GitStoreEvent};
     use serde_json::json;
@@ -2144,6 +2185,31 @@ mod tests {
             editor::init(cx);
             crate::init(cx);
         });
+    }
+
+    fn word_diff_strings(editor: &Entity<Editor>, cx: &mut gpui::VisualTestContext) -> Vec<String> {
+        let snapshot = editor.read_with(cx, |editor, cx| editor.buffer().read(cx).snapshot(cx));
+        let text = snapshot.text();
+
+        snapshot
+            .diff_hunks()
+            .flat_map(|hunk| hunk.word_diffs)
+            .map(|range| text[range.start.0..range.end.0].to_string())
+            .collect()
+    }
+
+    fn editor_text(editor: &Entity<Editor>, cx: &mut gpui::VisualTestContext) -> String {
+        editor.read_with(cx, |editor, cx| {
+            editor.buffer().read(cx).snapshot(cx).text()
+        })
+    }
+
+    fn numbered_text(line_count: usize) -> String {
+        let mut text = String::new();
+        for line_number in 1..=line_count {
+            text.push_str(&format!("line {line_number}\n"));
+        }
+        text
     }
 
     #[test]
@@ -2352,6 +2418,238 @@ mod tests {
         });
         assert!(!supports_hunk_staging);
         assert!(supports_hunk_restore);
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_uses_rename_source_as_base(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "new.txt": "one\nTWO\nthree\nfour\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("old.txt", "one\ntwo\nthree\n".into())],
+        );
+        fs.with_git_state(Path::new(path!("/project/.fslckout")), true, |state| {
+            let new_path = RepoPath::from_rel_path(rel_path("new.txt"));
+            state
+                .head_contents
+                .insert(new_path.clone(), "one\ntwo\nthree\n".into());
+            state
+                .index_contents
+                .insert(new_path.clone(), "one\ntwo\nthree\n".into());
+            state.status_renames = vec![StatusRename {
+                source: RepoPath::from_rel_path(rel_path("old.txt")),
+                target: new_path,
+            }];
+        })
+        .unwrap();
+
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor.read(cx).rhs_editor().clone());
+        assert_state_with_diff(
+            &editor,
+            cx,
+            &"
+                  ˇone
+                - two
+                + TWO
+                  three
+                + four
+            "
+            .unindent(),
+        );
+        let rename_source = diff.read_with(cx, |diff, cx| {
+            let buffer_id = diff
+                .editor
+                .read(cx)
+                .rhs_editor()
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .snapshot(cx)
+                .excerpts()
+                .next()
+                .map(|excerpt| excerpt.context.start.buffer_id);
+            buffer_id
+                .and_then(|buffer_id| diff.buffer_rename_sources.borrow().get(&buffer_id).cloned())
+        });
+        assert_eq!(
+            rename_source,
+            Some(RepoPath::from_rel_path(rel_path("old.txt")))
+        );
+        let word_diffs = word_diff_strings(&editor, cx);
+        assert_eq!(word_diffs, ["two", "TWO"]);
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_updates_after_recording_rename(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "new.txt": "one\nTWO\nthree\nfour\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("old.txt", "one\ntwo\nthree\n".into())],
+        );
+
+        let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        diff.update_in(cx, |diff, window, cx| {
+            diff.editor
+                .update(cx, |editor, cx| editor.split(window, cx));
+        });
+
+        fs.with_git_state(Path::new(path!("/project/.fslckout")), true, |state| {
+            let new_path = RepoPath::from_rel_path(rel_path("new.txt"));
+            state
+                .head_contents
+                .insert(new_path.clone(), "one\ntwo\nthree\n".into());
+            state
+                .index_contents
+                .insert(new_path.clone(), "one\ntwo\nthree\n".into());
+            state.status_renames = vec![StatusRename {
+                source: RepoPath::from_rel_path(rel_path("old.txt")),
+                target: new_path,
+            }];
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor.read(cx).rhs_editor().clone());
+        assert_state_with_diff(
+            &editor,
+            cx,
+            &"
+                  ˇone
+                + TWO
+                  three
+                + four
+            "
+            .unindent(),
+        );
+        let lhs_editor = diff.read_with(cx, |diff, cx| {
+            diff.editor
+                .read(cx)
+                .lhs_editor()
+                .expect("project diff should remain split")
+                .clone()
+        });
+        assert_eq!(editor_text(&lhs_editor, cx), "one\ntwo\nthree\n");
+        assert_eq!(word_diff_strings(&lhs_editor, cx), ["two"]);
+        assert_eq!(word_diff_strings(&editor, cx), ["TWO"]);
+        let rename_source = diff.read_with(cx, |diff, cx| {
+            let buffer_id = diff
+                .editor
+                .read(cx)
+                .rhs_editor()
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .snapshot(cx)
+                .excerpts()
+                .next()
+                .map(|excerpt| excerpt.context.start.buffer_id);
+            buffer_id
+                .and_then(|buffer_id| diff.buffer_rename_sources.borrow().get(&buffer_id).cloned())
+        });
+        assert_eq!(
+            rename_source,
+            Some(RepoPath::from_rel_path(rel_path("old.txt")))
+        );
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_replaces_created_file_excerpt_after_recording_rename(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let original_text = numbered_text(20);
+        let renamed_text = original_text.replace("line 10\n", "line TEN\ninserted after ten\n");
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "new.txt": renamed_text,
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("old.txt", original_text.clone())],
+        );
+
+        let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        diff.update_in(cx, |diff, window, cx| {
+            diff.editor
+                .update(cx, |editor, cx| editor.split(window, cx));
+        });
+
+        fs.with_git_state(Path::new(path!("/project/.fslckout")), true, |state| {
+            let new_path = RepoPath::from_rel_path(rel_path("new.txt"));
+            state.head_contents.insert(new_path.clone(), original_text);
+            state.status_renames = vec![StatusRename {
+                source: RepoPath::from_rel_path(rel_path("old.txt")),
+                target: new_path,
+            }];
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor.read(cx).rhs_editor().clone());
+        let text = editor_text(&editor, cx);
+        assert!(
+            !text.contains("line 1\n"),
+            "recording a rename should not preserve the target's prior full-file created excerpt"
+        );
+        assert!(
+            text.contains("line TEN\ninserted after ten\n"),
+            "recorded rename excerpt should include the edited hunk"
+        );
+        assert!(
+            !text.contains("line 20\n"),
+            "recording a rename should shrink back to the modified hunk context"
+        );
     }
 
     #[gpui::test]

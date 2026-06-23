@@ -363,12 +363,19 @@ impl BranchDiff {
                 else {
                     continue;
                 };
-                let task = Self::load_buffer(branch_diff, project_path, repo.clone(), cx);
+                let task = Self::load_buffer(
+                    branch_diff,
+                    project_path,
+                    repo.clone(),
+                    item.rename_source.clone(),
+                    cx,
+                );
 
                 output.push(DiffBuffer {
                     repo_path: item.repo_path.clone(),
                     load: task,
                     file_status: item.status,
+                    rename_source: item.rename_source.clone(),
                 });
             }
             let Some(tree_diff) = self.tree_diff.as_ref() else {
@@ -383,8 +390,13 @@ impl BranchDiff {
                 let Some(project_path) = repo.read(cx).repo_path_to_project_path(&path, cx) else {
                     continue;
                 };
-                let task =
-                    Self::load_buffer(Some(branch_diff.clone()), project_path, repo.clone(), cx);
+                let task = Self::load_buffer(
+                    Some(branch_diff.clone()),
+                    project_path,
+                    repo.clone(),
+                    None,
+                    cx,
+                );
 
                 let file_status = diff_status_to_file_status(branch_diff);
 
@@ -392,6 +404,7 @@ impl BranchDiff {
                     repo_path: path.clone(),
                     load: task,
                     file_status,
+                    rename_source: None,
                 });
             }
         });
@@ -403,6 +416,7 @@ impl BranchDiff {
         branch_diff: Option<git::status::TreeDiffStatus>,
         project_path: crate::ProjectPath,
         repo: Entity<Repository>,
+        rename_source: Option<RepoPath>,
         cx: &Context<'_, Project>,
     ) -> Task<Result<(Entity<Buffer>, Entity<BufferDiff>, Entity<ConflictSet>)>> {
         let task = cx.spawn(async move |project, cx| {
@@ -426,7 +440,13 @@ impl BranchDiff {
             } else {
                 project
                     .update(cx, |project, cx| {
-                        project.open_uncommitted_diff(buffer.clone(), cx)
+                        project.git_store().update(cx, |git_store, cx| {
+                            git_store.open_uncommitted_diff_with_head_path(
+                                buffer.clone(),
+                                rename_source,
+                                cx,
+                            )
+                        })
                     })?
                     .await?
             };
@@ -465,5 +485,6 @@ fn diff_status_to_file_status(branch_diff: &git::status::TreeDiffStatus) -> File
 pub struct DiffBuffer {
     pub repo_path: RepoPath,
     pub file_status: FileStatus,
+    pub rename_source: Option<RepoPath>,
     pub load: Task<Result<(Entity<Buffer>, Entity<BufferDiff>, Entity<ConflictSet>)>>,
 }
