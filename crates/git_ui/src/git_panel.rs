@@ -1507,33 +1507,48 @@ impl GitPanel {
 
     fn fossil_record_rename_pair(&self) -> Option<(RepoPath, RepoPath)> {
         let selected_entries = self.selected_status_entries();
-        Self::fossil_record_rename_pair_from_entries(&selected_entries).or_else(|| {
-            let [entry] = selected_entries.as_slice() else {
-                return None;
-            };
-            self.fossil_record_rename_pair_for_entry(entry)
-        })
+        Self::fossil_record_rename_pair_from_entries(&selected_entries)
+            .or_else(|| Self::fossil_record_rename_pair_from_included_entries(&self.entries))
+            .or_else(|| {
+                let [entry] = selected_entries.as_slice() else {
+                    return None;
+                };
+                self.fossil_record_rename_pair_for_entry(entry)
+            })
     }
 
     fn fossil_record_rename_pair_from_entries(
         entries: &[GitStatusEntry],
     ) -> Option<(RepoPath, RepoPath)> {
-        if entries.len() != 2 {
+        let deleted_entries = entries
+            .iter()
+            .filter(|entry| entry.status.is_deleted())
+            .collect::<Vec<_>>();
+        let [old_path] = deleted_entries.as_slice() else {
             return None;
-        }
+        };
 
-        let old_path = entries
+        let untracked_entries = entries
             .iter()
-            .find(|entry| entry.status.is_deleted())?
-            .repo_path
-            .clone();
-        let new_path = entries
-            .iter()
-            .find(|entry| entry.status.is_untracked())?
-            .repo_path
-            .clone();
+            .filter(|entry| entry.status.is_untracked())
+            .collect::<Vec<_>>();
+        let [new_path] = untracked_entries.as_slice() else {
+            return None;
+        };
 
-        Some((old_path, new_path))
+        Some((old_path.repo_path.clone(), new_path.repo_path.clone()))
+    }
+
+    fn fossil_record_rename_pair_from_included_entries(
+        entries: &[GitListEntry],
+    ) -> Option<(RepoPath, RepoPath)> {
+        let included_entries = entries
+            .iter()
+            .filter_map(|entry| entry.status_entry().cloned())
+            .filter(|entry| entry.staging.has_staged())
+            .collect::<Vec<_>>();
+
+        Self::fossil_record_rename_pair_from_entries(&included_entries)
     }
 
     fn fossil_record_rename_pair_for_entry(
@@ -8594,6 +8609,101 @@ mod tests {
             ..fossil_with_tracked_changes
         };
         assert!(!fossil_with_only_extra_files.can_stash_changes());
+    }
+
+    fn fossil_status_entry(path: &str, status: FileStatus, staging: StageStatus) -> GitStatusEntry {
+        GitStatusEntry {
+            repo_path: repo_path(path),
+            status,
+            staging,
+            diff_stat: None,
+            rename_source: None,
+        }
+    }
+
+    #[test]
+    fn test_fossil_record_rename_pair_from_included_entries() {
+        let entries = [
+            GitListEntry::Status(fossil_status_entry(
+                "changed.rs",
+                StatusCode::Modified.worktree(),
+                StageStatus::Staged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "old.rs",
+                StatusCode::Deleted.worktree(),
+                StageStatus::Staged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "ignored-old.rs",
+                StatusCode::Deleted.worktree(),
+                StageStatus::Unstaged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "new.rs",
+                FileStatus::Untracked,
+                StageStatus::Staged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "ignored-new.rs",
+                FileStatus::Untracked,
+                StageStatus::Unstaged,
+            )),
+        ];
+
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_included_entries(&entries),
+            Some((repo_path("old.rs"), repo_path("new.rs")))
+        );
+    }
+
+    #[test]
+    fn test_fossil_record_rename_pair_rejects_ambiguous_included_entries() {
+        let entries = [
+            GitListEntry::Status(fossil_status_entry(
+                "old.rs",
+                StatusCode::Deleted.worktree(),
+                StageStatus::Staged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "other-old.rs",
+                StatusCode::Deleted.worktree(),
+                StageStatus::Staged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "new.rs",
+                FileStatus::Untracked,
+                StageStatus::Staged,
+            )),
+        ];
+
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_included_entries(&entries),
+            None
+        );
+
+        let entries = [
+            GitListEntry::Status(fossil_status_entry(
+                "old.rs",
+                StatusCode::Deleted.worktree(),
+                StageStatus::Staged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "new.rs",
+                FileStatus::Untracked,
+                StageStatus::Staged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "other-new.rs",
+                FileStatus::Untracked,
+                StageStatus::Staged,
+            )),
+        ];
+
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_included_entries(&entries),
+            None
+        );
     }
 
     #[gpui::test]
