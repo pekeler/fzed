@@ -1511,12 +1511,6 @@ impl GitPanel {
         let selected_entries = self.selected_status_entries();
         Self::fossil_record_rename_pair_from_entries(&selected_entries)
             .or_else(|| Self::fossil_record_rename_pair_from_included_entries(&self.entries))
-            .or_else(|| {
-                let [entry] = selected_entries.as_slice() else {
-                    return None;
-                };
-                self.fossil_record_rename_pair_for_entry(entry)
-            })
     }
 
     fn fossil_record_rename_pair_from_entries(
@@ -1593,36 +1587,6 @@ impl GitPanel {
                     context_entry,
                 )
             })
-    }
-
-    fn fossil_record_rename_pair_for_entry(
-        &self,
-        entry: &GitStatusEntry,
-    ) -> Option<(RepoPath, RepoPath)> {
-        let candidates = self
-            .entries
-            .iter()
-            .filter_map(|entry| entry.status_entry())
-            .filter(|candidate| {
-                if entry.status.is_deleted() {
-                    candidate.status.is_untracked()
-                } else if entry.status.is_untracked() {
-                    candidate.status.is_deleted()
-                } else {
-                    false
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let [candidate] = candidates.as_slice() else {
-            return None;
-        };
-
-        if entry.status.is_deleted() {
-            Some((entry.repo_path.clone(), candidate.repo_path.clone()))
-        } else {
-            Some((candidate.repo_path.clone(), entry.repo_path.clone()))
-        }
     }
 
     fn toggle_marked_entry(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -8749,6 +8713,13 @@ mod tests {
             ),
             Some((repo_path("old.rs"), repo_path("new.rs")))
         );
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_entries_with_context(
+                std::slice::from_ref(&new_path),
+                &new_path,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -8779,6 +8750,22 @@ mod tests {
                 &context_entry,
             ),
             Some((repo_path("old.rs"), repo_path("new.rs")))
+        );
+
+        let entries = [GitListEntry::Status(fossil_status_entry(
+            "new.rs",
+            FileStatus::Untracked,
+            StageStatus::Staged,
+        ))];
+        let context_entry =
+            fossil_status_entry("new.rs", FileStatus::Untracked, StageStatus::Unstaged);
+
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_included_entries_with_context(
+                &entries,
+                &context_entry,
+            ),
+            None
         );
     }
 
