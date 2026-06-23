@@ -833,6 +833,7 @@ pub struct GitPanel {
     update_visible_entries_task: Task<()>,
     pub(crate) workspace: WeakEntity<Workspace>,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
+    context_menu_fossil_record_rename_pair: Option<(RepoPath, RepoPath)>,
     modal_open: bool,
     show_placeholders: bool,
     // Only read to compute collaborative co-authors, which requires the `call` feature.
@@ -1035,6 +1036,7 @@ impl GitPanel {
                 local_committer_task: None,
                 commit_template: None,
                 context_menu: None,
+                context_menu_fossil_record_rename_pair: None,
                 workspace: workspace.weak_handle(),
                 modal_open: false,
                 entry_count: 0,
@@ -1539,6 +1541,21 @@ impl GitPanel {
         Some((old_path.repo_path.clone(), new_path.repo_path.clone()))
     }
 
+    fn fossil_record_rename_pair_from_entries_with_context(
+        entries: &[GitStatusEntry],
+        context_entry: &GitStatusEntry,
+    ) -> Option<(RepoPath, RepoPath)> {
+        let mut entries = entries.to_vec();
+        if !entries
+            .iter()
+            .any(|entry| entry.repo_path == context_entry.repo_path)
+        {
+            entries.push(context_entry.clone());
+        }
+
+        Self::fossil_record_rename_pair_from_entries(&entries)
+    }
+
     fn fossil_record_rename_pair_from_included_entries(
         entries: &[GitListEntry],
     ) -> Option<(RepoPath, RepoPath)> {
@@ -1549,6 +1566,33 @@ impl GitPanel {
             .collect::<Vec<_>>();
 
         Self::fossil_record_rename_pair_from_entries(&included_entries)
+    }
+
+    fn fossil_record_rename_pair_from_included_entries_with_context(
+        entries: &[GitListEntry],
+        context_entry: &GitStatusEntry,
+    ) -> Option<(RepoPath, RepoPath)> {
+        let included_entries = entries
+            .iter()
+            .filter_map(|entry| entry.status_entry().cloned())
+            .filter(|entry| entry.staging.has_staged())
+            .collect::<Vec<_>>();
+
+        Self::fossil_record_rename_pair_from_entries_with_context(&included_entries, context_entry)
+    }
+
+    fn fossil_record_rename_pair_for_context_entry(
+        &self,
+        context_entry: &GitStatusEntry,
+    ) -> Option<(RepoPath, RepoPath)> {
+        let selected_entries = self.selected_status_entries();
+        Self::fossil_record_rename_pair_from_entries_with_context(&selected_entries, context_entry)
+            .or_else(|| {
+                Self::fossil_record_rename_pair_from_included_entries_with_context(
+                    &self.entries,
+                    context_entry,
+                )
+            })
     }
 
     fn fossil_record_rename_pair_for_entry(
@@ -2591,7 +2635,11 @@ impl GitPanel {
         if !self.active_repository_kind(cx).is_fossil() {
             return;
         }
-        let Some((old_path, new_path)) = self.fossil_record_rename_pair() else {
+        let Some((old_path, new_path)) = self
+            .context_menu_fossil_record_rename_pair
+            .take()
+            .or_else(|| self.fossil_record_rename_pair())
+        else {
             return;
         };
         let Some(active_repository) = self.active_repository.clone() else {
@@ -6767,17 +6815,29 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.context_menu_fossil_record_rename_pair = None;
+        let Some(entry) = self
+            .entries
+            .get(ix)
+            .and_then(|entry| entry.status_entry())
+            .cloned()
+        else {
+            return;
+        };
+        let repository_kind = self.active_repository_kind(cx);
+        let is_fossil = repository_kind.is_fossil();
+        self.context_menu_fossil_record_rename_pair = is_fossil
+            .then(|| self.fossil_record_rename_pair_for_context_entry(&entry))
+            .flatten();
+
         if self.selected_entry != Some(ix) && !self.marked_entries.contains(&ix) {
             self.marked_entries.clear();
         }
         self.selected_entry = Some(ix);
 
-        let Some(entry) = self.entries.get(ix).and_then(|e| e.status_entry()) else {
-            return;
-        };
-        let repository_kind = self.active_repository_kind(cx);
-        let is_fossil = repository_kind.is_fossil();
-        let can_record_fossil_rename = is_fossil && self.fossil_record_rename_pair().is_some();
+        let can_record_fossil_rename = is_fossil
+            && (self.context_menu_fossil_record_rename_pair.is_some()
+                || self.fossil_record_rename_pair().is_some());
         let can_undo_fossil_rename = is_fossil && entry.rename_source.is_some();
         let stage_title = stage_file_action_title(repository_kind, entry.staging);
         let restore_title = if entry.status.is_created() {
@@ -6850,6 +6910,7 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.context_menu_fossil_record_rename_pair = None;
         let can_restore = self.has_write_access(cx) && self.can_restore_active_repository(cx);
         let can_stash = self.has_write_access(cx) && self.can_stash_active_repository(cx);
         let can_select_files =
@@ -6892,6 +6953,7 @@ impl GitPanel {
                     cx.focus_self(window);
                 }
                 this.context_menu.take();
+                this.context_menu_fossil_record_rename_pair = None;
                 cx.notify();
             },
         );
@@ -8658,6 +8720,69 @@ mod tests {
     }
 
     #[test]
+    fn test_fossil_record_rename_pair_from_context_entry() {
+        let old_path = fossil_status_entry(
+            "old.rs",
+            StatusCode::Deleted.worktree(),
+            StageStatus::Unstaged,
+        );
+        let new_path = fossil_status_entry("new.rs", FileStatus::Untracked, StageStatus::Unstaged);
+
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_entries_with_context(
+                std::slice::from_ref(&old_path),
+                &new_path,
+            ),
+            Some((repo_path("old.rs"), repo_path("new.rs")))
+        );
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_entries_with_context(
+                std::slice::from_ref(&new_path),
+                &old_path,
+            ),
+            Some((repo_path("old.rs"), repo_path("new.rs")))
+        );
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_entries_with_context(
+                &[old_path, new_path.clone()],
+                &new_path,
+            ),
+            Some((repo_path("old.rs"), repo_path("new.rs")))
+        );
+    }
+
+    #[test]
+    fn test_fossil_record_rename_pair_from_included_entries_with_context() {
+        let entries = [
+            GitListEntry::Status(fossil_status_entry(
+                "changed.rs",
+                StatusCode::Modified.worktree(),
+                StageStatus::Staged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "old.rs",
+                StatusCode::Deleted.worktree(),
+                StageStatus::Staged,
+            )),
+            GitListEntry::Status(fossil_status_entry(
+                "other-new.rs",
+                FileStatus::Untracked,
+                StageStatus::Unstaged,
+            )),
+        ];
+        let context_entry =
+            fossil_status_entry("new.rs", FileStatus::Untracked, StageStatus::Unstaged);
+
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_included_entries_with_context(
+                &entries,
+                &context_entry,
+            ),
+            Some((repo_path("old.rs"), repo_path("new.rs")))
+        );
+    }
+
+    #[test]
     fn test_fossil_record_rename_pair_rejects_ambiguous_included_entries() {
         let entries = [
             GitListEntry::Status(fossil_status_entry(
@@ -8702,6 +8827,44 @@ mod tests {
 
         assert_eq!(
             GitPanel::fossil_record_rename_pair_from_included_entries(&entries),
+            None
+        );
+    }
+
+    #[test]
+    fn test_fossil_record_rename_pair_rejects_ambiguous_context_entry() {
+        let entries = [
+            fossil_status_entry(
+                "old.rs",
+                StatusCode::Deleted.worktree(),
+                StageStatus::Unstaged,
+            ),
+            fossil_status_entry("new.rs", FileStatus::Untracked, StageStatus::Unstaged),
+        ];
+        let context_entry =
+            fossil_status_entry("other-new.rs", FileStatus::Untracked, StageStatus::Unstaged);
+
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_entries_with_context(&entries, &context_entry,),
+            None
+        );
+
+        let entries = [GitListEntry::Status(fossil_status_entry(
+            "old.rs",
+            StatusCode::Deleted.worktree(),
+            StageStatus::Staged,
+        ))];
+        let context_entry = fossil_status_entry(
+            "other-old.rs",
+            StatusCode::Deleted.worktree(),
+            StageStatus::Unstaged,
+        );
+
+        assert_eq!(
+            GitPanel::fossil_record_rename_pair_from_included_entries_with_context(
+                &entries,
+                &context_entry,
+            ),
             None
         );
     }
