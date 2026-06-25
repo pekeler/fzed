@@ -697,6 +697,13 @@ impl GitRepository for FossilRepository {
                     });
                 }
 
+                let commit = if matches!(commit.as_str(), "HEAD" | "checkout" | "current") {
+                    parse_fossil_info(&fossil.run(&["info"]).await?)
+                        .checkout
+                        .context("Fossil checkout hash is unavailable")?
+                } else {
+                    commit
+                };
                 let info = fossil_commit_info(&fossil, &commit).await?;
                 Ok(CommitDetails {
                     sha: SharedString::from(info.hash),
@@ -2939,6 +2946,9 @@ mod tests {
         std::fs::write(checkout.join("tracked.txt"), "modified\n").unwrap();
 
         let head = repository.head_sha().await.unwrap();
+        let head_details = repository.show("HEAD".to_string()).await.unwrap();
+        assert_eq!(head_details.sha.as_ref(), head.as_str());
+        assert_eq!(head_details.message.as_ref(), "initial");
         let branches = repository.branches().await.unwrap().branches;
         let head_branch = branches
             .iter()
