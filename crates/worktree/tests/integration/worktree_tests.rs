@@ -3561,6 +3561,71 @@ async fn test_legacy_fossil_repository_detection(
 }
 
 #[gpui::test]
+async fn test_fossil_metadata_exclusions_preserve_repository_detection(
+    executor: BackgroundExecutor,
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "modern": {
+                ".fslckout": "",
+                "a.txt": "A"
+            },
+            "legacy": {
+                "_FOSSIL_": "",
+                "a.txt": "A"
+            }
+        }),
+    )
+    .await;
+
+    let cases: [(&str, &'static [&'static str]); 2] = [
+        (path!("/root/modern"), &[".fslckout"]),
+        (path!("/root/legacy"), &["_FOSSIL_"]),
+    ];
+
+    for (root, excluded_paths) in cases {
+        let worktree = Worktree::local(
+            Path::new(root),
+            true,
+            fs.clone(),
+            Arc::default(),
+            true,
+            WorktreeId::from_proto(0),
+            &mut cx.to_async(),
+        )
+        .await
+        .unwrap();
+        worktree
+            .update(cx, |worktree, _| {
+                worktree.as_local().unwrap().scan_complete()
+            })
+            .await;
+        cx.run_until_parked();
+
+        worktree.read_with(cx, |worktree, _| {
+            check_worktree_entries(
+                worktree,
+                WorktreeExpectations {
+                    excluded_paths,
+                    tracked_paths: &["a.txt"],
+                    ..Default::default()
+                },
+            );
+        });
+
+        let repos = worktree.update(cx, |worktree, _| {
+            worktree.as_local().unwrap().repositories()
+        });
+        pretty_assertions::assert_eq!(repos, [Path::new(root).into()]);
+    }
+}
+
+#[gpui::test]
 async fn test_global_gitignore(executor: BackgroundExecutor, cx: &mut TestAppContext) {
     init_test(cx);
 
