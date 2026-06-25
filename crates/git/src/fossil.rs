@@ -33,6 +33,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::SystemTime,
 };
 use text::LineEnding;
 use time::PrimitiveDateTime;
@@ -216,6 +217,33 @@ impl GitRepository for FossilRepository {
                 )
             })
             .map(|result| result.ok().flatten())
+            .boxed()
+    }
+
+    fn remote_urls(&self) -> BoxFuture<'_, HashMap<String, String>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let mut remote_urls = fossil
+                    .run(&["remote", "list"])
+                    .await
+                    .map(|output| {
+                        parse_fossil_remote_list(&output)
+                            .into_iter()
+                            .map(|remote| (remote.name, remote.url))
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+
+                if !remote_urls.contains_key("default")
+                    && let Ok(output) = fossil.run(&["remote"]).await
+                    && let Some(default_remote) = parse_fossil_default_remote(&output)
+                {
+                    remote_urls.insert("default".to_string(), default_remote);
+                }
+
+                remote_urls
+            })
             .boxed()
     }
 
@@ -480,6 +508,31 @@ impl GitRepository for FossilRepository {
                 });
                 worktrees.dedup_by(|left, right| left.path == right.path);
                 Ok(worktrees)
+            })
+            .boxed()
+    }
+
+    fn worktree_created_at(
+        &self,
+        worktree_path: PathBuf,
+    ) -> BoxFuture<'_, Result<Option<SystemTime>>> {
+        self.executor
+            .spawn(async move {
+                let metadata = match std::fs::metadata(&worktree_path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(None);
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("failed to stat {}", worktree_path.display())
+                        });
+                    }
+                };
+
+                metadata.created().map(Some).with_context(|| {
+                    format!("creation time unavailable for {}", worktree_path.display())
+                })
             })
             .boxed()
     }

@@ -37,6 +37,7 @@ mod commit_modal;
 pub mod commit_tooltip;
 pub mod commit_view;
 mod conflict_view;
+pub mod created_worktrees;
 pub mod file_diff_view;
 pub mod fossil_setup;
 pub mod git_graph;

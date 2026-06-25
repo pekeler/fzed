@@ -7,7 +7,10 @@ use crate::{
 use agent_client_protocol::schema as acp;
 use std::cell::RefCell;
 
-use acp_thread::{ContentBlock, PlanEntry, SandboxAuthorizationDetails};
+use acp_thread::{
+    ContentBlock, PlanEntry, SandboxAuthorizationDetails, SandboxFallbackAuthorizationDetails,
+    SandboxNotAppliedReason,
+};
 use agent::{SkillLoadingIssue, SkillLoadingIssueKind, SkillLoadingIssuesUpdated};
 use agent_settings::UserAgentsMd;
 use agent_skills::MAX_SKILL_DESCRIPTION_LEN;
@@ -24,7 +27,7 @@ use gpui::TaskExt;
 use heapless::Vec as ArrayVec;
 use language_model::{
     FastModeConfirmation, LanguageModel, LanguageModelEffortLevel, LanguageModelId,
-    LanguageModelProviderId, LanguageModelRegistry, Speed,
+    LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry, Speed,
 };
 use settings::{update_settings_file, update_settings_file_with_completion};
 use ui::{
@@ -578,6 +581,7 @@ pub struct ThreadView {
     pub expanded_tool_calls: HashSet<acp::ToolCallId>,
     pub expanded_tool_call_raw_inputs: HashSet<acp::ToolCallId>,
     collapsed_sandbox_authorization_details: HashSet<acp::ToolCallId>,
+    collapsed_sandbox_network_details: HashSet<acp::ToolCallId>,
     pub expanded_thinking_blocks: HashSet<(usize, usize)>,
     auto_expanded_thinking_block: Option<(usize, usize)>,
     user_toggled_thinking_blocks: HashSet<(usize, usize)>,
@@ -963,6 +967,7 @@ impl ThreadView {
             expanded_tool_calls: HashSet::default(),
             expanded_tool_call_raw_inputs: HashSet::default(),
             collapsed_sandbox_authorization_details: HashSet::default(),
+            collapsed_sandbox_network_details: HashSet::default(),
             expanded_thinking_blocks: HashSet::default(),
             auto_expanded_thinking_block: None,
             user_toggled_thinking_blocks: HashSet::default(),
@@ -1818,28 +1823,30 @@ impl ThreadView {
                     None,
                     "Context too large for the model's context window.".into(),
                 ),
-                ThreadError::NoApiKey { provider } => (
+                ThreadError::NoCredentials { provider } => (
                     "no_api_key",
                     None,
-                    format!("No API key configured for {provider}.").into(),
+                    format!("No credentials configured for {provider}.").into(),
                 ),
                 ThreadError::StreamError { provider } => (
                     "stream_error",
                     None,
                     format!("Connection to {provider}'s API was interrupted.").into(),
                 ),
-                ThreadError::InvalidApiKey { provider } => (
+                ThreadError::AuthenticationFailed { provider } => (
                     "invalid_api_key",
                     None,
-                    format!("Invalid or expired API key for {provider}.").into(),
+                    format!("Authentication with {provider} failed.").into(),
                 ),
-                ThreadError::PermissionDenied { provider } => (
+                ThreadError::PermissionDenied { provider, message } => (
                     "permission_denied",
                     None,
-                    format!(
-                        "{provider}'s API rejected the request due to insufficient permissions."
-                    )
-                    .into(),
+                    message.clone().unwrap_or_else(|| {
+                        format!(
+                            "{provider}'s API rejected the request due to insufficient permissions."
+                        )
+                        .into()
+                    }),
                 ),
                 ThreadError::RequestFailed => (
                     "request_failed",
@@ -1942,12 +1949,19 @@ impl ThreadView {
             //
             // If editing the prompt that generated the edits, they are auto-rejected
             // through the `rewind` function in the `acp_thread`.
+            //
+            // Subagent edits never show up as diffs in the parent thread's entries (they
+            // are only forwarded to the parent's action log), so treat any earlier
+            // subagent tool call as potentially having edits. Keeping all edits is a
+            // no-op when the subagent didn't make any.
             let has_earlier_edits = thread.read_with(cx, |thread, _| {
-                thread
-                    .entries()
-                    .iter()
-                    .take(entry_ix)
-                    .any(|entry| entry.diffs().next().is_some())
+                thread.entries().iter().take(entry_ix).any(|entry| {
+                    entry.diffs().next().is_some()
+                        || matches!(
+                            entry,
+                            AgentThreadEntry::ToolCall(tool_call) if tool_call.is_subagent()
+                        )
+                })
             });
 
             if has_earlier_edits {
@@ -2155,6 +2169,20 @@ impl ThreadView {
 
         cx.notify();
         true
+    }
+
+    fn handle_message_editor_move_up(
+        &mut self,
+        _: &zed_actions::editor::MoveUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.message_editor.read(cx).is_empty(cx) || self.local_queued_messages.is_empty() {
+            cx.propagate();
+            return;
+        }
+        let last_index = self.local_queued_messages.len() - 1;
+        self.move_queued_message_to_main_editor(last_index, None, None, window, cx);
     }
 
     // editor methods
@@ -2824,6 +2852,10 @@ impl ThreadView {
         let queue_expanded = self.queue_expanded;
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
+        // Drop shadows have no opaque surface to blend into on a transparent
+        // window, so they render as a dark halo; only apply them when opaque.
+        let opaque_window =
+            cx.theme().window_background_appearance() == gpui::WindowBackgroundAppearance::Opaque;
 
         h_flex()
             .w_full()
@@ -2841,13 +2873,12 @@ impl ThreadView {
                     .border_b_0()
                     .border_color(cx.theme().colors().border)
                     .rounded_t_md()
-                    .shadow(vec![gpui::BoxShadow {
-                        color: gpui::black().opacity(0.12),
-                        offset: point(px(1.), px(-1.)),
-                        blur_radius: px(2.),
-                        spread_radius: px(0.),
-                        inset: false,
-                    }])
+                    .when(opaque_window, |this| {
+                        this.shadow(vec![
+                            gpui::BoxShadow::new(px(1.), px(-1.), gpui::black().opacity(0.12))
+                                .blur_radius(px(2.)),
+                        ])
+                    })
                     .when_some(awaiting_permission, |this, element| this.child(element))
                     .when(
                         has_awaiting_permission
@@ -4029,6 +4060,7 @@ impl ThreadView {
             .p_2()
             .bg(editor_bg_color)
             .justify_center()
+            .on_action(cx.listener(Self::handle_message_editor_move_up))
             .map(|this| {
                 if has_messages {
                     this.on_action(cx.listener(Self::expand_message_editor))
@@ -4651,6 +4683,24 @@ impl ThreadView {
             return None;
         }
 
+        // A toggle would be dishonest for models that always think: only
+        // offer the effort selector.
+        if !model.supports_disabling_thinking() {
+            let effort_levels = model.supported_effort_levels();
+            if effort_levels.is_empty() {
+                return None;
+            }
+            return Some(
+                self.render_effort_selector(
+                    effort_levels,
+                    thread.thinking_effort().cloned(),
+                    true,
+                    cx,
+                )
+                .into_any_element(),
+            );
+        }
+
         let thinking = thread.thinking_enabled();
 
         let (tooltip_label, icon, color) = if thinking {
@@ -4715,6 +4765,7 @@ impl ThreadView {
         let right_btn = self.render_effort_selector(
             model.supported_effort_levels(),
             thread.thinking_effort().cloned(),
+            false,
             cx,
         );
 
@@ -4729,6 +4780,7 @@ impl ThreadView {
         &self,
         supported_effort_levels: Vec<LanguageModelEffortLevel>,
         selected_effort: Option<String>,
+        standalone: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let weak_self = cx.weak_entity();
@@ -4794,12 +4846,27 @@ impl ThreadView {
             }
         });
 
-        PopoverMenu::new("effort-selector")
-            .trigger_with_tooltip(
-                ButtonLike::new_rounded_right("effort-selector-trigger")
-                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+        let trigger = if standalone {
+            ButtonLike::new("effort-selector-trigger").child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::ThinkingMode)
+                            .size(IconSize::Small)
+                            .color(label_color),
+                    )
                     .child(Label::new(label).size(LabelSize::Small).color(label_color))
                     .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted)),
+            )
+        } else {
+            ButtonLike::new_rounded_right("effort-selector-trigger")
+                .child(Label::new(label).size(LabelSize::Small).color(label_color))
+                .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+        };
+
+        PopoverMenu::new("effort-selector")
+            .trigger_with_tooltip(
+                trigger.selected_style(ButtonStyle::Tinted(TintColor::Accent)),
                 tooltip,
             )
             .menu(move |window, cx| {
@@ -5446,6 +5513,9 @@ impl ThreadView {
                 let editing = self.editing_message == Some(entry_ix);
                 let editor_focus = editor.focus_handle(cx).is_focused(window);
                 let focus_border = cx.theme().colors().border_focused;
+                // Drop shadows render as a dark halo on transparent windows.
+                let opaque_window = cx.theme().window_background_appearance()
+                    == gpui::WindowBackgroundAppearance::Opaque;
 
                 let has_checkpoint_button = message
                     .checkpoint
@@ -5504,7 +5574,9 @@ impl ThreadView {
                                     .bg(cx.theme().colors().editor_background)
                                     .border_1()
                                     .when(is_indented, |this| {
-                                        this.py_2().px_2().shadow_sm()
+                                        this.py_2().px_2().when(opaque_window, |this| {
+                                            this.shadow_sm()
+                                        })
                                     })
                                     .border_color(cx.theme().colors().border)
                                     .map(|this| {
@@ -5520,9 +5592,10 @@ impl ThreadView {
                                         if editing && !editor_focus {
                                             return this.border_dashed()
                                         }
-                                        this.shadow_md().hover(|s| {
-                                            s.border_color(focus_border.opacity(0.8))
-                                        })
+                                        this.when(opaque_window, |this| this.shadow_md())
+                                            .hover(|s| {
+                                                s.border_color(focus_border.opacity(0.8))
+                                            })
                                     })
                                     .text_xs()
                                     .child(editor.clone().into_any_element())
@@ -7109,6 +7182,9 @@ impl ThreadView {
                     .child(header)
                     .child(command_element),
             )
+            .when_some(tool_call.sandbox_not_applied.as_ref(), |this, reason| {
+                this.child(self.render_sandbox_not_applied_warning(reason, terminal, cx))
+            })
             .when(is_expanded && terminal_view.is_some(), |this| {
                 this.child(
                     div()
@@ -7154,6 +7230,120 @@ impl ThreadView {
                 ))
             })
             .into_any()
+    }
+
+    /// Render the "ran without sandbox" warning shown on a terminal tool card,
+    /// tailored to *why* the sandbox wasn't applied.
+    fn render_sandbox_not_applied_warning(
+        &self,
+        reason: &SandboxNotAppliedReason,
+        terminal: &Entity<acp_thread::Terminal>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        // (title, optional detail line, whether to offer the settings shortcut)
+        let (title, detail, show_settings_button): (SharedString, Option<SharedString>, bool) =
+            match reason {
+                SandboxNotAppliedReason::DisabledForever => (
+                    "Ran without sandbox".into(),
+                    Some("Unsandboxed execution is enabled in settings.".into()),
+                    true,
+                ),
+                SandboxNotAppliedReason::ErrorLinuxWsl(error) => (
+                    "Couldn't create a sandbox".into(),
+                    Some(error.user_facing_message().into()),
+                    false,
+                ),
+                SandboxNotAppliedReason::DisabledForThisThread => {
+                    // The grant only exists because an earlier command failed to
+                    // create a sandbox; surface that same explanation here.
+                    let detail = self
+                        .find_thread_sandbox_error(cx)
+                        .map(|error| {
+                            SharedString::from(format!(
+                                "Allowed for this thread after the sandbox failed: {}",
+                                error.user_facing_message()
+                            ))
+                        })
+                        .unwrap_or_else(|| {
+                            "Unsandboxed execution is allowed for the rest of this thread.".into()
+                        });
+                    ("Ran without sandbox".into(), Some(detail), false)
+                }
+            };
+
+        h_flex()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .justify_between()
+            .border_t_1()
+            .border_color(cx.theme().status().warning_border)
+            .bg(cx.theme().status().warning_background.opacity(0.5))
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_1p5()
+                    .items_start()
+                    .child(
+                        Icon::new(IconName::Warning)
+                            .size(IconSize::XSmall)
+                            .color(Color::Warning),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(Label::new(title).size(LabelSize::Small).color(Color::Muted))
+                            .when_some(detail, |this, detail| {
+                                this.child(
+                                    Label::new(detail)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                            }),
+                    ),
+            )
+            .when(show_settings_button, |this| {
+                this.child(
+                    IconButton::new(
+                        SharedString::from(format!(
+                            "open-sandbox-setting-{}",
+                            terminal.entity_id()
+                        )),
+                        IconName::Settings,
+                    )
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
+                    .tooltip(Tooltip::text("Open the unsandboxed execution setting"))
+                    .on_click(|_event, window, cx| {
+                        window.dispatch_action(
+                            Box::new(zed_actions::OpenSettingsAt {
+                                path: zed_actions::AGENT_ALLOW_UNSANDBOXED_SETTINGS_PATH
+                                    .to_string(),
+                                target: None,
+                            }),
+                            cx,
+                        );
+                    }),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Find the first terminal tool call in the thread whose sandbox couldn't be
+    /// created, so a later "disabled for this thread" warning can reuse the same
+    /// explanation of *why* the sandbox failed.
+    fn find_thread_sandbox_error(&self, cx: &App) -> Option<acp_thread::LinuxWslSandboxError> {
+        self.thread.read(cx).entries().iter().find_map(|entry| {
+            if let AgentThreadEntry::ToolCall(tool_call) = entry
+                && let Some(SandboxNotAppliedReason::ErrorLinuxWsl(error)) =
+                    &tool_call.sandbox_not_applied
+            {
+                return Some(error.clone());
+            }
+            None
+        })
     }
 
     fn is_first_tool_call(
@@ -7319,6 +7509,14 @@ impl ThreadView {
                                     details,
                                     cx,
                                 ))
+                            },
+                        )
+                        .when_some(
+                            tool_call.sandbox_fallback_authorization_details.as_ref(),
+                            |this, details| {
+                                this.child(
+                                    self.render_sandbox_fallback_authorization_details(details, cx),
+                                )
                             },
                         )
                         .when(should_show_raw_input, |this| {
@@ -7721,8 +7919,134 @@ impl ThreadView {
         details: &SandboxAuthorizationDetails,
         cx: &Context<Self>,
     ) -> AnyElement {
-        if details.write_paths.is_empty() {
+        let has_network = details.network_all_hosts || !details.network_hosts.is_empty();
+        let command = details
+            .command
+            .as_deref()
+            .filter(|command| !command.is_empty());
+        if details.write_paths.is_empty()
+            && !has_network
+            && command.is_none()
+            && details.reason.is_empty()
+        {
             return Empty.into_any_element();
+        }
+
+        let network_section = has_network.then(|| {
+            let summary = if details.network_all_hosts {
+                "any host".to_string()
+            } else {
+                format!(
+                    "{} {}",
+                    details.network_hosts.len(),
+                    if details.network_hosts.len() == 1 {
+                        "host"
+                    } else {
+                        "hosts"
+                    }
+                )
+            };
+            let has_host_list = !details.network_all_hosts && !details.network_hosts.is_empty();
+            let is_open = !self
+                .collapsed_sandbox_network_details
+                .contains(tool_call_id);
+            let mut hosts = details.network_hosts.clone();
+            hosts.sort();
+
+            v_flex()
+                .child(
+                    h_flex()
+                        .id(("sandbox-network-details-header", entry_ix))
+                        .p_1()
+                        .justify_between()
+                        .when(has_host_list, |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(cx.theme().colors().element_hover))
+                                .on_click(cx.listener({
+                                    let tool_call_id = tool_call_id.clone();
+                                    move |this, _event, _window, cx| {
+                                        if this
+                                            .collapsed_sandbox_network_details
+                                            .remove(&tool_call_id)
+                                        {
+                                            cx.notify();
+                                            return;
+                                        }
+
+                                        this.collapsed_sandbox_network_details
+                                            .insert(tool_call_id.clone());
+                                        cx.notify();
+                                    }
+                                }))
+                        })
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Label::new("Network access")
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    Label::new("•")
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Disabled),
+                                )
+                                .child(
+                                    Label::new(summary)
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                        .when(has_host_list, |this| {
+                            this.child(
+                                Disclosure::new(("sandbox-network-details", entry_ix), is_open)
+                                    .opened_icon(IconName::ChevronUp)
+                                    .closed_icon(IconName::ChevronDown),
+                            )
+                        }),
+                )
+                .when(has_host_list && is_open, |this| {
+                    this.child(
+                        v_flex()
+                            .id(("sandbox-network-hosts-list", entry_ix))
+                            .max_h_40()
+                            .overflow_y_scroll()
+                            .children(hosts.iter().enumerate().map(|(host_ix, host)| {
+                                h_flex()
+                                    .min_w_0()
+                                    .p_1p5()
+                                    .gap_2()
+                                    .bg(cx.theme().colors().editor_background)
+                                    .when(host_ix < hosts.len() - 1, |this| {
+                                        this.border_b_1().border_color(cx.theme().colors().border)
+                                    })
+                                    .child(
+                                        Icon::new(IconName::Public)
+                                            .color(Color::Muted)
+                                            .size(IconSize::Small),
+                                    )
+                                    .child(
+                                        Label::new(host.clone())
+                                            .size(LabelSize::XSmall)
+                                            .buffer_font(cx),
+                                    )
+                            })),
+                    )
+                })
+        });
+
+        if details.write_paths.is_empty() {
+            return v_flex()
+                .border_t_1()
+                .border_color(self.tool_card_border_color(cx))
+                .when_some(command, |this, command| {
+                    this.child(Self::render_sandbox_authorization_command(
+                        entry_ix, command, cx,
+                    ))
+                })
+                .children(network_section)
+                .into_any_element();
         }
 
         let is_open = !self
@@ -7734,6 +8058,12 @@ impl ThreadView {
         v_flex()
             .border_t_1()
             .border_color(self.tool_card_border_color(cx))
+            .when_some(command, |this, command| {
+                this.child(Self::render_sandbox_authorization_command(
+                    entry_ix, command, cx,
+                ))
+            })
+            .children(network_section)
             .child(
                 h_flex()
                     .id(("sandbox-authorization-details-header", entry_ix))
@@ -7742,27 +8072,11 @@ impl ThreadView {
                     .cursor_pointer()
                     .hover(|style| style.bg(cx.theme().colors().element_hover))
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Label::new("Write access")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                Label::new("•")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Disabled),
-                            )
-                            .child(
-                                Label::new(format!(
-                                    "{} {}",
-                                    paths.len(),
-                                    if paths.len() == 1 { "path" } else { "paths" }
-                                ))
+                        h_flex().gap_1().child(
+                            Label::new("Write access")
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
-                            ),
+                        ),
                     )
                     .child(
                         Disclosure::new(("sandbox-authorization-details", entry_ix), is_open)
@@ -7786,24 +8100,171 @@ impl ThreadView {
                         }
                     })),
             )
-            .when(is_open, |this| {
+            .when(is_open && !paths.is_empty(), |this| {
                 this.child(
                     v_flex()
-                        .id(("sandbox-authorization-paths-list", entry_ix))
-                        .max_h_40()
-                        .overflow_y_scroll()
-                        .children(paths.iter().enumerate().map(|(path_ix, path)| {
-                            self.render_sandbox_authorization_path_row(
-                                entry_ix,
-                                path_ix,
-                                path,
-                                path_ix < paths.len() - 1,
-                                cx,
-                            )
-                        })),
+                        .gap_0p5()
+                        .child(
+                            Label::new("Reason from agent")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .buffer_font(cx),
+                        )
+                        .child(Label::new(details.reason.clone()).size(LabelSize::Small)),
                 )
             })
+            .when(!paths.is_empty(), |this| {
+                this.child(
+                    h_flex()
+                        .id(("sandbox-authorization-details-header", entry_ix))
+                        .p_1()
+                        .justify_between()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(cx.theme().colors().element_hover))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Label::new("Write access")
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    Label::new("•")
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Disabled),
+                                )
+                                .child(
+                                    Label::new(format!(
+                                        "{} {}",
+                                        paths.len(),
+                                        if paths.len() == 1 { "path" } else { "paths" }
+                                    ))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                                ),
+                        )
+                        .child(
+                            Disclosure::new(("sandbox-authorization-details", entry_ix), is_open)
+                                .opened_icon(IconName::ChevronUp)
+                                .closed_icon(IconName::ChevronDown),
+                        )
+                        .on_click(cx.listener({
+                            let tool_call_id = tool_call_id.clone();
+                            move |this, _event, _window, cx| {
+                                if this
+                                    .collapsed_sandbox_authorization_details
+                                    .remove(&tool_call_id)
+                                {
+                                    cx.notify();
+                                    return;
+                                }
+
+                                this.collapsed_sandbox_authorization_details
+                                    .insert(tool_call_id.clone());
+                                cx.notify();
+                            }
+                        })),
+                )
+                .when(is_open, |this| {
+                    this.child(
+                        v_flex()
+                            .id(("sandbox-authorization-paths-list", entry_ix))
+                            .max_h_40()
+                            .overflow_y_scroll()
+                            .children(paths.iter().enumerate().map(|(path_ix, path)| {
+                                self.render_sandbox_authorization_path_row(
+                                    entry_ix,
+                                    path_ix,
+                                    path,
+                                    path_ix < paths.len() - 1,
+                                    cx,
+                                )
+                            })),
+                    )
+                })
+            })
             .into_any_element()
+    }
+
+    fn render_sandbox_fallback_authorization_details(
+        &self,
+        details: &SandboxFallbackAuthorizationDetails,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        // The command itself is shown in the tool-call header (a collapsible
+        // command), so here we only explain *why* the sandbox couldn't be
+        // created — the user needs both to decide whether to run unsandboxed.
+        if details.reason.is_empty() {
+            return Empty.into_any_element();
+        }
+
+        h_flex()
+            .p_1p5()
+            .gap_1p5()
+            .items_start()
+            .border_t_1()
+            .border_color(self.tool_card_border_color(cx))
+            .child(
+                Icon::new(IconName::Warning)
+                    .color(Color::Warning)
+                    .size(IconSize::Small),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        Label::new("Couldn't create a sandbox")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(details.reason.clone()).size(LabelSize::Small)),
+            )
+            .into_any_element()
+    }
+
+    fn render_sandbox_authorization_command(entry_ix: usize, command: &str, cx: &App) -> Div {
+        let group = SharedString::from(format!("sandbox-authorization-command-{entry_ix}"));
+        let command = SharedString::from(command.to_string());
+
+        v_flex()
+            .group(group.clone())
+            .relative()
+            .p_1p5()
+            .gap_1()
+            .bg(cx.theme().colors().editor_background)
+            .child(
+                Label::new("Command")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .id(("sandbox-authorization-command-scroll", entry_ix))
+                    .flex()
+                    .flex_1()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .whitespace_nowrap()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .p_1()
+                    .child(
+                        Label::new(command.clone())
+                            .buffer_font(cx)
+                            .size(LabelSize::XSmall),
+                    ),
+            )
+            .child(
+                div().absolute().top_1().right_1().child(
+                    CopyButton::new("copy-sandbox-authorization-command", command)
+                        .tooltip_label("Copy Command")
+                        .visible_on_hover(group),
+                ),
+            )
     }
 
     fn render_sandbox_authorization_path_row(
@@ -8327,37 +8788,52 @@ impl ThreadView {
                 let option_id = SharedString::from(option.option_id.0.clone());
                 Button::new((option_id, entry_ix), option.name.clone())
                     .map(|this| {
-                        let (icon, action) = match option.kind {
-                            acp::PermissionOptionKind::AllowOnce => (
-                                Icon::new(IconName::Check)
+                        // The sandbox-fallback prompt offers a "Retry" option
+                        // that re-attempts creating the sandbox; it isn't an
+                        // allow/deny choice, so give it its own icon and no
+                        // keybinding.
+                        let is_retry = option.option_id.0.as_ref()
+                            == acp_thread::SANDBOX_FALLBACK_RETRY_OPTION_ID;
+                        let (icon, action) = if is_retry {
+                            (
+                                Icon::new(IconName::RotateCcw)
                                     .size(IconSize::XSmall)
-                                    .color(Color::Success),
-                                Some(&AllowOnce as &dyn Action),
-                            ),
-                            acp::PermissionOptionKind::AllowAlways => (
-                                Icon::new(IconName::CheckDouble)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Success),
-                                if option.option_id.0.as_ref()
-                                    == acp_thread::SandboxPermission::AllowThread.as_id()
-                                {
-                                    None
-                                } else {
-                                    Some(&AllowAlways as &dyn Action)
-                                },
-                            ),
-                            acp::PermissionOptionKind::RejectOnce => (
-                                Icon::new(IconName::Close)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Error),
-                                Some(&RejectOnce as &dyn Action),
-                            ),
-                            acp::PermissionOptionKind::RejectAlways | _ => (
-                                Icon::new(IconName::Close)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Error),
+                                    .color(Color::Muted),
                                 None,
-                            ),
+                            )
+                        } else {
+                            match option.kind {
+                                acp::PermissionOptionKind::AllowOnce => (
+                                    Icon::new(IconName::Check)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Success),
+                                    Some(&AllowOnce as &dyn Action),
+                                ),
+                                acp::PermissionOptionKind::AllowAlways => (
+                                    Icon::new(IconName::CheckDouble)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Success),
+                                    if option.option_id.0.as_ref()
+                                        == acp_thread::SandboxPermission::AllowThread.as_id()
+                                    {
+                                        None
+                                    } else {
+                                        Some(&AllowAlways as &dyn Action)
+                                    },
+                                ),
+                                acp::PermissionOptionKind::RejectOnce => (
+                                    Icon::new(IconName::Close)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Error),
+                                    Some(&RejectOnce as &dyn Action),
+                                ),
+                                acp::PermissionOptionKind::RejectAlways | _ => (
+                                    Icon::new(IconName::Close)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Error),
+                                    None,
+                                ),
+                            }
                         };
 
                         let this = this.start_icon(icon);
@@ -9444,6 +9920,13 @@ impl ThreadView {
         rems_from_px(13.)
     }
 
+    fn provider_by_name(name: &SharedString, cx: &App) -> Option<Arc<dyn LanguageModelProvider>> {
+        LanguageModelRegistry::read_global(cx)
+            .providers()
+            .into_iter()
+            .find(|provider| provider.name().0 == *name)
+    }
+
     pub(crate) fn render_thread_error(
         &mut self,
         window: &mut Window,
@@ -9484,17 +9967,14 @@ impl ThreadView {
                 cx,
             ),
             ThreadError::PromptTooLarge => self.render_prompt_too_large_error(cx),
-            ThreadError::NoApiKey { provider } => self.render_error_callout(
-                "API Key Missing",
-                format!(
-                    "No API key is configured for {provider}. \
-                    Add your key via the Agent Panel settings to continue."
-                )
-                .into(),
-                false,
-                true,
-                cx,
-            ),
+            ThreadError::NoCredentials { provider } => {
+                let message = Self::provider_by_name(provider, cx)
+                    .map(|provider| provider.missing_credentials_error_message())
+                    .unwrap_or_else(|| {
+                        format!("No credentials are configured for {provider}.").into()
+                    });
+                self.render_error_callout("Credentials Missing", message, false, true, cx)
+            }
             ThreadError::StreamError { provider } => self.render_error_callout(
                 "Connection Interrupted",
                 format!(
@@ -9506,28 +9986,20 @@ impl ThreadView {
                 true,
                 cx,
             ),
-            ThreadError::InvalidApiKey { provider } => self.render_error_callout(
-                "Invalid API Key",
-                format!(
-                    "The API key for {provider} is invalid or has expired. \
-                    Update your key via the Agent Panel settings to continue."
-                )
-                .into(),
-                false,
-                false,
-                cx,
-            ),
-            ThreadError::PermissionDenied { provider } => self.render_error_callout(
-                "Permission Denied",
-                format!(
-                    "{provider}'s API rejected the request due to insufficient permissions. \
-                    Check that your API key has access to this model."
-                )
-                .into(),
-                false,
-                false,
-                cx,
-            ),
+            ThreadError::AuthenticationFailed { provider } => {
+                let message = Self::provider_by_name(provider, cx)
+                    .map(|provider| provider.authentication_error_message())
+                    .unwrap_or_else(|| format!("Could not authenticate with {provider}.").into());
+                self.render_error_callout("Authentication Failed", message, false, false, cx)
+            }
+            ThreadError::PermissionDenied { provider, message } => {
+                let message: SharedString = message.clone().unwrap_or_else(|| {
+                    format!("{provider} rejected the request due to insufficient permissions.")
+                        .into()
+                });
+
+                self.render_error_callout("Permission Denied", message, false, false, cx)
+            }
             ThreadError::RequestFailed => self.render_error_callout(
                 "Request Failed",
                 "The request could not be completed after multiple attempts. \
@@ -10532,7 +11004,12 @@ impl Render for ThreadView {
                 }
                 if let Some(thread) = this.as_native_thread(cx) {
                     thread.update(cx, |thread, cx| {
-                        thread.set_thinking_enabled(!thread.thinking_enabled(), cx);
+                        let model_allows_disabling = thread
+                            .model()
+                            .is_none_or(|model| model.supports_disabling_thinking());
+                        if model_allows_disabling {
+                            thread.set_thinking_enabled(!thread.thinking_enabled(), cx);
+                        }
                     });
                 }
             }))
