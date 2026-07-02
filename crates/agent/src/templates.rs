@@ -55,6 +55,8 @@ pub struct SystemPromptTemplate<'a> {
     /// section describes the right one rather than advertising a `$TMPDIR`
     /// that doesn't behave as stated.
     pub is_linux: bool,
+    /// Whether sandboxed terminal commands run through WSL on Windows.
+    pub is_windows: bool,
 }
 
 impl Template for SystemPromptTemplate<'_> {
@@ -101,6 +103,7 @@ mod tests {
             user_agents_md: None,
             sandboxing: false,
             is_linux: false,
+            is_windows: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -133,6 +136,7 @@ mod tests {
             user_agents_md: Some("always be concise".into()),
             sandboxing: false,
             is_linux: false,
+            is_windows: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -161,6 +165,7 @@ mod tests {
             user_agents_md: None,
             sandboxing: false,
             is_linux: false,
+            is_windows: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -193,6 +198,7 @@ mod tests {
             user_agents_md: None,
             sandboxing: true,
             is_linux: false,
+            is_windows: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -203,8 +209,13 @@ mod tests {
         assert!(rendered.contains("allow_hosts"));
         assert!(rendered.contains("allow_all_hosts: true"));
         assert!(rendered.contains("fs_write_paths"));
+        assert!(rendered.contains("allow_git_access: true"));
         assert!(rendered.contains("allow_fs_write_all: true"));
         assert!(rendered.contains("unsandboxed: true"));
+        assert!(rendered.contains("file contents under `.git` directories"));
+        assert!(
+            rendered.contains("worktree metadata that may live outside the project directories")
+        );
         assert!(rendered.contains("for the rest of the thread"));
     }
 
@@ -226,6 +237,7 @@ mod tests {
             user_agents_md: None,
             sandboxing: true,
             is_linux: true,
+            is_windows: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -248,6 +260,7 @@ mod tests {
             user_agents_md: None,
             sandboxing: true,
             is_linux: false,
+            is_windows: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -267,6 +280,7 @@ mod tests {
             user_agents_md: None,
             sandboxing: false,
             is_linux: false,
+            is_windows: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -284,6 +298,7 @@ mod tests {
             user_agents_md: None,
             sandboxing: false,
             is_linux: false,
+            is_windows: false,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
