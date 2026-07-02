@@ -7597,7 +7597,7 @@ impl Repository {
                         ..
                     }) => match fossil_commit_paths {
                         Some(paths) => {
-                            backend
+                            let result = backend
                                 .commit_paths(
                                     message,
                                     name_and_email,
@@ -7606,7 +7606,16 @@ impl Repository {
                                     environment,
                                     paths,
                                 )
-                                .await
+                                .await;
+                            if result.is_ok() {
+                                refresh_fossil_snapshot_after_command(
+                                    this.clone(),
+                                    backend,
+                                    &mut cx,
+                                )
+                                .await?;
+                            }
+                            result
                         }
                         None => {
                             backend

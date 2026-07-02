@@ -12221,6 +12221,75 @@ async fn test_fossil_repository_check_in_uses_selected_paths(
 }
 
 #[gpui::test]
+async fn test_fossil_check_in_refreshes_repository_status(
+    executor: gpui::BackgroundExecutor,
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "my-repo": {
+                ".fslckout": {},
+            }
+        }),
+    )
+    .await;
+
+    fs.set_head_and_index_for_repo(
+        path!("/root/my-repo/.fslckout").as_ref(),
+        &[("deleted.txt", "deleted\n".into())],
+    );
+
+    let project = Project::test(fs, [path!("/root/my-repo").as_ref()], cx).await;
+    project
+        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .await;
+    cx.run_until_parked();
+
+    let repo = project.read_with(cx, |project, cx| {
+        project.repositories(cx).values().next().unwrap().clone()
+    });
+
+    repo.read_with(cx, |repo, _cx| {
+        assert_eq!(repo.kind(), RepositoryKind::Fossil);
+        assert_eq!(
+            repo.status_for_path(&repo_path("deleted.txt"))
+                .map(|entry| entry.status),
+            Some(StatusCode::Deleted.worktree())
+        );
+    });
+
+    repo.update(cx, |repo, cx| {
+        repo.stage_entries(vec![repo_path("deleted.txt")], cx)
+    })
+    .await
+    .unwrap();
+
+    repo.update(cx, |repo, cx| {
+        repo.commit(
+            "delete file".into(),
+            None,
+            CommitOptions::default(),
+            AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+            cx,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    cx.run_until_parked();
+
+    repo.read_with(cx, |repo, _cx| {
+        assert_eq!(repo.status_for_path(&repo_path("deleted.txt")), None);
+        assert!(repo.cached_status().next().is_none());
+        assert!(!repo.fossil_path_included_for_check_in(&repo_path("deleted.txt")));
+    });
+}
+
+#[gpui::test]
 async fn test_repository_subfolder_git_status(
     executor: gpui::BackgroundExecutor,
     cx: &mut gpui::TestAppContext,
