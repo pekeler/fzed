@@ -752,13 +752,19 @@ impl GitRepository for FossilRepository {
                         cached_fossil_commit_data(&cached_commit_data, &commit)
                     {
                         let Some(parent) = commit_data.parents.first().cloned() else {
-                            return Ok(CommitDiff { files: Vec::new() });
+                            return Ok(CommitDiff {
+                                files: Vec::new(),
+                                stats: Some((0, 0)),
+                            });
                         };
                         (parent.to_string(), commit_data.sha.to_string())
                     } else {
                         let info = fossil_commit_info(&fossil, &commit).await?;
                         let Some(parent) = info.parents.first().cloned() else {
-                            return Ok(CommitDiff { files: Vec::new() });
+                            return Ok(CommitDiff {
+                                files: Vec::new(),
+                                stats: Some((0, 0)),
+                            });
                         };
                         (parent, info.hash)
                     };
@@ -1739,6 +1745,8 @@ struct FossilDiffFile {
 fn parse_fossil_unified_diff(output: &str) -> Result<CommitDiff> {
     let mut files = Vec::new();
     let mut current: Option<FossilDiffFile> = None;
+    let mut added = 0;
+    let mut removed = 0;
 
     for line in output.lines() {
         if let Some((kind, path)) = parse_fossil_diff_status_line(line) {
@@ -1784,16 +1792,21 @@ fn parse_fossil_unified_diff(output: &str) -> Result<CommitDiff> {
             file.new_text.push_str(rest);
             file.new_text.push('\n');
         } else if let Some(rest) = line.strip_prefix('-') {
+            removed += 1;
             file.old_text.push_str(rest);
             file.old_text.push('\n');
         } else if let Some(rest) = line.strip_prefix('+') {
+            added += 1;
             file.new_text.push_str(rest);
             file.new_text.push('\n');
         }
     }
 
     push_fossil_diff_file(&mut files, current);
-    Ok(CommitDiff { files })
+    Ok(CommitDiff {
+        files,
+        stats: Some((added, removed)),
+    })
 }
 
 fn push_fossil_diff_file(files: &mut Vec<CommitFile>, file: Option<FossilDiffFile>) {
@@ -2915,6 +2928,7 @@ mod tests {
             "CHANGED a.txt\n--- a.txt\n+++ a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+three\nADDED b.txt\nIndex: b.txt\n==================================================================\n--- /dev/null\n+++ b.txt\n@@ -0,0 +1,1 @@\n+new\n",
         )
         .unwrap();
+        assert_eq!(diff.stats, Some((2, 1)));
         assert_eq!(diff.files.len(), 2);
         assert_eq!(diff.files[0].path, RepoPath::new("a.txt").unwrap());
         assert_eq!(diff.files[0].old_text.as_deref(), Some("one\ntwo\n"));

@@ -546,6 +546,7 @@ pub struct CommitDetails {
 #[derive(Debug)]
 pub struct CommitDiff {
     pub files: Vec<CommitFile>,
+    pub stats: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1630,7 +1631,7 @@ impl GitRepository for RealGitRepository {
                 })
             }
 
-            Ok(CommitDiff { files })
+            Ok(CommitDiff { files, stats: None })
         })
         .boxed()
     }

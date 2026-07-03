@@ -1333,6 +1333,10 @@ fn draw_commit_circle(center_x: Pixels, center_y: Pixels, color: Hsla, window: &
 }
 
 fn compute_diff_stats(diff: &CommitDiff) -> (usize, usize) {
+    if let Some(stats) = diff.stats {
+        return stats;
+    }
+
     diff.files.iter().fold((0, 0), |(added, removed), file| {
         let old_text = file.old_text.as_deref().unwrap_or("");
         let new_text = file.new_text.as_deref().unwrap_or("");
@@ -4683,7 +4687,7 @@ mod tests {
     use collections::{HashMap, HashSet};
     use fs::FakeFs;
     use git::Oid;
-    use git::repository::{CommitData, InitialGraphCommitData};
+    use git::repository::{CommitData, CommitDiff, InitialGraphCommitData};
     use gpui::{TestAppContext, UpdateGlobal};
     use project::git_store::{GitStoreEvent, RepositoryEvent};
     use project::{Project, TaskSourceKind, task_store::TaskSettingsLocation};
@@ -4717,6 +4721,17 @@ mod tests {
         assert_eq!(view_revision_label(RepositoryKind::Fossil), "View Check-in");
         assert_eq!(copy_revision_id_label(RepositoryKind::Git), "Copy SHA");
         assert_eq!(copy_revision_id_label(RepositoryKind::Fossil), "Copy Hash");
+    }
+
+    #[test]
+    fn commit_diff_stats_use_precomputed_values() {
+        assert_eq!(
+            compute_diff_stats(&CommitDiff {
+                files: Vec::new(),
+                stats: Some((2, 1)),
+            }),
+            (2, 1)
+        );
     }
 
     fn build_oid_to_row_map(graph: &GraphData) -> HashMap<Oid, usize> {

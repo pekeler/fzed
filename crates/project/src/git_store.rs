@@ -5938,6 +5938,7 @@ impl Repository {
                                 })
                             })
                             .collect::<Result<Vec<_>>>()?,
+                        stats: None,
                     })
                 }
             }

@@ -297,7 +297,13 @@ impl GitRepository for FakeGitRepository {
         _commit: String,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<git::repository::CommitDiff>> {
-        async { Ok(git::repository::CommitDiff { files: Vec::new() }) }.boxed()
+        async {
+            Ok(git::repository::CommitDiff {
+                files: Vec::new(),
+                stats: None,
+            })
+        }
+        .boxed()
     }
 
     fn set_index_text(
