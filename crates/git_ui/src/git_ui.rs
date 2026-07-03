@@ -978,6 +978,7 @@ fn render_remote_button(
     id: impl Into<SharedString>,
     branch: &Branch,
     repository_kind: RepositoryKind,
+    has_fossil_sync_remote: bool,
     keybinding_target: Option<FocusHandle>,
     show_fetch_button: bool,
 ) -> Option<AnyElement> {
@@ -986,10 +987,12 @@ fn render_remote_button(
         return Some(
             h_flex()
                 .gap_1()
-                .child(remote_button::render_fossil_sync_button(
-                    format!("{id}-sync"),
-                    keybinding_target.clone(),
-                ))
+                .when(has_fossil_sync_remote, |this| {
+                    this.child(remote_button::render_fossil_sync_button(
+                        format!("{id}-sync"),
+                        keybinding_target.clone(),
+                    ))
+                })
                 .child(remote_button::render_fossil_update_button(
                     format!("{id}-update"),
                     keybinding_target,
@@ -1179,12 +1182,12 @@ mod remote_button {
             .style(ButtonStyle::Filled)
             .start_icon(Icon::new(IconName::ArrowCircle).size(IconSize::XSmall))
             .on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(git::Fetch), cx);
+                window.dispatch_action(Box::new(git::fossil_actions::Sync), cx);
             })
             .tooltip(move |_window, cx| {
                 git_action_tooltip(
                     "Synchronize all sharable Fossil changes",
-                    &git::Fetch,
+                    &git::fossil_actions::Sync,
                     "fossil sync",
                     keybinding_target.clone(),
                     cx,

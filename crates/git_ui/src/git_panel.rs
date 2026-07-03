@@ -3937,7 +3937,7 @@ impl GitPanel {
         if repo.read(cx).kind().is_fossil() {
             if force_push {
                 self.show_error_toast(
-                    "sync",
+                    "fossil sync",
                     anyhow::anyhow!("Fossil sync does not support force-push"),
                     cx,
                 );
@@ -5709,9 +5709,16 @@ impl GitPanel {
     }
 
     pub(crate) fn render_remote_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (branch, repository_kind) = {
+        let (branch, repository_kind, has_fossil_sync_remote) = {
             let repository = self.active_repository.as_ref()?.read(cx);
-            (repository.branch.clone(), repository.kind())
+            (
+                repository.branch.clone(),
+                repository.kind(),
+                has_fossil_sync_remote(
+                    repository.default_remote_url(),
+                    repository.fossil_sync_state(),
+                ),
+            )
         };
         if !self.can_push_and_pull(cx) {
             return None;
@@ -5727,6 +5734,7 @@ impl GitPanel {
                         "remote-button",
                         &branch,
                         repository_kind,
+                        has_fossil_sync_remote,
                         focus_handle,
                         true,
                     ))
@@ -8186,6 +8194,16 @@ pub(crate) fn fossil_command_with_sync_state(
     format!("{command}  |  autosync: {autosync}; remote: {remote}")
 }
 
+fn has_fossil_sync_remote(
+    default_remote_url: Option<String>,
+    sync_state: Option<&FossilSyncState>,
+) -> bool {
+    default_remote_url.is_some()
+        || sync_state
+            .and_then(|state| state.default_remote.as_ref())
+            .is_some()
+}
+
 struct GitPanelMessageTooltip {
     commit_tooltip: Option<Entity<CommitTooltip>>,
 }
@@ -8790,7 +8808,7 @@ pub(crate) fn commit_title_exceeds_limit(title: &str, max_length: usize) -> bool
 #[cfg(test)]
 mod tests {
     use git::{
-        repository::{RepositoryKind, repo_path},
+        repository::{FossilSyncState, RepositoryKind, repo_path},
         status::{StatusCode, UnmergedStatus, UnmergedStatusCode},
     };
     use gpui::{Action, TestAppContext, UpdateGlobal, VisualTestContext, px};
@@ -9268,6 +9286,26 @@ mod tests {
             ..fossil_with_tracked_changes
         };
         assert!(!fossil_with_only_extra_files.can_stash_changes());
+    }
+
+    #[test]
+    fn test_fossil_sync_remote_presence() {
+        assert!(!has_fossil_sync_remote(None, None));
+        assert!(!has_fossil_sync_remote(
+            None,
+            Some(&FossilSyncState::default())
+        ));
+        assert!(has_fossil_sync_remote(
+            Some("https://example.com/repo".to_string()),
+            None
+        ));
+        assert!(has_fossil_sync_remote(
+            None,
+            Some(&FossilSyncState {
+                default_remote: Some("https://example.com/repo".into()),
+                ..Default::default()
+            })
+        ));
     }
 
     fn fossil_status_entry(path: &str, status: FileStatus, staging: StageStatus) -> GitStatusEntry {

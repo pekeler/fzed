@@ -1090,10 +1090,7 @@ impl GitRepository for FossilRepository {
                     "Fossil sync does not support force-push"
                 );
 
-                let mut args = vec![OsString::from("sync")];
-                if upstream_name != "default" {
-                    args.push(OsString::from(upstream_name));
-                }
+                let args = fossil_sync_args(&fossil, Some(upstream_name)).await?;
                 fossil.run_output_with_env(&args, env).await
             })
             .boxed()
@@ -1131,12 +1128,11 @@ impl GitRepository for FossilRepository {
         let fossil = self.fossil_binary();
         self.executor
             .spawn(async move {
-                let mut args = vec![OsString::from("sync")];
-                if let FetchOptions::Remote(remote) = fetch_options
-                    && remote.name != "default"
-                {
-                    args.push(OsString::from(remote.name.to_string()));
-                }
+                let remote_name = match fetch_options {
+                    FetchOptions::All => None,
+                    FetchOptions::Remote(remote) => Some(remote.name.to_string()),
+                };
+                let args = fossil_sync_args(&fossil, remote_name).await?;
                 fossil.run_output_with_env(&args, env).await
             })
             .boxed()
@@ -2417,6 +2413,24 @@ async fn default_fossil_remote(fossil: &FossilBinary) -> Result<Option<Remote>> 
     }
 }
 
+async fn fossil_sync_args(
+    fossil: &FossilBinary,
+    remote_name: Option<String>,
+) -> Result<Vec<OsString>> {
+    let remote = match remote_name.as_deref() {
+        Some(remote_name) if remote_name != "default" => Some(remote_name.to_string()),
+        _ => match parse_fossil_default_remote(&fossil.run(&["remote"]).await?) {
+            Some(remote) => Some(remote),
+            None => parse_fossil_remote_list(&fossil.run(&["remote", "list"]).await?)
+                .into_iter()
+                .next()
+                .map(|remote| remote.name),
+        },
+    };
+    let remote = remote.context("No Fossil remote is configured")?;
+    Ok(vec![OsString::from("sync"), OsString::from(remote)])
+}
+
 #[derive(thiserror::Error, Debug)]
 #[error("Fossil command failed:\n{stdout}{stderr}\n")]
 struct FossilBinaryCommandError {
@@ -2430,11 +2444,12 @@ mod tests {
     use super::{
         FossilBinary, FossilRepository, filter_scoped_fossil_extras, fossil_changes_to_status,
         fossil_oid_from_hash, fossil_output_reports_unsupported_no_verify_comment,
-        fossil_stash_id_from_oid, parse_fossil_blame_line, parse_fossil_branch_list_line,
-        parse_fossil_changes_with_kind, parse_fossil_commit_info, parse_fossil_default_remote,
-        parse_fossil_info, parse_fossil_numstat, parse_fossil_remote_list, parse_fossil_stash_list,
-        parse_fossil_timeline_entries, parse_fossil_unified_diff, parse_fossil_verbose_checkouts,
-        resolve_fossil_binary, run_fossil_commit_with_legacy_comment_verification_fallback,
+        fossil_stash_id_from_oid, fossil_sync_args, parse_fossil_blame_line,
+        parse_fossil_branch_list_line, parse_fossil_changes_with_kind, parse_fossil_commit_info,
+        parse_fossil_default_remote, parse_fossil_info, parse_fossil_numstat,
+        parse_fossil_remote_list, parse_fossil_stash_list, parse_fossil_timeline_entries,
+        parse_fossil_unified_diff, parse_fossil_verbose_checkouts, resolve_fossil_binary,
+        run_fossil_commit_with_legacy_comment_verification_fallback,
     };
     use crate::{
         repository::{
@@ -2758,6 +2773,62 @@ mod tests {
         assert_eq!(
             checkouts,
             vec![PathBuf::from("/tmp/Card School/card.school")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn fossil_sync_uses_explicit_remote(cx: &mut TestAppContext) {
+        use std::ffi::OsString;
+
+        cx.executor().allow_parking();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let script_path = temp_dir.path().join("fossil");
+        write_executable_script(
+            &script_path,
+            "#!/bin/sh\n\
+             if [ \"$1\" = remote ] && [ \"$#\" -eq 1 ]; then\n\
+               printf '%s\\n' \"$FZED_FOSSIL_TEST_REMOTE\"\n\
+               exit 0\n\
+             fi\n\
+             if [ \"$1\" = remote ] && [ \"$2\" = list ]; then\n\
+               printf 'origin https://example.com/repo\\n'\n\
+               exit 0\n\
+             fi\n\
+             exit 1\n",
+        )
+        .unwrap();
+
+        let fossil = FossilBinary::new(
+            script_path.clone(),
+            temp_dir.path().to_path_buf(),
+            Arc::default(),
+            Arc::new(HashMap::from_iter([(
+                "FZED_FOSSIL_TEST_REMOTE".to_string(),
+                "https://example.com/default".to_string(),
+            )])),
+        );
+        assert_eq!(
+            fossil_sync_args(&fossil, None).await.unwrap(),
+            vec![
+                OsString::from("sync"),
+                OsString::from("https://example.com/default")
+            ]
+        );
+
+        let fossil = FossilBinary::new(
+            script_path,
+            temp_dir.path().to_path_buf(),
+            Arc::default(),
+            Arc::new(HashMap::from_iter([(
+                "FZED_FOSSIL_TEST_REMOTE".to_string(),
+                "off".to_string(),
+            )])),
+        );
+        assert_eq!(
+            fossil_sync_args(&fossil, None).await.unwrap(),
+            vec![OsString::from("sync"), OsString::from("origin")]
         );
     }
 

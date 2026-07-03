@@ -19,8 +19,8 @@ impl RemoteAction {
             RemoteAction::Fetch(_) => "fetch",
             RemoteAction::Pull(_) => "pull",
             RemoteAction::Push(_, _) => "push",
-            RemoteAction::FossilSync(_) => "sync",
-            RemoteAction::FossilUpdate => "update",
+            RemoteAction::FossilSync(_) => "fossil sync",
+            RemoteAction::FossilUpdate => "fossil update",
         }
     }
 }
@@ -177,6 +177,12 @@ pub fn format_output(action: &RemoteAction, output: RemoteCommandOutput) -> Succ
 mod tests {
     use super::*;
     use indoc::indoc;
+
+    #[test]
+    fn fossil_remote_action_names_include_binary() {
+        assert_eq!(RemoteAction::FossilSync(None).name(), "fossil sync");
+        assert_eq!(RemoteAction::FossilUpdate.name(), "fossil update");
+    }
 
     #[test]
     fn test_push_new_branch_pull_request() {
