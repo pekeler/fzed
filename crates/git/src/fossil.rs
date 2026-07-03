@@ -49,6 +49,7 @@ pub struct FossilRepository {
     executor: BackgroundExecutor,
     is_trusted: Arc<AtomicBool>,
     cached_info: Arc<Mutex<Option<FossilInfo>>>,
+    cached_commit_data: Arc<Mutex<HashMap<Oid, CommitData>>>,
     command_lock: Arc<AsyncMutex<()>>,
     envs: Arc<HashMap<String, String>>,
 }
@@ -77,6 +78,7 @@ impl FossilRepository {
             executor,
             is_trusted: Arc::new(AtomicBool::new(false)),
             cached_info: Arc::default(),
+            cached_commit_data: Arc::default(),
             command_lock: Arc::default(),
             envs: Arc::default(),
         })
@@ -670,6 +672,7 @@ impl GitRepository for FossilRepository {
 
     fn show(&self, commit: String) -> BoxFuture<'_, Result<CommitDetails>> {
         let fossil = self.fossil_binary();
+        let cached_commit_data = self.cached_commit_data.clone();
         self.executor
             .spawn(async move {
                 if let Some(stash_id) = fossil_stash_id_from_oid(&commit) {
@@ -697,6 +700,16 @@ impl GitRepository for FossilRepository {
                     });
                 }
 
+                if let Some(commit_data) = cached_fossil_commit_data(&cached_commit_data, &commit) {
+                    return Ok(CommitDetails {
+                        sha: SharedString::from(commit_data.sha.to_string()),
+                        message: commit_data.message,
+                        commit_timestamp: commit_data.commit_timestamp,
+                        author_name: commit_data.author_name,
+                        author_email: commit_data.author_email,
+                    });
+                }
+
                 let commit = if matches!(commit.as_str(), "HEAD" | "checkout" | "current") {
                     parse_fossil_info(&fossil.run(&["info"]).await?)
                         .checkout
@@ -718,6 +731,7 @@ impl GitRepository for FossilRepository {
 
     fn load_commit(&self, commit: String, _cx: AsyncApp) -> BoxFuture<'_, Result<CommitDiff>> {
         let fossil = self.fossil_binary();
+        let cached_commit_data = self.cached_commit_data.clone();
         self.executor
             .spawn(async move {
                 let output = if let Some(stash_id) = fossil_stash_id_from_oid(&commit) {
@@ -734,9 +748,19 @@ impl GitRepository for FossilRepository {
                         ])
                         .await?
                 } else {
-                    let info = fossil_commit_info(&fossil, &commit).await?;
-                    let Some(parent) = info.parents.first().cloned() else {
-                        return Ok(CommitDiff { files: Vec::new() });
+                    let (parent, commit) = if let Some(commit_data) =
+                        cached_fossil_commit_data(&cached_commit_data, &commit)
+                    {
+                        let Some(parent) = commit_data.parents.first().cloned() else {
+                            return Ok(CommitDiff { files: Vec::new() });
+                        };
+                        (parent.to_string(), commit_data.sha.to_string())
+                    } else {
+                        let info = fossil_commit_info(&fossil, &commit).await?;
+                        let Some(parent) = info.parents.first().cloned() else {
+                            return Ok(CommitDiff { files: Vec::new() });
+                        };
+                        (parent, info.hash)
                     };
                     fossil
                         .run_raw(&[
@@ -744,7 +768,7 @@ impl GitRepository for FossilRepository {
                             OsString::from("--from"),
                             OsString::from(parent),
                             OsString::from("--to"),
-                            OsString::from(info.hash),
+                            OsString::from(commit),
                             OsString::from("--verbose"),
                             OsString::from("--context"),
                             OsString::from("-1"),
@@ -1279,6 +1303,7 @@ impl GitRepository for FossilRepository {
         request_tx: Sender<Vec<Arc<InitialGraphCommitData>>>,
     ) -> BoxFuture<'_, Result<()>> {
         let fossil = self.fossil_binary();
+        let cached_commit_data = self.cached_commit_data.clone();
         self.executor
             .spawn(async move {
                 let _ = log_order;
@@ -1288,14 +1313,6 @@ impl GitRepository for FossilRepository {
                 let mut commits = Vec::new();
                 for entry in parse_fossil_timeline_entries(&output) {
                     let info = fossil_commit_info(&fossil, &entry.hash).await?;
-                    let Some(sha) = fossil_oid_from_hash(&info.hash) else {
-                        continue;
-                    };
-                    let parents = info
-                        .parents
-                        .iter()
-                        .filter_map(|parent| fossil_oid_from_hash(parent))
-                        .collect::<SmallVec<[_; 1]>>();
                     let ref_names = info
                         .tags
                         .iter()
@@ -1307,6 +1324,16 @@ impl GitRepository for FossilRepository {
                             }
                         })
                         .collect();
+                    let commit_data = match fossil_commit_data_from_info(&entry.hash, info) {
+                        Ok(commit_data) => commit_data,
+                        Err(error) => {
+                            log::warn!("skipping Fossil timeline entry: {error:#}");
+                            continue;
+                        }
+                    };
+                    let sha = commit_data.sha;
+                    let parents = commit_data.parents.clone();
+                    cached_commit_data.lock().insert(sha, commit_data);
 
                     commits.push(Arc::new(InitialGraphCommitData {
                         sha,
@@ -1380,11 +1407,23 @@ impl GitRepository for FossilRepository {
 
     fn commit_data_reader(&self) -> Result<CommitDataReader> {
         let fossil = self.fossil_binary();
+        let cached_commit_data = self.cached_commit_data.clone();
         Ok(CommitDataReader::from_resolver(
             self.executor.clone(),
             move |sha| {
                 let fossil = fossil.clone();
-                async move { fossil_commit_data(&fossil, &sha.to_string()).await }
+                let cached_commit_data = cached_commit_data.clone();
+                async move {
+                    if let Some(commit_data) = cached_commit_data.lock().get(&sha).cloned() {
+                        return Ok(commit_data);
+                    }
+
+                    let commit_data = fossil_commit_data(&fossil, &sha.to_string()).await?;
+                    cached_commit_data
+                        .lock()
+                        .insert(commit_data.sha, commit_data.clone());
+                    Ok(commit_data)
+                }
             },
         ))
     }
@@ -1419,6 +1458,7 @@ impl FossilRepository {
             executor: self.executor.clone(),
             is_trusted: self.is_trusted.clone(),
             cached_info: self.cached_info.clone(),
+            cached_commit_data: self.cached_commit_data.clone(),
             command_lock: self.command_lock.clone(),
             envs: self.envs.clone(),
         }
@@ -1490,6 +1530,10 @@ fn fossil_commit_summary_from_info(info: &FossilCommitInfo) -> CommitSummary {
 
 async fn fossil_commit_data(fossil: &FossilBinary, commit: &str) -> Result<CommitData> {
     let info = fossil_commit_info(fossil, commit).await?;
+    fossil_commit_data_from_info(commit, info)
+}
+
+fn fossil_commit_data_from_info(commit: &str, info: FossilCommitInfo) -> Result<CommitData> {
     let sha = fossil_oid_from_hash(&info.hash).with_context(|| {
         format!("Fossil check-in hash cannot be represented as an OID: {commit}")
     })?;
@@ -1509,6 +1553,14 @@ async fn fossil_commit_data(fossil: &FossilBinary, commit: &str) -> Result<Commi
         subject: SharedString::from(subject),
         message: SharedString::from(info.comment),
     })
+}
+
+fn cached_fossil_commit_data(
+    cache: &Mutex<HashMap<Oid, CommitData>>,
+    commit: &str,
+) -> Option<CommitData> {
+    let oid = fossil_oid_from_hash(commit)?;
+    cache.lock().get(&oid).cloned()
 }
 
 fn parse_fossil_commit_info(output: &str) -> Result<FossilCommitInfo> {
@@ -3229,6 +3281,7 @@ mod tests {
                 .iter()
                 .any(|commit| commit.sha == head_oid)
         );
+        assert!(repository.cached_commit_data.lock().contains_key(&head_oid));
 
         let reader = repository.commit_data_reader().unwrap();
         let commit_data = reader.read(head_oid).await.unwrap();
