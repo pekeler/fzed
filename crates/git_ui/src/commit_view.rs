@@ -31,6 +31,7 @@ use std::{
     collections::HashSet,
     path::PathBuf,
     sync::Arc,
+    time::Instant,
 };
 use theme::ActiveTheme;
 use ui::{ContextMenu, DiffStat, Disclosure, Divider, Tooltip, WithScrollbar, prelude::*};
@@ -189,6 +190,8 @@ impl CommitView {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let opened_at = Instant::now();
+        log::info!("[fzed timeline debug] CommitView::open start sha={commit_sha}");
         let commit_diff = repo
             .update(cx, |repo, _| repo.load_commit_diff(commit_sha.clone()))
             .ok();
@@ -203,10 +206,23 @@ impl CommitView {
                 let (commit_diff, commit_details) = futures::join!(commit_diff, commit_details);
                 let mut commit_diff = commit_diff.log_err()?.log_err()?;
                 let commit_details = commit_details.log_err()?.log_err()?;
+                log::info!(
+                    "[fzed timeline debug] CommitView::open loaded sha={} elapsed_ms={} files={} stats={:?}",
+                    commit_sha,
+                    opened_at.elapsed().as_millis(),
+                    commit_diff.files.len(),
+                    commit_diff.stats
+                );
 
                 // Filter to specific file if requested
                 if let Some(ref filter_path) = file_filter {
                     commit_diff.files.retain(|f| &f.path == filter_path);
+                    log::info!(
+                        "[fzed timeline debug] CommitView::open filtered sha={} elapsed_ms={} files={}",
+                        commit_sha,
+                        opened_at.elapsed().as_millis(),
+                        commit_diff.files.len()
+                    );
                 }
 
                 let repo = repo.upgrade()?;
@@ -258,7 +274,13 @@ impl CommitView {
                             }
                         })
                     })
-                    .log_err()
+                    .log_err();
+                log::info!(
+                    "[fzed timeline debug] CommitView::open pane updated sha={} elapsed_ms={}",
+                    commit_sha,
+                    opened_at.elapsed().as_millis()
+                );
+                Some(())
             })
             .detach();
     }
@@ -274,6 +296,13 @@ impl CommitView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let commit_view_started_at = Instant::now();
+        let commit_file_count = commit_diff.files.len();
+        log::info!(
+            "[fzed timeline debug] CommitView::new start sha={} files={}",
+            commit.sha,
+            commit_file_count
+        );
         let language_registry = project.read(cx).languages().clone();
         let multibuffer = cx.new(|cx| {
             let mut multibuffer = MultiBuffer::new(Capability::ReadOnly);
@@ -323,7 +352,9 @@ impl CommitView {
             let mut binary_buffer_ids: HashSet<language::BufferId> = HashSet::default();
             let mut file_statuses: HashMap<language::BufferId, FileStatus> = HashMap::default();
 
-            for file in commit_diff.files {
+            for (file_ix, file) in commit_diff.files.into_iter().enumerate() {
+                let file_started_at = Instant::now();
+                let path = file.path.clone();
                 let is_created = file.old_text.is_none();
                 let is_deleted = file.new_text.is_none();
                 let raw_new_text = file.new_text.unwrap_or_default();
@@ -334,6 +365,16 @@ impl CommitView {
                     || raw_old_text
                         .as_ref()
                         .is_some_and(|text| is_binary_content(text.as_bytes()));
+                log::info!(
+                    "[fzed timeline debug] CommitView file start sha={} file={}/{} path={} new_bytes={} old_bytes={} binary={}",
+                    commit_sha,
+                    file_ix + 1,
+                    commit_file_count,
+                    path.display(PathStyle::local()),
+                    raw_new_text.len(),
+                    raw_old_text.as_ref().map_or(0, |text| text.len()),
+                    is_binary
+                );
 
                 let new_text = if is_binary {
                     "(binary file not shown)".to_string()
@@ -368,6 +409,14 @@ impl CommitView {
                 }) as Arc<dyn language::File>;
 
                 let buffer = build_buffer(new_text, file, &language_registry, cx).await?;
+                log::info!(
+                    "[fzed timeline debug] CommitView file buffer sha={} file={}/{} path={} elapsed_ms={}",
+                    commit_sha,
+                    file_ix + 1,
+                    commit_file_count,
+                    path.display(PathStyle::local()),
+                    file_started_at.elapsed().as_millis()
+                );
                 let buffer_id = cx.update(|_, cx| buffer.read(cx).remote_id())?;
 
                 let status_code = if is_created {
@@ -404,6 +453,14 @@ impl CommitView {
                 } else {
                     build_buffer_diff(old_text, &buffer, &language_registry, cx).await?
                 };
+                log::info!(
+                    "[fzed timeline debug] CommitView file diff sha={} file={}/{} path={} elapsed_ms={}",
+                    commit_sha,
+                    file_ix + 1,
+                    commit_file_count,
+                    path.display(PathStyle::local()),
+                    file_started_at.elapsed().as_millis()
+                );
 
                 let (excerpt_ranges, path) = cx.update(|_, cx| {
                     let snapshot = buffer.read(cx).snapshot();
@@ -426,6 +483,16 @@ impl CommitView {
                     };
                     (ranges, path)
                 })?;
+                let excerpt_count = excerpt_ranges.len();
+                log::info!(
+                    "[fzed timeline debug] CommitView file excerpts sha={} file={}/{} path={} excerpts={} elapsed_ms={}",
+                    commit_sha,
+                    file_ix + 1,
+                    commit_file_count,
+                    path.path.display(PathStyle::local()),
+                    excerpt_count,
+                    file_started_at.elapsed().as_millis()
+                );
 
                 // Batch the insertion of excerpts and yield between batches, to avoid blocking the main thread when a single file has many hunks.
                 const EXCERPT_BATCH_SIZE: usize = 10;
@@ -454,6 +521,13 @@ impl CommitView {
                         yield_now().await;
                     }
                 }
+                log::info!(
+                    "[fzed timeline debug] CommitView file done sha={} file={}/{} elapsed_ms={}",
+                    commit_sha,
+                    file_ix + 1,
+                    commit_file_count,
+                    file_started_at.elapsed().as_millis()
+                );
             }
 
             this.update(cx, |this, cx| {
@@ -474,6 +548,12 @@ impl CommitView {
                     });
                 }
             })?;
+            log::info!(
+                "[fzed timeline debug] CommitView build done sha={} files={} elapsed_ms={}",
+                commit_sha,
+                commit_file_count,
+                commit_view_started_at.elapsed().as_millis()
+            );
 
             anyhow::Ok(())
         })
