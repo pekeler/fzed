@@ -2224,16 +2224,35 @@ impl GitGraph {
 
         let sha = commit.data.sha.to_string();
 
-        let Some(repository) = self.get_repository(cx) else {
-            return;
-        };
-
-        let diff_receiver = repository.update(cx, |repo, _| repo.load_commit_diff(sha));
-
         self._commit_diff_task = Some(cx.spawn(async move |this, cx| {
+            // Let the selected commit's loading state paint before repo work starts.
+            cx.background_executor()
+                .timer(Duration::from_millis(1))
+                .await;
+
+            let Some(diff_receiver) = this
+                .update(cx, |this, cx| {
+                    let repository = this.get_repository(cx)?;
+                    Some(repository.update(cx, |repo, _| repo.load_commit_diff(sha)))
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+
             if let Ok(Ok(diff)) = diff_receiver.await {
+                let (diff, stats) = if let Some(stats) = diff.stats {
+                    (diff, stats)
+                } else {
+                    cx.background_spawn(async move {
+                        let stats = compute_diff_stats(&diff);
+                        (diff, stats)
+                    })
+                    .await
+                };
+
                 this.update(cx, |this, cx| {
-                    let stats = compute_diff_stats(&diff);
                     this.selected_commit_diff = Some(diff);
                     this.selected_commit_diff_stats = Some(stats);
                     cx.notify();

@@ -3527,6 +3527,19 @@ impl GitStore {
                 repository_handle.load_commit_diff(envelope.payload.commit)
             })
             .await??;
+        let stats = commit_diff.stats;
+        let (has_stats, lines_added, lines_removed) = if let Some((lines_added, lines_removed)) =
+            stats
+        {
+            (
+                true,
+                u64::try_from(lines_added).context("commit diff lines_added exceeds u64")?,
+                u64::try_from(lines_removed).context("commit diff lines_removed exceeds u64")?,
+            )
+        } else {
+            (false, 0, 0)
+        };
+
         Ok(proto::LoadCommitDiffResponse {
             files: commit_diff
                 .files
@@ -3538,6 +3551,9 @@ impl GitStore {
                     is_binary: file.is_binary,
                 })
                 .collect(),
+            has_stats,
+            lines_added,
+            lines_removed,
         })
     }
 
@@ -5925,6 +5941,17 @@ impl Repository {
                             commit,
                         })
                         .await?;
+                    let stats = response
+                        .has_stats
+                        .then(|| -> Result<(usize, usize)> {
+                            Ok((
+                                usize::try_from(response.lines_added)
+                                    .context("commit diff lines_added exceeds usize")?,
+                                usize::try_from(response.lines_removed)
+                                    .context("commit diff lines_removed exceeds usize")?,
+                            ))
+                        })
+                        .transpose()?;
                     Ok(CommitDiff {
                         files: response
                             .files
@@ -5938,7 +5965,7 @@ impl Repository {
                                 })
                             })
                             .collect::<Result<Vec<_>>>()?,
-                        stats: None,
+                        stats,
                     })
                 }
             }

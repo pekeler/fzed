@@ -302,6 +302,9 @@ message LoadCommitDiff {
 
 message LoadCommitDiffResponse {
   repeated CommitFile files = 1;
+  bool has_stats = 2;
+  uint64 lines_added = 3;
+  uint64 lines_removed = 4;
 }
 
 message CommitFile {
