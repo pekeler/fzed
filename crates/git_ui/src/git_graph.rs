@@ -2919,6 +2919,7 @@ impl GitGraph {
             .as_ref()
             .map(|diff| diff.files.len())
             .unwrap_or(0);
+        let is_loading_commit_diff = self.selected_commit_diff.is_none();
 
         let (total_lines_added, total_lines_removed) =
             self.selected_commit_diff_stats.unwrap_or((0, 0));
@@ -3156,7 +3157,12 @@ impl GitGraph {
                             .gap_1()
                             .w_full()
                             .justify_between()
-                            .child(
+                            .child(if is_loading_commit_diff {
+                                Label::new("Changed Files")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .into_any_element()
+                            } else {
                                 Label::new(format!(
                                     "{} Changed {}",
                                     changed_files_count,
@@ -3167,49 +3173,54 @@ impl GitGraph {
                                     }
                                 ))
                                 .size(LabelSize::Small)
-                                .color(Color::Muted),
-                            )
+                                .color(Color::Muted)
+                                .into_any_element()
+                            })
                             .child(
                                 h_flex()
                                     .gap_1()
-                                    .child(DiffStat::new(
-                                        "commit-diff-stat",
-                                        total_lines_added,
-                                        total_lines_removed,
-                                    ))
-                                    .child(
-                                        IconButton::new(
-                                            "toggle-changed-files-view",
-                                            IconName::ListTree,
+                                    .when(!is_loading_commit_diff, |this| {
+                                        this.child(DiffStat::new(
+                                            "commit-diff-stat",
+                                            total_lines_added,
+                                            total_lines_removed,
+                                        ))
+                                    })
+                                    .when(!is_loading_commit_diff, |this| {
+                                        this.child(
+                                            IconButton::new(
+                                                "toggle-changed-files-view",
+                                                IconName::ListTree,
+                                            )
+                                            .shape(ui::IconButtonShape::Square)
+                                            .icon_size(IconSize::Small)
+                                            .toggle_state(self.changed_files_view_mode.is_tree())
+                                            .tooltip({
+                                                let tooltip =
+                                                    if self.changed_files_view_mode.is_tree() {
+                                                        "Show Flat View"
+                                                    } else {
+                                                        "Show Tree View"
+                                                    };
+                                                move |_, cx| {
+                                                    Tooltip::for_action(
+                                                        tooltip,
+                                                        &ToggleChangedFilesView,
+                                                        cx,
+                                                    )
+                                                }
+                                            })
+                                            .on_click(
+                                                cx.listener(|this, _, _window, cx| {
+                                                    this.changed_files_view_mode =
+                                                        this.changed_files_view_mode.toggled();
+                                                    this.changed_files_scroll_handle
+                                                        .scroll_to_item(0, ScrollStrategy::Top);
+                                                    cx.notify();
+                                                }),
+                                            ),
                                         )
-                                        .shape(ui::IconButtonShape::Square)
-                                        .icon_size(IconSize::Small)
-                                        .toggle_state(self.changed_files_view_mode.is_tree())
-                                        .tooltip({
-                                            let tooltip = if self.changed_files_view_mode.is_tree()
-                                            {
-                                                "Show Flat View"
-                                            } else {
-                                                "Show Tree View"
-                                            };
-                                            move |_, cx| {
-                                                Tooltip::for_action(
-                                                    tooltip,
-                                                    &ToggleChangedFilesView,
-                                                    cx,
-                                                )
-                                            }
-                                        })
-                                        .on_click(
-                                            cx.listener(|this, _, _window, cx| {
-                                                this.changed_files_view_mode =
-                                                    this.changed_files_view_mode.toggled();
-                                                this.changed_files_scroll_handle
-                                                    .scroll_to_item(0, ScrollStrategy::Top);
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    ),
+                                    }),
                             ),
                     )
                     .child(
@@ -3229,51 +3240,68 @@ impl GitGraph {
                                 let repository = repository.downgrade();
                                 let workspace = self.workspace.clone();
                                 let git_graph = cx.weak_entity();
-                                uniform_list(
-                                    "changed-files-list",
-                                    entry_count,
-                                    move |range, _window, cx| {
-                                        range
-                                            .map(|ix| {
-                                                if is_tree_view {
-                                                    match &tree_entries[ix] {
-                                                        ChangedFileTreeEntry::Directory(entry) => {
-                                                            entry.render(ix, git_graph.clone(), cx)
-                                                        }
-                                                        ChangedFileTreeEntry::File(entry) => {
-                                                            entry.entry.render(
+                                if is_loading_commit_diff {
+                                    h_flex()
+                                        .size_full()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            LoadingLabel::new("Loading diff")
+                                                .size(LabelSize::Small),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    uniform_list(
+                                        "changed-files-list",
+                                        entry_count,
+                                        move |range, _window, cx| {
+                                            range
+                                                .map(|ix| {
+                                                    if is_tree_view {
+                                                        match &tree_entries[ix] {
+                                                            ChangedFileTreeEntry::Directory(
+                                                                entry,
+                                                            ) => entry.render(
                                                                 ix,
-                                                                entry.depth,
-                                                                None,
-                                                                commit_sha.clone(),
-                                                                repository.clone(),
-                                                                workspace.clone(),
+                                                                git_graph.clone(),
                                                                 cx,
-                                                            )
+                                                            ),
+                                                            ChangedFileTreeEntry::File(entry) => {
+                                                                entry.entry.render(
+                                                                    ix,
+                                                                    entry.depth,
+                                                                    None,
+                                                                    commit_sha.clone(),
+                                                                    repository.clone(),
+                                                                    workspace.clone(),
+                                                                    cx,
+                                                                )
+                                                            }
                                                         }
+                                                    } else {
+                                                        let directory_label = (!flat_entries[ix]
+                                                            .dir_path
+                                                            .is_empty())
+                                                        .then(|| flat_entries[ix].dir_path.clone());
+                                                        flat_entries[ix].render(
+                                                            ix,
+                                                            0,
+                                                            directory_label,
+                                                            commit_sha.clone(),
+                                                            repository.clone(),
+                                                            workspace.clone(),
+                                                            cx,
+                                                        )
                                                     }
-                                                } else {
-                                                    let directory_label = (!flat_entries[ix]
-                                                        .dir_path
-                                                        .is_empty())
-                                                    .then(|| flat_entries[ix].dir_path.clone());
-                                                    flat_entries[ix].render(
-                                                        ix,
-                                                        0,
-                                                        directory_label,
-                                                        commit_sha.clone(),
-                                                        repository.clone(),
-                                                        workspace.clone(),
-                                                        cx,
-                                                    )
-                                                }
-                                            })
-                                            .collect()
-                                    },
-                                )
-                                .size_full()
-                                .ml_neg_1()
-                                .track_scroll(&self.changed_files_scroll_handle)
+                                                })
+                                                .collect()
+                                        },
+                                    )
+                                    .size_full()
+                                    .ml_neg_1()
+                                    .track_scroll(&self.changed_files_scroll_handle)
+                                    .into_any_element()
+                                }
                             })
                             .vertical_scrollbar_for(&self.changed_files_scroll_handle, window, cx),
                     ),
