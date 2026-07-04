@@ -91,6 +91,7 @@ pub struct ProjectDiff {
     focus_handle: FocusHandle,
     pending_scroll: Option<PathKey>,
     review_comment_count: usize,
+    refresh_id: u64,
     _task: Task<Result<()>>,
     _subscription: Subscription,
 }
@@ -623,6 +624,7 @@ impl ProjectDiff {
             buffer_rename_sources,
             pending_scroll: None,
             review_comment_count: 0,
+            refresh_id: 0,
             _task: task,
             _subscription: Subscription::join(
                 branch_diff_subscription,
@@ -994,7 +996,9 @@ impl ProjectDiff {
 
     #[instrument(skip(this, cx))]
     pub async fn refresh(this: WeakEntity<Self>, cx: &mut AsyncWindowContext) -> Result<()> {
-        let (entries, paths_to_replace_excerpts) = this.update(cx, |this, cx| {
+        let (refresh_id, entries, paths_to_replace_excerpts) = this.update(cx, |this, cx| {
+            this.refresh_id = this.refresh_id.wrapping_add(1);
+            let refresh_id = this.refresh_id;
             let (repo, buffers_to_load) = this.branch_diff.update(cx, |branch_diff, cx| {
                 let load_buffers = branch_diff.load_buffers(cx);
                 (branch_diff.repo().cloned(), load_buffers)
@@ -1048,7 +1052,7 @@ impl ProjectDiff {
                 }
             });
 
-            (entries, paths_to_replace_excerpts)
+            (refresh_id, entries, paths_to_replace_excerpts)
         })?;
 
         let mut buffers_to_fold = Vec::new();
@@ -1071,25 +1075,23 @@ impl ProjectDiff {
                     continue;
                 }
             };
-            if let Some(rename_source) = entry.rename_source.clone() {
-                this.update(cx, |this, cx| {
-                    this.buffer_rename_sources
-                        .borrow_mut()
-                        .insert(buffer.read(cx).remote_id(), rename_source);
-                })?;
-            } else {
-                this.update(cx, |this, cx| {
-                    this.buffer_rename_sources
-                        .borrow_mut()
-                        .remove(&buffer.read(cx).remote_id());
-                })?;
-            }
-
             // We might be lagging behind enough that all future entry.load futures are no longer pending.
             // If that is the case, this task will never yield, starving the foreground thread of execution time.
             yield_now().await;
-            cx.update(|window, cx| {
+            let refresh_is_current = cx.update(|window, cx| {
                 this.update(cx, |this, cx| {
+                    if this.refresh_id != refresh_id {
+                        return false;
+                    }
+                    if let Some(rename_source) = entry.rename_source.clone() {
+                        this.buffer_rename_sources
+                            .borrow_mut()
+                            .insert(buffer.read(cx).remote_id(), rename_source);
+                    } else {
+                        this.buffer_rename_sources
+                            .borrow_mut()
+                            .remove(&buffer.read(cx).remote_id());
+                    }
                     if paths_to_replace_excerpts.contains(&path_key) {
                         let _span = ztracing::info_span!("remove_excerpts_for_path");
                         _span.enter();
@@ -1108,11 +1110,18 @@ impl ProjectDiff {
                     ) {
                         buffers_to_fold.push(buffer_id);
                     }
+                    true
                 })
-                .ok();
+                .unwrap_or(false)
             })?;
+            if !refresh_is_current {
+                return Ok(());
+            }
         }
         this.update(cx, |this, cx| {
+            if this.refresh_id != refresh_id {
+                return;
+            }
             if !buffers_to_fold.is_empty() {
                 this.editor.update(cx, |editor, cx| {
                     editor
@@ -2253,7 +2262,10 @@ mod tests {
     use collections::HashMap;
     use db::indoc;
     use editor::test::editor_test_context::{EditorTestContext, assert_state_with_diff};
-    use git::status::{StatusRename, TrackedStatus, UnmergedStatus, UnmergedStatusCode};
+    use git::{
+        repository::{AskPassDelegate, CommitOptions, repo_path},
+        status::{StatusRename, TrackedStatus, UnmergedStatus, UnmergedStatusCode},
+    };
     use gpui::TestAppContext;
     use project::{FakeFs, git_store::GitStoreEvent};
     use serde_json::json;
@@ -2526,6 +2538,67 @@ mod tests {
         });
         assert!(!supports_hunk_staging);
         assert!(supports_hunk_restore);
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_clears_deleted_file_after_check_in(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("deleted.txt", "deleted\n".into())],
+        );
+
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            diff.read_with(cx, |diff, cx| diff.excerpt_file_paths(cx)),
+            vec!["deleted.txt"]
+        );
+
+        let repository = project.read_with(cx, |project, cx| {
+            project.repositories(cx).values().next().unwrap().clone()
+        });
+        repository
+            .update(cx, |repository, cx| {
+                repository.stage_entries(vec![repo_path("deleted.txt")], cx)
+            })
+            .await
+            .unwrap();
+        repository
+            .update(cx, |repository, cx| {
+                repository.commit(
+                    "delete file".into(),
+                    None,
+                    CommitOptions::default(),
+                    AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+                    cx,
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            diff.read_with(cx, |diff, cx| diff.excerpt_file_paths(cx))
+                .is_empty()
+        );
     }
 
     #[gpui::test]
