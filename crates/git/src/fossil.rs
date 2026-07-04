@@ -1761,6 +1761,11 @@ fn parse_fossil_unified_diff(output: &str) -> Result<CommitDiff> {
         }
 
         if let Some(path) = line.strip_prefix("Index: ") {
+            if current.as_ref().is_some_and(|file| {
+                file.in_hunk || !file.old_text.is_empty() || !file.new_text.is_empty()
+            }) {
+                push_fossil_diff_file(&mut files, current.take());
+            }
             let file = current.get_or_insert_with(FossilDiffFile::default);
             file.path = RepoPath::from_std_path(Path::new(path.trim()), PathStyle::local()).ok();
             continue;
@@ -2935,6 +2940,19 @@ mod tests {
         assert_eq!(diff.files[0].new_text.as_deref(), Some("one\nthree\n"));
         assert_eq!(diff.files[1].old_text, None);
         assert_eq!(diff.files[1].new_text.as_deref(), Some("new\n"));
+
+        let diff = parse_fossil_unified_diff(
+            "Index: a.txt\n==================================================================\n--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-old a\n+new a\nIndex: b.txt\n==================================================================\n--- b.txt\n+++ b.txt\n@@ -1 +1 @@\n-old b\n+new b\n",
+        )
+        .unwrap();
+        assert_eq!(diff.stats, Some((2, 2)));
+        assert_eq!(diff.files.len(), 2);
+        assert_eq!(diff.files[0].path, RepoPath::new("a.txt").unwrap());
+        assert_eq!(diff.files[0].old_text.as_deref(), Some("old a\n"));
+        assert_eq!(diff.files[0].new_text.as_deref(), Some("new a\n"));
+        assert_eq!(diff.files[1].path, RepoPath::new("b.txt").unwrap());
+        assert_eq!(diff.files[1].old_text.as_deref(), Some("old b\n"));
+        assert_eq!(diff.files[1].new_text.as_deref(), Some("new b\n"));
 
         let timeline = parse_fossil_timeline_entries(
             "1234567890abcdef1234567890abcdef12345678\t2026-05-13 06:44:31\ttester\tsecond\ttrunk\ttrunk\n+++ no more data (1) +++\n",

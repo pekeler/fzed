@@ -5898,20 +5898,10 @@ impl Repository {
 
     pub fn show(&mut self, commit: String) -> oneshot::Receiver<Result<CommitDetails>> {
         let id = self.id;
-        log::info!("[fzed timeline debug] Repository::show enqueue commit={commit}");
         self.send_job("show", None, move |git_repo, _cx| async move {
-            let started_at = Instant::now();
-            log::info!("[fzed timeline debug] Repository::show start commit={commit}");
             match git_repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    let result = backend.show(commit.clone()).await;
-                    log::info!(
-                        "[fzed timeline debug] Repository::show done commit={} elapsed_ms={} ok={}",
-                        commit,
-                        started_at.elapsed().as_millis(),
-                        result.is_ok()
-                    );
-                    result
+                    backend.show(commit).await
                 }
                 RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                     let resp = client
@@ -5922,18 +5912,13 @@ impl Repository {
                         })
                         .await?;
 
-                    let result = Ok(CommitDetails {
+                    Ok(CommitDetails {
                         sha: resp.sha.into(),
                         message: resp.message.into(),
                         commit_timestamp: resp.commit_timestamp,
                         author_email: resp.author_email.into(),
                         author_name: resp.author_name.into(),
-                    });
-                    log::info!(
-                        "[fzed timeline debug] Repository::show done remote elapsed_ms={} ok=true",
-                        started_at.elapsed().as_millis()
-                    );
-                    result
+                    })
                 }
             }
         })
@@ -5941,20 +5926,10 @@ impl Repository {
 
     pub fn load_commit_diff(&mut self, commit: String) -> oneshot::Receiver<Result<CommitDiff>> {
         let id = self.id;
-        log::info!("[fzed timeline debug] Repository::load_commit_diff enqueue commit={commit}");
         self.send_job("load_commit_diff", None, move |git_repo, cx| async move {
-            let started_at = Instant::now();
-            log::info!("[fzed timeline debug] Repository::load_commit_diff start commit={commit}");
             match git_repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    let result = backend.load_commit(commit.clone(), cx).await;
-                    log::info!(
-                        "[fzed timeline debug] Repository::load_commit_diff done commit={} elapsed_ms={} ok={}",
-                        commit,
-                        started_at.elapsed().as_millis(),
-                        result.is_ok()
-                    );
-                    result
+                    backend.load_commit(commit, cx).await
                 }
                 RepositoryState::Remote(RemoteRepositoryState {
                     client, project_id, ..
@@ -5977,7 +5952,7 @@ impl Repository {
                             ))
                         })
                         .transpose()?;
-                    let result = Ok(CommitDiff {
+                    Ok(CommitDiff {
                         files: response
                             .files
                             .into_iter()
@@ -5991,12 +5966,7 @@ impl Repository {
                             })
                             .collect::<Result<Vec<_>>>()?,
                         stats,
-                    });
-                    log::info!(
-                        "[fzed timeline debug] Repository::load_commit_diff done remote elapsed_ms={} ok=true",
-                        started_at.elapsed().as_millis()
-                    );
-                    result
+                    })
                 }
             }
         })
