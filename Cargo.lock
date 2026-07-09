@@ -288,6 +288,7 @@ dependencies = [
  "quick-xml 0.38.3",
  "rand 0.9.4",
  "regex",
+ "release_channel",
  "reqwest_client",
  "rust-embed",
  "sandbox",
@@ -547,6 +548,7 @@ dependencies = [
  "tree-sitter-md",
  "ui",
  "ui_input",
+ "unicode-segmentation",
  "unindent",
  "url",
  "util",
@@ -3504,7 +3506,6 @@ dependencies = [
  "collections",
  "db",
  "editor",
- "feature_flags",
  "futures 0.3.32",
  "fuzzy",
  "gpui",
@@ -6597,6 +6598,7 @@ dependencies = [
  "menu",
  "open_path_prompt",
  "picker",
+ "picker_preview",
  "pretty_assertions",
  "project",
  "project_panel",
@@ -9824,6 +9826,7 @@ dependencies = [
  "language",
  "language_model",
  "language_models_cloud",
+ "llama_cpp",
  "lmstudio",
  "log",
  "menu",
@@ -10353,6 +10356,19 @@ dependencies = [
  "util",
  "webrtc-sys",
  "zed-scap",
+]
+
+[[package]]
+name = "llama_cpp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures 0.3.32",
+ "http_client",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "url",
 ]
 
 [[package]]
@@ -11427,6 +11443,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases 0.2.1",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -13442,9 +13459,7 @@ dependencies = [
  "gpui",
  "language",
  "menu",
- "multi_buffer",
  "project",
- "rope",
  "schemars 1.0.4",
  "serde",
  "serde_json",
@@ -13456,6 +13471,23 @@ dependencies = [
  "util",
  "workspace",
  "zed_actions",
+]
+
+[[package]]
+name = "picker_preview"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor",
+ "gpui",
+ "language",
+ "multi_buffer",
+ "picker",
+ "project",
+ "rope",
+ "settings",
+ "ui",
+ "util",
 ]
 
 [[package]]
@@ -14057,6 +14089,7 @@ dependencies = [
  "gpui",
  "itertools 0.14.0",
  "language",
+ "markdown_preview",
  "menu",
  "notifications",
  "pretty_assertions",
@@ -15171,6 +15204,7 @@ dependencies = [
  "uuid",
  "watch",
  "windows 0.61.3",
+ "workspace",
  "worktree",
  "zlog",
 ]
@@ -15941,6 +15975,7 @@ dependencies = [
  "http_proxy",
  "libc",
  "log",
+ "nix 0.29.0",
  "serde",
  "serde_json",
  "smol",
@@ -16212,6 +16247,7 @@ dependencies = [
  "anyhow",
  "bitflags 2.10.0",
  "collections",
+ "db",
  "editor",
  "file_icons",
  "fs",
@@ -16223,6 +16259,7 @@ dependencies = [
  "menu",
  "multi_buffer",
  "picker",
+ "picker_preview",
  "pretty_assertions",
  "project",
  "serde",
@@ -22929,7 +22966,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "1.9.0-fzed.0"
+version = "1.10.0-fzed.0"
 dependencies = [
  "acp_thread",
  "acp_tools",
