@@ -84,6 +84,24 @@ fn graph_tab_title(repository_kind: RepositoryKind, is_path_history: bool) -> &'
     }
 }
 
+fn ref_names_for_history(
+    commit: &InitialGraphCommitData,
+    repository_kind: RepositoryKind,
+    is_path_history: bool,
+) -> Vec<SharedString> {
+    if repository_kind.is_fossil() && is_path_history {
+        commit
+            .ref_names
+            .iter()
+            .filter_map(|ref_name| ref_name.strip_prefix("tag: "))
+            .filter(|tag_name| !tag_name.is_empty())
+            .map(SharedString::from)
+            .collect()
+    } else {
+        commit.ref_names.clone()
+    }
+}
+
 fn revision_label(repository_kind: RepositoryKind) -> &'static str {
     if repository_kind.is_fossil() {
         "Check-in"
@@ -1812,6 +1830,9 @@ impl GitGraph {
         cx: &mut Context<Self>,
     ) -> Vec<Vec<AnyElement>> {
         let repository = self.get_repository(cx);
+        let repository_kind = self.repository_kind(cx);
+        let is_path_history = matches!(self.log_source, LogSource::Path(_));
+        let is_fossil_path_history = repository_kind.is_fossil() && is_path_history;
 
         let head_branch_name: Option<SharedString> = repository.as_ref().and_then(|repo| {
             repo.read(cx)
@@ -1873,11 +1894,17 @@ impl GitGraph {
                 }
 
                 let accent_colors = cx.theme().accents();
-                let accent_color = accent_colors
-                    .0
-                    .get(commit.color_idx)
-                    .copied()
-                    .unwrap_or_else(|| accent_colors.0.first().copied().unwrap_or_default());
+                let accent_color = if is_fossil_path_history {
+                    accent_colors.color_for_index(1)
+                } else {
+                    accent_colors
+                        .0
+                        .get(commit.color_idx)
+                        .copied()
+                        .unwrap_or_else(|| accent_colors.0.first().copied().unwrap_or_default())
+                };
+                let ref_names =
+                    ref_names_for_history(&commit.data, repository_kind, is_path_history);
 
                 let is_selected = self.selected_entry_idx == Some(idx);
                 let is_matched = self.search_state.matches.contains(&commit.data.sha);
@@ -1976,20 +2003,12 @@ impl GitGraph {
                             h_flex()
                                 .gap_2()
                                 .overflow_hidden()
-                                .children((!commit.data.ref_names.is_empty()).then(|| {
-                                    h_flex().gap_1().children(commit.data.ref_names.iter().map(
-                                        |name| {
-                                            let is_head =
-                                                Self::is_head_ref(name.as_ref(), &head_branch_name);
-                                            self.render_ref_chip(
-                                                name,
-                                                accent_color,
-                                                is_head,
-                                                idx,
-                                                cx,
-                                            )
-                                        },
-                                    ))
+                                .children((!ref_names.is_empty()).then(|| {
+                                    h_flex().gap_1().children(ref_names.iter().map(|name| {
+                                        let is_head =
+                                            Self::is_head_ref(name.as_ref(), &head_branch_name);
+                                        self.render_ref_chip(name, accent_color, is_head, idx, cx)
+                                    }))
                                 }))
                                 .child(subject_label),
                         )
@@ -4768,6 +4787,28 @@ mod tests {
         assert_eq!(view_revision_label(RepositoryKind::Fossil), "View Check-in");
         assert_eq!(copy_revision_id_label(RepositoryKind::Git), "Copy SHA");
         assert_eq!(copy_revision_id_label(RepositoryKind::Fossil), "Copy Hash");
+    }
+
+    #[test]
+    fn fossil_path_history_only_displays_tags() {
+        let commit = InitialGraphCommitData {
+            sha: Oid::from_bytes(&[0; 20]).expect("valid test OID"),
+            parents: SmallVec::new(),
+            ref_names: vec!["tag: production".into(), "refs/heads/trunk".into()],
+        };
+
+        assert_eq!(
+            ref_names_for_history(&commit, RepositoryKind::Fossil, true),
+            [SharedString::from("production")]
+        );
+        assert_eq!(
+            ref_names_for_history(&commit, RepositoryKind::Fossil, false),
+            commit.ref_names
+        );
+        assert_eq!(
+            ref_names_for_history(&commit, RepositoryKind::Git, true),
+            commit.ref_names
+        );
     }
 
     #[test]
