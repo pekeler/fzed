@@ -1319,17 +1319,7 @@ impl GitRepository for FossilRepository {
                 let mut commits = Vec::new();
                 for entry in parse_fossil_timeline_entries(&output) {
                     let info = fossil_commit_info(&fossil, &entry.hash).await?;
-                    let ref_names = info
-                        .tags
-                        .iter()
-                        .map(|tag| {
-                            if tag == "trunk" || Some(tag.as_str()) == info.branch.as_deref() {
-                                SharedString::from(format!("refs/heads/{tag}"))
-                            } else {
-                                SharedString::from(format!("tag: {tag}"))
-                            }
-                        })
-                        .collect();
+                    let ref_names = fossil_ref_names(&entry.tags, &entry.branch);
                     let commit_data = match fossil_commit_data_from_info(&entry.hash, info) {
                         Ok(commit_data) => commit_data,
                         Err(error) => {
@@ -1517,6 +1507,20 @@ struct FossilCommitInfo {
     comment: String,
     user: Option<String>,
     timestamp: i64,
+}
+
+fn fossil_ref_names(tags: &str, branch: &str) -> Vec<SharedString> {
+    tags.split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(|tag| {
+            if tag == branch {
+                SharedString::from(format!("refs/heads/{tag}"))
+            } else {
+                SharedString::from(format!("tag: {tag}"))
+            }
+        })
+        .collect()
 }
 
 async fn fossil_commit_info(fossil: &FossilBinary, commit: &str) -> Result<FossilCommitInfo> {
@@ -2514,7 +2518,7 @@ mod tests {
     use super::{
         FossilBinary, FossilRepository, filter_scoped_fossil_extras, fossil_changes_to_status,
         fossil_oid_from_hash, fossil_output_reports_unsupported_no_verify_comment,
-        fossil_stash_id_from_oid, fossil_sync_args, parse_fossil_blame_line,
+        fossil_ref_names, fossil_stash_id_from_oid, fossil_sync_args, parse_fossil_blame_line,
         parse_fossil_branch_list_line, parse_fossil_changes_with_kind, parse_fossil_commit_info,
         parse_fossil_default_remote, parse_fossil_info, parse_fossil_numstat,
         parse_fossil_remote_list, parse_fossil_stash_list, parse_fossil_timeline_entries,
@@ -2529,7 +2533,7 @@ mod tests {
         status::{FileStatus, StatusCode},
     };
     use collections::HashMap;
-    use gpui::TestAppContext;
+    use gpui::{SharedString, TestAppContext};
     use std::{
         path::{Path, PathBuf},
         process::{Command, Output},
@@ -2904,6 +2908,14 @@ mod tests {
 
     #[test]
     fn parses_fossil_history_stash_and_diff_metadata() {
+        assert_eq!(
+            fossil_ref_names("production, trunk", "trunk"),
+            vec![
+                SharedString::from("tag: production"),
+                SharedString::from("refs/heads/trunk"),
+            ]
+        );
+
         let info = parse_fossil_commit_info(
             "hash:         1234567890abcdef1234567890abcdef12345678 2026-05-13 06:44:31 UTC\nparent:       abcdef1234567890abcdef1234567890abcdef12 2026-05-13 06:44:01 UTC\ntags:         trunk, release\ncomment:      second commit (user: tester)\n",
         )
