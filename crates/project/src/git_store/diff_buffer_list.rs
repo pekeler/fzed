@@ -24,6 +24,8 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiffBase {
     Head,
+    Index,
+    Staged,
     Merge { base_ref: SharedString },
 }
 
@@ -33,7 +35,7 @@ impl DiffBase {
     }
 }
 
-pub struct BranchDiff {
+pub struct DiffBufferList {
     diff_base: DiffBase,
     repo: Option<Entity<Repository>>,
     project: Entity<Project>,
@@ -52,9 +54,9 @@ pub enum BranchDiffEvent {
     DiffBaseChanged,
 }
 
-impl EventEmitter<BranchDiffEvent> for BranchDiff {}
+impl EventEmitter<BranchDiffEvent> for DiffBufferList {}
 
-impl BranchDiff {
+impl DiffBufferList {
     pub fn new(
         source: DiffBase,
         project: Entity<Project>,
@@ -350,8 +352,13 @@ impl BranchDiff {
                     .as_ref()
                     .and_then(|t| t.entries.get(&item.repo_path))
                     .cloned();
-                let Some(status) = self.merge_statuses(Some(item.status), branch_diff.as_ref())
-                else {
+                let Some(status) = (match self.diff_base {
+                    DiffBase::Head | DiffBase::Merge { .. } => {
+                        self.merge_statuses(Some(item.status), branch_diff.as_ref())
+                    }
+                    DiffBase::Index => item.status.staging().has_unstaged().then_some(item.status),
+                    DiffBase::Staged => item.status.staging().has_staged().then_some(item.status),
+                }) else {
                     continue;
                 };
                 if !status.has_changes() {
@@ -364,6 +371,7 @@ impl BranchDiff {
                     continue;
                 };
                 let task = Self::load_buffer(
+                    self.diff_base.clone(),
                     branch_diff,
                     project_path,
                     repo.clone(),
@@ -375,7 +383,6 @@ impl BranchDiff {
                     repo_path: item.repo_path.clone(),
                     load: task,
                     file_status: item.status,
-                    rename_source: item.rename_source.clone(),
                 });
             }
             let Some(tree_diff) = self.tree_diff.as_ref() else {
@@ -391,6 +398,7 @@ impl BranchDiff {
                     continue;
                 };
                 let task = Self::load_buffer(
+                    self.diff_base.clone(),
                     Some(branch_diff.clone()),
                     project_path,
                     repo.clone(),
@@ -404,7 +412,6 @@ impl BranchDiff {
                     repo_path: path.clone(),
                     load: task,
                     file_status,
-                    rename_source: None,
                 });
             }
         });
@@ -413,51 +420,102 @@ impl BranchDiff {
 
     #[instrument(skip_all)]
     fn load_buffer(
+        diff_base: DiffBase,
         branch_diff: Option<git::status::TreeDiffStatus>,
         project_path: crate::ProjectPath,
         repo: Entity<Repository>,
         rename_source: Option<RepoPath>,
         cx: &Context<'_, Project>,
-    ) -> Task<Result<(Entity<Buffer>, Entity<BufferDiff>, Entity<ConflictSet>)>> {
+    ) -> Task<Result<LoadedDiffBuffer>> {
         let task = cx.spawn(async move |project, cx| {
+            let rename_source_for_display = rename_source.clone();
             let buffer = project
                 .update(cx, |project, cx| project.open_buffer(project_path, cx))?
                 .await?;
 
-            let changes = if let Some(entry) = branch_diff {
-                let oid = match entry {
-                    git::status::TreeDiffStatus::Added { .. } => None,
-                    git::status::TreeDiffStatus::Modified { old, .. }
-                    | git::status::TreeDiffStatus::Deleted { old } => Some(old),
-                };
-                project
-                    .update(cx, |project, cx| {
-                        project.git_store().update(cx, |git_store, cx| {
-                            git_store.open_diff_since(oid, buffer.clone(), repo, cx)
-                        })
-                    })?
-                    .await?
-            } else {
-                project
-                    .update(cx, |project, cx| {
-                        project.git_store().update(cx, |git_store, cx| {
-                            git_store.open_uncommitted_diff_with_head_path(
-                                buffer.clone(),
-                                rename_source,
-                                cx,
-                            )
-                        })
-                    })?
-                    .await?
+            let main_buffer = buffer.clone();
+            let load_conflict_set = diff_base != DiffBase::Staged;
+            let (display_buffer, changes) = match diff_base {
+                DiffBase::Head => {
+                    let diff = project
+                        .update(cx, |project, cx| {
+                            project.git_store().update(cx, |git_store, cx| {
+                                git_store.open_uncommitted_diff_with_head_path(
+                                    buffer.clone(),
+                                    rename_source.clone(),
+                                    cx,
+                                )
+                            })
+                        })?
+                        .await?;
+                    (buffer, diff)
+                }
+                DiffBase::Index => {
+                    let diff = project
+                        .update(cx, |project, cx| {
+                            project.open_unstaged_diff(buffer.clone(), cx)
+                        })?
+                        .await?;
+                    (buffer, diff)
+                }
+                DiffBase::Staged => {
+                    let (diff, index_buffer) = project
+                        .update(cx, |project, cx| {
+                            project.open_staged_diff(buffer.clone(), cx)
+                        })?
+                        .await?;
+                    (index_buffer, diff)
+                }
+                DiffBase::Merge { .. } => {
+                    let diff = if let Some(entry) = branch_diff {
+                        let oid = match entry {
+                            git::status::TreeDiffStatus::Added { .. } => None,
+                            git::status::TreeDiffStatus::Modified { old, .. }
+                            | git::status::TreeDiffStatus::Deleted { old } => Some(old),
+                        };
+                        project
+                            .update(cx, |project, cx| {
+                                project.git_store().update(cx, |git_store, cx| {
+                                    git_store.open_diff_since(oid, buffer.clone(), repo, cx)
+                                })
+                            })?
+                            .await?
+                    } else {
+                        project
+                            .update(cx, |project, cx| {
+                                project.git_store().update(cx, |git_store, cx| {
+                                    git_store.open_uncommitted_diff_with_head_path(
+                                        buffer.clone(),
+                                        rename_source,
+                                        cx,
+                                    )
+                                })
+                            })?
+                            .await?
+                    };
+                    (buffer, diff)
+                }
             };
-            let conflict_set = project
-                .update(cx, |project, cx| {
-                    project.git_store().update(cx, |git_store, cx| {
-                        git_store.open_conflict_set(buffer.clone(), cx)
-                    })
-                })?
-                .await;
-            Ok((buffer, changes, conflict_set))
+            let conflict_set = if load_conflict_set {
+                Some(
+                    project
+                        .update(cx, |project, cx| {
+                            project.git_store().update(cx, |git_store, cx| {
+                                git_store.open_conflict_set(main_buffer.clone(), cx)
+                            })
+                        })?
+                        .await,
+                )
+            } else {
+                None
+            };
+            Ok(LoadedDiffBuffer {
+                display_buffer,
+                main_buffer,
+                diff: changes,
+                conflict_set,
+                rename_source: rename_source_for_display,
+            })
         });
         task
     }
@@ -482,9 +540,17 @@ fn diff_status_to_file_status(branch_diff: &git::status::TreeDiffStatus) -> File
 }
 
 #[derive(Debug)]
+pub struct LoadedDiffBuffer {
+    pub display_buffer: Entity<Buffer>,
+    pub main_buffer: Entity<Buffer>,
+    pub diff: Entity<BufferDiff>,
+    pub conflict_set: Option<Entity<ConflictSet>>,
+    pub rename_source: Option<RepoPath>,
+}
+
+#[derive(Debug)]
 pub struct DiffBuffer {
     pub repo_path: RepoPath,
     pub file_status: FileStatus,
-    pub rename_source: Option<RepoPath>,
-    pub load: Task<Result<(Entity<Buffer>, Entity<BufferDiff>, Entity<ConflictSet>)>>,
+    pub load: Task<Result<LoadedDiffBuffer>>,
 }

@@ -296,6 +296,31 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
+    fn load_revisions(&self, revisions: Vec<String>) -> BoxFuture<'_, Result<Vec<Option<String>>>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let mut contents = Vec::with_capacity(revisions.len());
+                for revision in revisions {
+                    let Some((source, path)) = revision.split_once(':') else {
+                        return Err(anyhow!("invalid revision path: {revision}"));
+                    };
+                    match source {
+                        "" => contents.push(None),
+                        "HEAD" => contents.push(
+                            fossil
+                                .run_raw(&[OsString::from("cat"), OsString::from(path)])
+                                .await
+                                .ok(),
+                        ),
+                        _ => return Err(anyhow!("unsupported Fossil revision: {source}")),
+                    }
+                }
+                Ok(contents)
+            })
+            .boxed()
+    }
+
     fn merge_message(&self) -> BoxFuture<'_, Option<String>> {
         async move { None }.boxed()
     }

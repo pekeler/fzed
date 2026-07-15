@@ -30,7 +30,7 @@ Before each upstream merge, review
 [FZed Upstream Differences](./FZED_UPSTREAM_DIFFERENCES.md). It lists the
 intentional fork differences that should be preserved while resolving conflicts.
 
-Current upstream baseline: `v1.10.3`.
+Current upstream baseline: `v1.11.3`.
 
 ### Versioning
 

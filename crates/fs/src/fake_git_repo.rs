@@ -367,6 +367,24 @@ impl GitRepository for FakeGitRepository {
         })
     }
 
+    fn load_revisions(&self, revisions: Vec<String>) -> BoxFuture<'_, Result<Vec<Option<String>>>> {
+        let fut = self.with_state_async(false, move |state| {
+            Ok(revisions
+                .into_iter()
+                .map(|rev| {
+                    let (prefix, path) = rev.split_once(':')?;
+                    let repo_path = RepoPath::new(path).ok()?;
+                    match prefix {
+                        "" => state.index_contents.get(&repo_path).cloned(),
+                        "HEAD" => state.head_contents.get(&repo_path).cloned(),
+                        _ => None,
+                    }
+                })
+                .collect())
+        });
+        self.executor.spawn(fut).boxed()
+    }
+
     fn show(&self, commit: String) -> BoxFuture<'_, Result<CommitDetails>> {
         self.with_state_async(false, move |state| {
             let sha = state.refs.get(&commit).cloned().unwrap_or(commit);
