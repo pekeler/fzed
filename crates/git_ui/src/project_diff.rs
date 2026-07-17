@@ -384,6 +384,12 @@ struct ButtonStates {
     repository_kind: RepositoryKind,
 }
 
+impl ButtonStates {
+    fn show_hunk_stage_controls(&self) -> bool {
+        self.repository_kind.supports_hunk_staging()
+    }
+}
+
 impl EventEmitter<EditorEvent> for ProjectDiff {}
 
 impl Focusable for ProjectDiff {
@@ -859,54 +865,51 @@ impl Render for ProjectDiffToolbar {
                             })),
                     ),
             )
-            .when(
-                button_states.repository_kind.supports_hunk_staging(),
-                |this| {
-                    this.child(Divider::vertical()).child(
-                        h_group_sm()
-                            .when(button_states.selection, |this| {
-                                this.child(
-                                    Button::new("stage", "Toggle Staged")
-                                        .tooltip(Tooltip::for_action_title_in(
-                                            "Toggle Staged",
-                                            &ToggleStaged,
-                                            &focus_handle,
-                                        ))
-                                        .disabled(!button_states.stage && !button_states.unstage)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.dispatch_action(&ToggleStaged, window, cx)
-                                        })),
-                                )
-                            })
-                            .when(!button_states.selection, |this| {
-                                this.child(
-                                    Button::new("stage", "Stage")
-                                        .disabled(!button_states.stage)
-                                        .tooltip(Tooltip::for_action_title_in(
-                                            "Stage and Go to Next Hunk",
-                                            &StageAndNext,
-                                            &focus_handle,
-                                        ))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.dispatch_action(&StageAndNext, window, cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("unstage", "Unstage")
-                                        .disabled(!button_states.unstage)
-                                        .tooltip(Tooltip::for_action_title_in(
-                                            "Unstage and Go to Next Hunk",
-                                            &UnstageAndNext,
-                                            &focus_handle,
-                                        ))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.dispatch_action(&UnstageAndNext, window, cx)
-                                        })),
-                                )
-                            }),
-                    )
-                },
-            )
+            .when(button_states.show_hunk_stage_controls(), |this| {
+                this.child(Divider::vertical()).child(
+                    h_group_sm()
+                        .when(button_states.selection, |this| {
+                            this.child(
+                                Button::new("stage", "Toggle Staged")
+                                    .tooltip(Tooltip::for_action_title_in(
+                                        "Toggle Staged",
+                                        &ToggleStaged,
+                                        &focus_handle,
+                                    ))
+                                    .disabled(!button_states.stage && !button_states.unstage)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.dispatch_action(&ToggleStaged, window, cx)
+                                    })),
+                            )
+                        })
+                        .when(!button_states.selection, |this| {
+                            this.child(
+                                Button::new("stage", "Stage")
+                                    .disabled(!button_states.stage)
+                                    .tooltip(Tooltip::for_action_title_in(
+                                        "Stage and Go to Next Hunk",
+                                        &StageAndNext,
+                                        &focus_handle,
+                                    ))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.dispatch_action(&StageAndNext, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("unstage", "Unstage")
+                                    .disabled(!button_states.unstage)
+                                    .tooltip(Tooltip::for_action_title_in(
+                                        "Unstage and Go to Next Hunk",
+                                        &UnstageAndNext,
+                                        &focus_handle,
+                                    ))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.dispatch_action(&UnstageAndNext, window, cx)
+                                    })),
+                            )
+                        }),
+                )
+            })
             .child(Divider::vertical())
             .when(
                 button_states.unstage_all && !button_states.stage_all,
@@ -1025,12 +1028,22 @@ mod tests {
     use buffer_diff::DiffHunkSecondaryStatus;
     use db::indoc;
     use editor::test::editor_test_context::{EditorTestContext, assert_state_with_diff};
+    use git::{
+        repository::{AskPassDelegate, CommitOptions, RepoPath, repo_path},
+        status::StatusRename,
+    };
     use gpui::TestAppContext;
     use multi_buffer::PathKey;
-    use project::FakeFs;
+    use project::{FakeFs, git_store::GitStoreEvent};
     use serde_json::json;
     use settings::{DiffViewStyle, GitPanelGroupBy, GitPanelSortBy, SettingsStore};
-    use std::path::Path;
+    use std::{
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
     use unindent::Unindent as _;
     use util::{path, rel_path::rel_path};
 
@@ -1058,9 +1071,74 @@ mod tests {
         });
     }
 
+    fn word_diff_strings(editor: &Entity<Editor>, cx: &mut gpui::VisualTestContext) -> Vec<String> {
+        let snapshot = editor.read_with(cx, |editor, cx| editor.buffer().read(cx).snapshot(cx));
+        let text = snapshot.text();
+
+        snapshot
+            .diff_hunks()
+            .flat_map(|hunk| hunk.word_diffs)
+            .map(|range| text[range.start.0..range.end.0].to_string())
+            .collect()
+    }
+
+    fn editor_text(editor: &Entity<Editor>, cx: &mut gpui::VisualTestContext) -> String {
+        editor.read_with(cx, |editor, cx| {
+            editor.buffer().read(cx).snapshot(cx).text()
+        })
+    }
+
+    fn numbered_text(line_count: usize) -> String {
+        let mut text = String::new();
+        for line_number in 1..=line_count {
+            text.push_str(&format!("line {line_number}\n"));
+        }
+        text
+    }
+
+    fn first_rename_source(diff: &ProjectDiff, cx: &App) -> Option<RepoPath> {
+        let buffer_id = diff
+            .editor(cx)
+            .read(cx)
+            .rhs_editor()
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .snapshot(cx)
+            .excerpts()
+            .next()?
+            .context
+            .start
+            .buffer_id;
+        diff.diff.read(cx).rename_source_for_buffer_id(buffer_id)
+    }
+
     use zed_actions::git as git_actions;
 
     use crate::project_diff::{self, ProjectDiff};
+
+    #[test]
+    fn fossil_project_diff_hides_hunk_stage_controls() {
+        let button_states = ButtonStates {
+            stage: true,
+            unstage: true,
+            prev_next: true,
+            selection: false,
+            stage_all: true,
+            unstage_all: true,
+            can_commit: true,
+            repository_kind: RepositoryKind::Fossil,
+        };
+        assert!(!button_states.show_hunk_stage_controls());
+        assert!(RepositoryKind::Fossil.supports_hunk_restore());
+
+        let button_states = ButtonStates {
+            repository_kind: RepositoryKind::Git,
+            ..button_states
+        };
+        assert!(button_states.show_hunk_stage_controls());
+        assert!(RepositoryKind::Git.supports_hunk_restore());
+    }
 
     #[test]
     fn test_legacy_branch_diff_rows_migrate_to_their_own_kind() {
@@ -1591,6 +1669,472 @@ mod tests {
 
         let text = String::from_utf8(fs.read_file_sync("/project/foo.txt").unwrap()).unwrap();
         assert_eq!(text, "foo\n");
+    }
+
+    #[gpui::test]
+    async fn test_fossil_save_after_restore(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "foo.txt": "FOO\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("foo.txt", "foo\n".into())],
+        );
+        fs.set_error_message_for_index_write(
+            Path::new(path!("/project/.fslckout")),
+            Some("Fossil restore should not write index entries".into()),
+        );
+
+        let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
+        let saw_index_write_error = Arc::new(AtomicBool::new(false));
+        project.update(cx, |project, cx| {
+            let saw_index_write_error = saw_index_write_error.clone();
+            cx.subscribe(project.git_store(), move |_, _, event, _| {
+                if let GitStoreEvent::IndexWriteError(_) = event {
+                    saw_index_write_error.store(true, Ordering::SeqCst);
+                }
+            })
+            .detach();
+        });
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor(cx).read(cx).rhs_editor().clone());
+        assert_state_with_diff(
+            &editor,
+            cx,
+            &"
+                - ˇfoo
+                + FOO
+            "
+            .unindent(),
+        );
+
+        editor
+            .update_in(cx, |editor, window, cx| {
+                editor.git_restore(&Default::default(), window, cx);
+                editor.save(SaveOptions::default(), project.clone(), window, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_state_with_diff(&editor, cx, &"ˇ".unindent());
+
+        let text = String::from_utf8(fs.read_file_sync("/project/foo.txt").unwrap()).unwrap();
+        assert_eq!(text, "foo\n");
+        assert!(!saw_index_write_error.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_supports_hunk_restore_without_staging(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "foo.txt": "FOO\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("foo.txt", "foo\n".into())],
+        );
+
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor(cx).read(cx).rhs_editor().clone());
+        let (supports_hunk_staging, supports_hunk_restore) = editor.read_with(cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let buffer_id = snapshot
+                .excerpts()
+                .next()
+                .map(|excerpt| excerpt.context.start.buffer_id)
+                .expect("project diff should contain a Fossil buffer");
+            (
+                editor.supports_hunk_staging_for_buffer_id(buffer_id, cx),
+                editor.supports_hunk_restore_for_buffer_id(buffer_id, cx),
+            )
+        });
+        assert!(!supports_hunk_staging);
+        assert!(supports_hunk_restore);
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_clears_deleted_file_after_check_in(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("deleted.txt", "deleted\n".into())],
+        );
+
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            diff.read_with(cx, |diff, cx| diff.excerpt_file_paths(cx)),
+            vec!["deleted.txt"]
+        );
+
+        let repository = project.read_with(cx, |project, cx| {
+            project.repositories(cx).values().next().unwrap().clone()
+        });
+        repository
+            .update(cx, |repository, cx| {
+                repository.stage_entries(vec![repo_path("deleted.txt")], cx)
+            })
+            .await
+            .unwrap();
+        repository
+            .update(cx, |repository, cx| {
+                repository.commit(
+                    "delete file".into(),
+                    None,
+                    CommitOptions::default(),
+                    AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+                    cx,
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            diff.read_with(cx, |diff, cx| diff.excerpt_file_paths(cx))
+                .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_uses_rename_source_as_base(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "new.txt": "one\nTWO\nthree\nfour\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("old.txt", "one\ntwo\nthree\n".into())],
+        );
+        fs.with_git_state(Path::new(path!("/project/.fslckout")), true, |state| {
+            let new_path = RepoPath::from_rel_path(rel_path("new.txt"));
+            state
+                .head_contents
+                .insert(new_path.clone(), "one\ntwo\nthree\n".into());
+            state
+                .index_contents
+                .insert(new_path.clone(), "one\ntwo\nthree\n".into());
+            state.status_renames = vec![StatusRename {
+                source: RepoPath::from_rel_path(rel_path("old.txt")),
+                target: new_path,
+            }];
+        })
+        .unwrap();
+
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor(cx).read(cx).rhs_editor().clone());
+        assert_state_with_diff(
+            &editor,
+            cx,
+            &"
+                  ˇone
+                - two
+                + TWO
+                  three
+                + four
+            "
+            .unindent(),
+        );
+        assert_eq!(
+            diff.read_with(cx, first_rename_source),
+            Some(RepoPath::from_rel_path(rel_path("old.txt")))
+        );
+        assert_eq!(word_diff_strings(&editor, cx), ["two", "TWO"]);
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_updates_after_recording_rename(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "new.txt": "one\nTWO\nthree\nfour\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("old.txt", "one\ntwo\nthree\n".into())],
+        );
+
+        let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        diff.update_in(cx, |diff, window, cx| {
+            diff.editor(cx)
+                .update(cx, |editor, cx| editor.split(window, cx));
+        });
+
+        fs.with_git_state(Path::new(path!("/project/.fslckout")), true, |state| {
+            let new_path = RepoPath::from_rel_path(rel_path("new.txt"));
+            state
+                .head_contents
+                .insert(new_path.clone(), "one\ntwo\nthree\n".into());
+            state
+                .index_contents
+                .insert(new_path.clone(), "one\ntwo\nthree\n".into());
+            state.status_renames = vec![StatusRename {
+                source: RepoPath::from_rel_path(rel_path("old.txt")),
+                target: new_path,
+            }];
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor(cx).read(cx).rhs_editor().clone());
+        assert_state_with_diff(
+            &editor,
+            cx,
+            &"
+                  ˇone
+                + TWO
+                  three
+                + four
+            "
+            .unindent(),
+        );
+        let left_editor = diff.read_with(cx, |diff, cx| {
+            diff.editor(cx)
+                .read(cx)
+                .lhs_editor()
+                .expect("project diff should remain split")
+                .clone()
+        });
+        assert_eq!(editor_text(&left_editor, cx), "one\ntwo\nthree\n");
+        assert_eq!(word_diff_strings(&left_editor, cx), ["two"]);
+        assert_eq!(word_diff_strings(&editor, cx), ["TWO"]);
+        assert_eq!(
+            diff.read_with(cx, first_rename_source),
+            Some(RepoPath::from_rel_path(rel_path("old.txt")))
+        );
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_replaces_created_file_excerpt_after_recording_rename(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let original_text = numbered_text(20);
+        let renamed_text = original_text.replace("line 10\n", "line TEN\ninserted after ten\n");
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "new.txt": renamed_text,
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[("old.txt", original_text.clone())],
+        );
+
+        let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        diff.update_in(cx, |diff, window, cx| {
+            diff.editor(cx)
+                .update(cx, |editor, cx| editor.split(window, cx));
+        });
+
+        fs.with_git_state(Path::new(path!("/project/.fslckout")), true, |state| {
+            let new_path = RepoPath::from_rel_path(rel_path("new.txt"));
+            state.head_contents.insert(new_path.clone(), original_text);
+            state.status_renames = vec![StatusRename {
+                source: RepoPath::from_rel_path(rel_path("old.txt")),
+                target: new_path,
+            }];
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor(cx).read(cx).rhs_editor().clone());
+        let text = editor_text(&editor, cx);
+        assert!(
+            !text.contains("line 1\n"),
+            "recording a rename should not preserve the target's prior full-file created excerpt"
+        );
+        assert!(
+            text.contains("line TEN\ninserted after ten\n"),
+            "recorded rename excerpt should include the edited hunk"
+        );
+        assert!(
+            !text.contains("line 20\n"),
+            "recording a rename should shrink back to the modified hunk context"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_fossil_project_diff_updates_after_undoing_deleted_added_text(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".fslckout": {},
+                "foo.txt": "line 1\nadded first\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nadded second\nline 8\nline 9\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.fslckout")),
+            &[(
+                "foo.txt",
+                "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\n".into(),
+            )],
+        );
+
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let diff = cx.new_window_entity(|window, cx| {
+            ProjectDiff::new(project.clone(), workspace, window, cx)
+        });
+        cx.run_until_parked();
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor(cx).read(cx).rhs_editor().clone());
+        let mut cx = EditorTestContext::for_editor_in(editor, cx).await;
+
+        cx.assert_state_with_diff(
+            "
+              ˇline 1
+            + added first
+              line 2
+              line 3
+              line 4
+              line 6
+              line 7
+            + added second
+              line 8
+              line 9
+            "
+            .unindent(),
+        );
+
+        cx.set_selections_state(
+            "line 1\n«added first\nˇ»line 2\nline 3\nline 4\nline 6\nline 7\nadded second\nline 8\nline 9\n",
+        );
+        cx.update_editor(|editor, window, cx| {
+            editor.delete(&editor::actions::Delete, window, cx);
+        });
+        cx.run_until_parked();
+        cx.update_editor(|editor, window, cx| {
+            editor.undo(&editor::actions::Undo, window, cx);
+        });
+        cx.run_until_parked();
+
+        cx.set_selections_state(
+            "ˇline 1\nadded first\nline 2\nline 3\nline 4\nline 6\nline 7\nadded second\nline 8\nline 9\n",
+        );
+        cx.assert_state_with_diff(
+            "
+              ˇline 1
+            + added first
+              line 2
+              line 3
+              line 4
+              line 6
+              line 7
+            + added second
+              line 8
+              line 9
+            "
+            .unindent(),
+        );
     }
 
     #[gpui::test]

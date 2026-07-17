@@ -50,7 +50,12 @@ pub trait DiffHunkDelegate {
         if hunks.is_empty() || editor.read_only(cx) {
             return;
         }
-        self.stage_or_unstage(false, hunks.clone(), editor, window, cx);
+        let stageable_hunks = hunks
+            .iter()
+            .filter(|hunks| editor.buffer_supports_hunk_staging(hunks.buffer_id, cx))
+            .cloned()
+            .collect();
+        self.stage_or_unstage(false, stageable_hunks, editor, window, cx);
         editor.transact(window, cx, |editor, window, cx| {
             editor.restore_diff_hunks(hunks, cx);
             let selections = editor
@@ -2149,6 +2154,16 @@ impl Editor {
     fn buffer_supports_hunk_restore(&self, buffer_id: BufferId, cx: &App) -> bool {
         self.repository_kind_for_buffer_id(buffer_id, cx)
             .supports_hunk_restore()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn supports_hunk_staging_for_buffer_id(&self, buffer_id: BufferId, cx: &App) -> bool {
+        self.buffer_supports_hunk_staging(buffer_id, cx)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn supports_hunk_restore_for_buffer_id(&self, buffer_id: BufferId, cx: &App) -> bool {
+        self.buffer_supports_hunk_restore(buffer_id, cx)
     }
 
     fn start_git_blame(

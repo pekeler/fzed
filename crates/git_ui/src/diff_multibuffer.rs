@@ -604,7 +604,7 @@ impl DiffMultibuffer {
 
     #[instrument(skip(this, cx))]
     pub(crate) async fn refresh(this: WeakEntity<Self>, cx: &mut AsyncWindowContext) -> Result<()> {
-        let entries = this.update(cx, |this, cx| {
+        let (entries, paths_to_replace_excerpts) = this.update(cx, |this, cx| {
             let (repo, buffers_to_load) = this.branch_diff.update(cx, |branch_diff, cx| {
                 let load_buffers = branch_diff.load_buffers(cx);
                 (branch_diff.repo().cloned(), load_buffers)
@@ -618,6 +618,7 @@ impl DiffMultibuffer {
                 .collect::<HashMap<_, _>>();
 
             let mut entries = BTreeMap::new();
+            let mut paths_to_replace_excerpts = HashSet::default();
             let mut live_repo_paths = HashSet::default();
             if let Some(repo) = repo {
                 let repo = repo.read(cx);
@@ -629,7 +630,18 @@ impl DiffMultibuffer {
                         diff_buffer.file_status,
                         cx,
                     );
-                    previous_paths.remove(&path_key);
+                    if let Some(previous_buffer_id) = previous_paths.remove(&path_key) {
+                        let previous_rename_source = this
+                            .buffer_rename_sources
+                            .borrow()
+                            .get(&previous_buffer_id)
+                            .cloned();
+                        if diff_buffer.rename_source.is_some()
+                            && previous_rename_source != diff_buffer.rename_source
+                        {
+                            paths_to_replace_excerpts.insert(path_key.clone());
+                        }
+                    }
                     entries.insert(path_key, diff_buffer);
                 }
             }
@@ -660,7 +672,7 @@ impl DiffMultibuffer {
             this.buffer_subscriptions
                 .retain(|repo_path, _| live_repo_paths.contains(repo_path));
 
-            entries
+            (entries, paths_to_replace_excerpts)
         })?;
 
         let mut buffers_to_fold = Vec::new();
@@ -672,6 +684,21 @@ impl DiffMultibuffer {
                 yield_now().await;
                 cx.update(|window, cx| {
                     this.update(cx, |this, cx| {
+                        if paths_to_replace_excerpts.contains(&path_key) {
+                            let _span = ztracing::info_span!("remove_excerpts_for_path");
+                            _span.enter();
+                            this.editor.update(cx, |editor, cx| {
+                                editor.remove_excerpts_for_path(path_key.clone(), cx)
+                            });
+                        }
+                        let buffer_id = loaded_buffer.display_buffer.read(cx).remote_id();
+                        let mut buffer_rename_sources = this.buffer_rename_sources.borrow_mut();
+                        if let Some(rename_source) = loaded_buffer.rename_source {
+                            buffer_rename_sources.insert(buffer_id, rename_source);
+                        } else {
+                            buffer_rename_sources.remove(&buffer_id);
+                        }
+                        drop(buffer_rename_sources);
                         if let Some(buffer_id) = this.register_buffer(
                             entry.repo_path,
                             path_key,
@@ -683,12 +710,6 @@ impl DiffMultibuffer {
                             window,
                             cx,
                         ) {
-                            let mut buffer_rename_sources = this.buffer_rename_sources.borrow_mut();
-                            if let Some(rename_source) = loaded_buffer.rename_source {
-                                buffer_rename_sources.insert(buffer_id, rename_source);
-                            } else {
-                                buffer_rename_sources.remove(&buffer_id);
-                            }
                             buffers_to_fold.push(buffer_id);
                         }
                     })
@@ -825,6 +846,11 @@ impl DiffMultibuffer {
                     .clone()
             })
             .collect()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn rename_source_for_buffer_id(&self, buffer_id: BufferId) -> Option<RepoPath> {
+        self.buffer_rename_sources.borrow().get(&buffer_id).cloned()
     }
 
     /// Returns the real (worktree-relative) path of each excerpted buffer, in

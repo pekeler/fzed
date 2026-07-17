@@ -383,6 +383,7 @@ impl DiffBufferList {
                     repo_path: item.repo_path.clone(),
                     load: task,
                     file_status: item.status,
+                    rename_source: item.rename_source.clone(),
                 });
             }
             let Some(tree_diff) = self.tree_diff.as_ref() else {
@@ -412,6 +413,7 @@ impl DiffBufferList {
                     repo_path: path.clone(),
                     load: task,
                     file_status,
+                    rename_source: None,
                 });
             }
         });
@@ -552,5 +554,6 @@ pub struct LoadedDiffBuffer {
 pub struct DiffBuffer {
     pub repo_path: RepoPath,
     pub file_status: FileStatus,
+    pub rename_source: Option<RepoPath>,
     pub load: Task<Result<LoadedDiffBuffer>>,
 }
