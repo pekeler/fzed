@@ -1956,6 +1956,7 @@ async fn fossil_blame_from_output(
 
     let mut entries: Vec<crate::blame::BlameEntry> = Vec::new();
     let mut messages = HashMap::default();
+    let mut tag_names = HashMap::default();
     for raw_line in raw_lines {
         let Some(info) = info_by_prefix.get(raw_line.hash_prefix.as_str()) else {
             continue;
@@ -1964,6 +1965,7 @@ async fn fossil_blame_from_output(
             continue;
         };
         messages.insert(sha, info.comment.clone());
+        tag_names.insert(sha, info.tags.clone());
 
         if let Some(entry) = entries.last_mut()
             && entry.sha == sha
@@ -1991,7 +1993,11 @@ async fn fossil_blame_from_output(
         });
     }
 
-    Ok(Blame { entries, messages })
+    Ok(Blame {
+        entries,
+        messages,
+        tag_names,
+    })
 }
 
 #[derive(Clone, Debug)]

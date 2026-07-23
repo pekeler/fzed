@@ -65,7 +65,7 @@ use git::{
     status::{FileStatus, StatusCode, TrackedStatus, UnmergedStatus},
 };
 #[cfg(feature = "test-support")]
-use util::normalize_path;
+use path::normalize_path;
 
 #[cfg(feature = "test-support")]
 use smol::io::AsyncReadExt;
@@ -300,6 +300,7 @@ pub struct Metadata {
     pub len: u64,
     pub is_fifo: bool,
     pub is_executable: bool,
+    pub is_writable: bool,
 }
 
 /// Filesystem modification time. The purpose of this newtype is to discourage use of operations
@@ -1030,6 +1031,7 @@ impl Fs for RealFs {
             is_dir: metadata.file_type().is_dir(),
             is_fifo,
             is_executable,
+            is_writable: !metadata.permissions().readonly(),
         }))
     }
 
@@ -3107,6 +3109,7 @@ impl Fs for FakeFs {
                     is_symlink,
                     is_fifo: false,
                     is_executable: false,
+                    is_writable: true,
                 },
                 FakeFsEntry::Dir {
                     inode, mtime, len, ..
@@ -3118,6 +3121,7 @@ impl Fs for FakeFs {
                     is_symlink,
                     is_fifo: false,
                     is_executable: false,
+                    is_writable: true,
                 },
                 FakeFsEntry::Symlink { .. } => unreachable!(),
             }))

@@ -75,8 +75,9 @@ use util::{
 };
 use workspace::{
     DraggedSelection, OpenInTerminal, OpenMode, OpenOptions, OpenVisible, PreviewTabsSettings,
-    SelectedEntry, SplitDirection, Workspace,
+    SelectedEntry, SplitDirection, Workspace, WorkspaceSettings,
     dock::{DockPosition, Panel, PanelEvent},
+    focus_follows_mouse::FocusFollowsMouse as _,
     notifications::{DetachAndPromptErr, NotifyResultExt, NotifyTaskExt},
 };
 use worktree::CreatedEntry;
@@ -1893,7 +1894,7 @@ impl ProjectPanel {
             }
             let trimmed_filename = trimmed_filename.trim_start_matches('/');
 
-            let Ok(filename) = RelPath::unix(trimmed_filename) else {
+            let Ok(filename) = RelPath::from_unix_str(trimmed_filename) else {
                 edit_state.validation_state = ValidationState::Warning(
                     "File or directory name contains leading or trailing whitespace.".to_string(),
                 );
@@ -1917,7 +1918,7 @@ impl ProjectPanel {
                     let new_path = if let Some(parent) = entry.path.clone().parent() {
                         parent.join(&filename)
                     } else {
-                        filename.into()
+                        filename.to_owned()
                     };
                     if let Some(existing) = worktree.read(cx).entry_for_path(&new_path)
                         && existing.id != entry.id
@@ -2002,7 +2003,7 @@ impl ProjectPanel {
             });
         } else {
             let new_path = if let Some(parent) = entry.path.parent() {
-                parent.join(&filename)
+                parent.join(&filename).into()
             } else {
                 filename.clone()
             };
@@ -2681,7 +2682,7 @@ impl ProjectPanel {
         cx: &mut Context<ProjectPanel>,
     ) {
         maybe!({
-            let items_to_delete = self.disjoint_effective_entries(cx);
+            let items_to_delete = self.disjoint_effective_entries_excluding_roots(cx);
             if items_to_delete.is_empty() {
                 return None;
             }
@@ -3394,7 +3395,7 @@ impl ProjectPanel {
     }
 
     fn cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        let entries = self.disjoint_effective_entries(cx);
+        let entries = self.disjoint_effective_entries_excluding_roots(cx);
         if !entries.is_empty() {
             self.write_entries_to_system_clipboard(&entries, cx);
             self.clipboard = Some(ClipboardEntry::Cut(entries));
@@ -3403,7 +3404,7 @@ impl ProjectPanel {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        let entries = self.disjoint_effective_entries(cx);
+        let entries = self.disjoint_effective_entries_excluding_roots(cx);
         if !entries.is_empty() {
             self.write_entries_to_system_clipboard(&entries, cx);
             self.clipboard = Some(ClipboardEntry::Copied(entries));
@@ -3430,7 +3431,7 @@ impl ProjectPanel {
         let source_entry = source_worktree.read(cx).entry_for_id(source.entry_id)?;
 
         let clipboard_entry_file_name = source_entry.path.file_name()?.to_string();
-        new_path.push(RelPath::unix(&clipboard_entry_file_name).unwrap());
+        new_path.push(RelPath::from_unix_str(&clipboard_entry_file_name).unwrap());
 
         let (extension, file_name_without_extension) = if source_entry.is_file() {
             (
@@ -3466,7 +3467,7 @@ impl ProjectPanel {
                     new_file_name.push_str(extension);
                 }
 
-                new_path.push(RelPath::unix(&new_file_name).unwrap());
+                new_path.push(RelPath::from_unix_str(&new_file_name).unwrap());
 
                 disambiguation_range = Some(0..(file_name_len + disambiguation_len));
                 ix += 1;
@@ -3985,7 +3986,7 @@ impl ProjectPanel {
             let dir_path = if include_root {
                 worktree.read(cx).root_name().join(&dir_path)
             } else {
-                dir_path
+                dir_path.to_rel_path_buf()
             };
 
             self.workspace
@@ -3995,25 +3996,6 @@ impl ProjectPanel {
                     );
                 })
                 .ok();
-        }
-    }
-
-    fn move_entry(
-        &mut self,
-        entry_to_move: ProjectEntryId,
-        destination: ProjectEntryId,
-        destination_is_file: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<Task<Result<CreatedEntry>>> {
-        if self
-            .project
-            .read(cx)
-            .entry_is_worktree_root(entry_to_move, cx)
-        {
-            self.move_worktree_root(entry_to_move, destination, cx);
-            None
-        } else {
-            self.move_worktree_entry(entry_to_move, destination, destination_is_file, cx)
         }
     }
 
@@ -4069,7 +4051,7 @@ impl ProjectPanel {
             let Some(source_name) = source_path.path.file_name() else {
                 return (None, None);
             };
-            let Ok(source_name) = RelPath::unix(source_name) else {
+            let Ok(source_name) = RelPath::from_unix_str(source_name) else {
                 return (None, None);
             };
 
@@ -4099,8 +4081,14 @@ impl ProjectPanel {
         self.index_for_entry(selection.entry_id, selection.worktree_id)
     }
 
-    fn disjoint_effective_entries(&self, cx: &App) -> BTreeSet<SelectedEntry> {
-        self.disjoint_entries(self.effective_entries(), cx)
+    fn disjoint_effective_entries_excluding_roots(&self, cx: &App) -> BTreeSet<SelectedEntry> {
+        let project = self.project.read(cx);
+        let entries = self
+            .effective_entries()
+            .into_iter()
+            .filter(|entry| !project.entry_is_worktree_root(entry.entry_id, cx))
+            .collect();
+        self.disjoint_entries(entries, cx)
     }
 
     fn disjoint_entries(
@@ -4116,7 +4104,6 @@ impl ProjectPanel {
         let project = self.project.read(cx);
         let entries_by_worktree: HashMap<WorktreeId, Vec<SelectedEntry>> = entries
             .into_iter()
-            .filter(|entry| !project.entry_is_worktree_root(entry.entry_id, cx))
             .fold(HashMap::default(), |mut map, entry| {
                 map.entry(entry.worktree_id).or_default().push(entry);
                 map
@@ -4324,7 +4311,10 @@ impl ProjectPanel {
             entry: Entry {
                 id: NEW_ENTRY_ID,
                 kind: new_entry_kind,
-                path: parent_entry.path.join(RelPath::unix("\0").unwrap()),
+                path: parent_entry
+                    .path
+                    .join(RelPath::from_unix_str("\0").unwrap())
+                    .into(),
                 inode: 0,
                 mtime: parent_entry.mtime,
                 size: parent_entry.size,
@@ -4531,19 +4521,21 @@ impl ProjectPanel {
                                         entry.path.strip_prefix(root_folded_entry).ok().and_then(
                                             |suffix| {
                                                 Some(
-                                                    RelPath::unix(root_folded_entry.file_name()?)
-                                                        .unwrap()
-                                                        .join(suffix),
+                                                    RelPath::from_unix_str(
+                                                        root_folded_entry.file_name()?,
+                                                    )
+                                                    .unwrap()
+                                                    .join(suffix),
                                                 )
                                             },
                                         )
                                     })
                                     .or_else(|| {
                                         entry.path.file_name().map(|file_name| {
-                                            RelPath::unix(file_name).unwrap().into()
+                                            RelPath::from_unix_str(file_name).unwrap().to_owned()
                                         })
                                     })
-                                    .unwrap_or_else(|| entry.path.clone());
+                                    .unwrap_or_else(|| entry.path.to_rel_path_buf());
                                 let depth = path.components().count();
                                 (depth, path.as_unix_str().chars().count())
                             };
@@ -4729,7 +4721,7 @@ impl ProjectPanel {
             if let Some(name) = path.file_name()
                 && let Some(name) = name.to_str()
             {
-                let target_path = target_directory.join(RelPath::unix(name).unwrap());
+                let target_path = target_directory.join(RelPath::from_unix_str(name).unwrap());
                 if worktree.read(cx).entry_for_path(&target_path).is_some() {
                     paths_to_replace.push((name.to_string(), path.clone()));
                 }
@@ -4873,6 +4865,21 @@ impl ProjectPanel {
             .collect::<BTreeSet<SelectedEntry>>();
         let entries = self.disjoint_entries(resolved_selections, cx);
 
+        let root_entries: Vec<ProjectEntryId> = {
+            let project = self.project.read(cx);
+            entries
+                .iter()
+                .filter(|entry| project.entry_is_worktree_root(entry.entry_id, cx))
+                .map(|entry| entry.entry_id)
+                .collect()
+        };
+        if !root_entries.is_empty() {
+            for entry_id in root_entries {
+                self.move_worktree_root(entry_id, target_entry_id, cx);
+            }
+            return;
+        }
+
         if Self::is_copy_modifier_set(&window.modifiers()) {
             let _ = maybe!({
                 let project = self.project.read(cx);
@@ -4990,7 +4997,9 @@ impl ProjectPanel {
             // results with folded selections that need refreshing.
             let mut move_tasks: Vec<(ProjectEntryId, Task<Result<CreatedEntry>>)> = Vec::new();
             for entry in entries {
-                if let Some(task) = self.move_entry(entry.entry_id, target_entry_id, is_file, cx) {
+                if let Some(task) =
+                    self.move_worktree_entry(entry.entry_id, target_entry_id, is_file, cx)
+                {
                     move_tasks.push((entry.entry_id, task));
                 }
             }
@@ -5070,7 +5079,7 @@ impl ProjectPanel {
                                         move_results.iter().find(|(id, _)| id == resolved_id)?;
                                     let worktree = project.worktree_for_entry(new_entry.id, cx)?;
                                     let leaf_path = new_entry.path.join(suffix);
-                                    Some((worktree, leaf_path))
+                                    Some((worktree, leaf_path.into()))
                                 })
                                 .collect()
                         })
@@ -7371,6 +7380,13 @@ impl Render for ProjectPanel {
                             div()
                                 .id("project-panel-blank-area")
                                 .block_mouse_except_scroll()
+                                // `block_mouse_except_scroll` prevents the dock's own
+                                // focus-follows-mouse hover handler from seeing this area,
+                                // so handle it here directly.
+                                .focus_follows_mouse(
+                                    WorkspaceSettings::get_global(cx).focus_follows_mouse,
+                                    cx,
+                                )
                                 .flex_grow_1()
                                 .on_scroll_wheel({
                                     let scroll_handle = self.scroll_handle.clone();
