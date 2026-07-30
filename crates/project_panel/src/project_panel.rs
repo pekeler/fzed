@@ -5,7 +5,6 @@ mod utils;
 use anyhow::{Context as _, Result};
 use client::{ErrorCode, ErrorExt};
 use collections::{BTreeSet, HashMap, hash_map};
-use command_palette_hooks::CommandPaletteFilter;
 use editor::{
     Editor, EditorEvent, MultiBufferOffset,
     items::{
@@ -15,6 +14,7 @@ use editor::{
 };
 use feature_flags::{FeatureFlagAppExt, ProjectPanelUndoRedoFeatureFlag};
 use file_icons::FileIcons;
+use fs::TrashId;
 use git;
 use git::repository::RepositoryKind;
 use git::status::GitSummary;
@@ -678,6 +678,17 @@ enum DeleteEntryOutcome {
     Failed,
 }
 
+/// Small wrapper around a pending task returned by either
+/// [`Project::trash_entry`] or [`Project::delete_entry`].
+///
+/// Since the two operations return different types, this enum lets
+/// [`ProjectPanel::remove`] collect and resolve both uniformly, while carrying
+/// the intention (trash vs delete).
+enum RemoveEntryTask {
+    Trash(Task<Result<TrashId>>),
+    Delete(Task<Result<()>>),
+}
+
 impl ProjectPanel {
     fn new(
         workspace: &mut Workspace,
@@ -781,18 +792,6 @@ impl ProjectPanel {
             )
             .detach();
 
-            let trash_action = [TypeId::of::<Trash>()];
-            let is_remote = project.read(cx).is_remote();
-
-            // Make sure the trash option is never displayed anywhere on remote
-            // hosts since they may not support trashing. May want to dynamically
-            // detect this in the future.
-            if is_remote {
-                CommandPaletteFilter::update_global(cx, |filter, _cx| {
-                    filter.hide_action_types(&trash_action);
-                });
-            }
-
             let filename_editor = cx.new(|cx| Editor::single_line(window, cx));
 
             cx.subscribe_in(
@@ -806,7 +805,7 @@ impl ProjectPanel {
                     EditorEvent::SelectionsChanged { .. } => {
                         project_panel.autoscroll(cx);
                     }
-                    EditorEvent::Blurred => {
+                    EditorEvent::Blurred if window.is_window_active() => {
                         if project_panel
                             .state
                             .edit_state
@@ -903,7 +902,12 @@ impl ProjectPanel {
                     unfolded_dir_ids: Default::default(),
                 },
                 update_visible_entries_task: Default::default(),
-                undo_manager: UndoManager::new(workspace.weak_handle(), weak_project_panel, &cx),
+                undo_manager: UndoManager::new(
+                    workspace.weak_handle(),
+                    weak_project_panel,
+                    project.read(cx).is_via_collab(),
+                    &cx,
+                ),
             };
             this.update_visible_entries(None, false, false, window, cx);
 
@@ -1189,18 +1193,16 @@ impl ProjectPanel {
                             .action("Copy", Box::new(Copy))
                             .action("Duplicate", Box::new(Duplicate))
                             .action_disabled_when(!has_pasteable_content, "Paste", Box::new(Paste))
-                            .when(cx.has_flag::<ProjectPanelUndoRedoFeatureFlag>(), |menu| {
-                                menu.action_disabled_when(
-                                    !self.undo_manager.can_undo(),
-                                    "Undo",
-                                    Box::new(Undo),
-                                )
-                                .action_disabled_when(
-                                    !self.undo_manager.can_redo(),
-                                    "Redo",
-                                    Box::new(Redo),
-                                )
-                            })
+                            .when(
+                                !is_collab && cx.has_flag::<ProjectPanelUndoRedoFeatureFlag>(),
+                                |menu| {
+                                    let can_undo = self.undo_manager.can_undo();
+                                    let can_redo = self.undo_manager.can_redo();
+
+                                    menu.action_disabled_when(!can_undo, "Undo", Box::new(Undo))
+                                        .action_disabled_when(!can_redo, "Redo", Box::new(Redo))
+                                },
+                            )
                             .when(is_remote, |menu| {
                                 menu.separator()
                                     .action("Download...", Box::new(DownloadFromRemote))
@@ -1254,7 +1256,7 @@ impl ProjectPanel {
                             .when(!should_hide_rename, |menu| {
                                 menu.separator().action("Rename", Box::new(Rename))
                             })
-                            .when(!is_root && !is_remote, |menu| {
+                            .when(!is_root && !is_collab, |menu| {
                                 menu.action("Trash", Box::new(Trash { skip_prompt: false }))
                             })
                             .when(!is_root, |menu| {
@@ -2031,18 +2033,6 @@ impl ProjectPanel {
             let new_entry = edit_task.await;
             project_panel.update(cx, |project_panel, cx| {
                 project_panel.state.edit_state = None;
-
-                // Record the operation if the edit was applied
-                if new_entry.is_ok() {
-                    let operation = if let Some(old_entry) = edited_entry {
-                        Change::Renamed((worktree_id, old_entry.path).into(), new_project_path)
-                    } else {
-                        Change::Created(new_project_path)
-                    };
-
-                    project_panel.undo_manager.record([operation]).log_err();
-                }
-
                 cx.notify();
             })?;
 
@@ -2058,6 +2048,23 @@ impl ProjectPanel {
                 }
                 Ok(CreatedEntry::Included(new_entry)) => {
                     project_panel.update_in(cx, |project_panel, window, cx| {
+                        // Only recording changes in included files as otherwise
+                        // undoing some operations would fail, as
+                        // `Worktree::entry_for_path` would return `None` for
+                        // excluded paths.
+                        // In the future we can look into adding support for recording
+                        // changes in excluded paths, but that would mean updating
+                        // methods that rely on `EntryId` to now rely on the actual
+                        // paths.
+                        let operation = match edited_entry {
+                            Some(old_entry) => {
+                                let project_path = (worktree_id, old_entry.path).into();
+                                Change::Renamed(project_path, new_project_path)
+                            }
+                            None => Change::Created(new_project_path),
+                        };
+                        project_panel.undo_manager.record([operation]).log_err();
+
                         if let Some(selection) = &mut project_panel.selection
                             && selection.entry_id == edited_entry_id
                         {
@@ -2127,9 +2134,8 @@ impl ProjectPanel {
     }
 
     async fn resolve_delete_entry(
-        task: Option<Task<Result<Option<fs::TrashedEntry>>>>,
+        task: Option<RemoveEntryTask>,
         worktree_id: WorktreeId,
-        trash: bool,
     ) -> DeleteEntryOutcome {
         let Some(task) = task else {
             // If there's no task to be awaited on, it means that the entry, or
@@ -2137,18 +2143,21 @@ impl ProjectPanel {
             return DeleteEntryOutcome::Deleted;
         };
 
-        match task.await {
-            Ok(Some(trashed_entry)) if trash => {
-                DeleteEntryOutcome::Trashed(Change::Trashed(worktree_id, trashed_entry))
-            }
-            Err(err) => {
-                log::error!(
-                    "Failed to {} an entry: {err:#}",
-                    if trash { "trash" } else { "delete" }
-                );
-                DeleteEntryOutcome::Failed
-            }
-            Ok(_) => DeleteEntryOutcome::Deleted,
+        match task {
+            RemoveEntryTask::Trash(task) => match task.await {
+                Ok(trash_id) => DeleteEntryOutcome::Trashed(Change::Trashed(worktree_id, trash_id)),
+                Err(err) => {
+                    log::error!("Failed to trash an entry: {err:#}",);
+                    DeleteEntryOutcome::Failed
+                }
+            },
+            RemoveEntryTask::Delete(task) => match task.await {
+                Ok(()) => DeleteEntryOutcome::Deleted,
+                Err(err) => {
+                    log::error!("Failed to delete an entry: {err:#}",);
+                    DeleteEntryOutcome::Failed
+                }
+            },
         }
     }
 
@@ -2674,6 +2683,11 @@ impl ProjectPanel {
         });
     }
 
+    // TODO(yara|dino): trashing and deleting are conceptually distinct, even
+    // more so with the fact that trashing can now be undone, whereas deleting
+    // cannot.
+    // Worth splitting them, and exploring dropping the trash confirmation now
+    // that trash is undoable.
     fn remove(
         &mut self,
         trash: bool,
@@ -2793,14 +2807,24 @@ impl ProjectPanel {
                         file_paths
                             .into_iter()
                             .map(|(entry_id, worktree_id, _)| {
-                                (worktree_id, project.delete_entry(entry_id, trash, cx))
+                                let task = if trash {
+                                    project
+                                        .trash_entry(entry_id, cx)
+                                        .map(RemoveEntryTask::Trash)
+                                } else {
+                                    project
+                                        .delete_entry(entry_id, cx)
+                                        .map(RemoveEntryTask::Delete)
+                                };
+
+                                (worktree_id, task)
                             })
                             .collect::<Vec<_>>()
                     })
                 })?;
 
                 for (worktree_id, task) in tasks {
-                    match Self::resolve_delete_entry(task, worktree_id, trash).await {
+                    match Self::resolve_delete_entry(task, worktree_id).await {
                         DeleteEntryOutcome::Deleted => {}
                         DeleteEntryOutcome::Trashed(change) => changes.push(change),
                         DeleteEntryOutcome::Failed => failed_count += 1,
@@ -3908,8 +3932,15 @@ impl ProjectPanel {
         if let Some((file_path1, file_path2)) = selected_files {
             self.workspace
                 .update(cx, |workspace, cx| {
-                    FileDiffView::open(file_path1, file_path2, workspace.weak_handle(), window, cx)
-                        .detach_and_log_err(cx);
+                    FileDiffView::open(
+                        file_path1,
+                        file_path2,
+                        None,
+                        workspace.weak_handle(),
+                        window,
+                        cx,
+                    )
+                    .detach_and_log_err(cx);
                 })
                 .ok();
         }
@@ -6979,7 +7010,17 @@ impl Render for ProjectPanel {
             }
         };
 
+        // Trashing, undo, and redo rely on the `TrashProjectEntry` and
+        // `RestoreProjectEntry` messages, which older collab hosts can't
+        // decode, with the operation silently never completing. As such, we
+        // keep all three disabled for collab guests. Trashing is already
+        // disabled in collab today, so existing users will not lose any
+        // functionality and the plan is to eventually remove this check, once a
+        // considerable portion of collab hosts had the chance to upgrade to a
+        // version that understands these messages.
+        let is_collab = project.is_via_collab();
         let is_local = project.is_local();
+        let supports_undo = cx.has_flag::<ProjectPanelUndoRedoFeatureFlag>();
 
         if has_worktree {
             let item_count = self
@@ -7111,10 +7152,6 @@ impl Render for ProjectPanel {
                 .on_action(cx.listener(Self::fold_directory))
                 .on_action(cx.listener(Self::remove_from_project))
                 .on_action(cx.listener(Self::compare_marked_files))
-                .when(cx.has_flag::<ProjectPanelUndoRedoFeatureFlag>(), |el| {
-                    el.on_action(cx.listener(Self::undo))
-                        .on_action(cx.listener(Self::redo))
-                })
                 .when(!project.is_read_only(cx), |el| {
                     el.on_action(cx.listener(Self::new_file))
                         .on_action(cx.listener(Self::new_directory))
@@ -7129,8 +7166,10 @@ impl Render for ProjectPanel {
                         .on_action(cx.listener(Self::add_to_ignore_glob))
                         .on_action(cx.listener(Self::add_to_binary_glob))
                         .on_action(cx.listener(Self::add_to_git_info_exclude))
-                        .when(!project.is_remote(), |el| {
-                            el.on_action(cx.listener(Self::trash))
+                        .when(!is_collab, |el| el.on_action(cx.listener(Self::trash)))
+                        .when(!is_collab && supports_undo, |el| {
+                            el.on_action(cx.listener(Self::undo))
+                                .on_action(cx.listener(Self::redo))
                         })
                 })
                 .when(

@@ -26,7 +26,7 @@ use buffer_diff::{
 use collections::{BTreeSet, HashMap, HashSet};
 use encoding_rs;
 use fs::{FakeFs, PathEventKind, RealFs};
-use futures::{StreamExt, future};
+use futures::{FutureExt as _, StreamExt, future};
 use git::{
     GitHostingProviderRegistry,
     repository::{AskPassDelegate, CommitOptions, RepoPath, RepositoryKind, repo_path},
@@ -66,7 +66,7 @@ use project::{
 };
 use rand::{Rng as _, rngs::StdRng};
 use serde_json::json;
-use settings::SettingsStore;
+use settings::{GlobalLspSettingsContent, SettingsStore};
 #[cfg(target_os = "linux")]
 use settings::{LocalSettingsKind, LocalSettingsPath};
 #[cfg(not(windows))]
@@ -254,7 +254,10 @@ async fn test_editorconfig_support(cx: &mut gpui::TestAppContext) {
             max_line_length = 120
         [*.js]
             tab_width = 10
+            trim_trailing_whitespace = false
             max_line_length = off
+        [*.json]
+            trim_trailing_whitespace = true
         "#,
         ".zed": {
             "settings.json": r#"{
@@ -264,6 +267,17 @@ async fn test_editorconfig_support(cx: &mut gpui::TestAppContext) {
                 "remove_trailing_whitespace_on_save": false,
                 "preferred_line_length": 64,
                 "soft_wrap": "editor_width",
+                "languages": {
+                    "JavaScript": {
+                        "remove_trailing_whitespace_on_save": true,
+                    },
+                    "JSON": {
+                        "remove_trailing_whitespace_on_save": true,
+                    },
+                    "Markdown": {
+                        "remove_trailing_whitespace_on_save": true,
+                    },
+                },
             }"#,
         },
         "a.rs": "fn a() {\n    A\n}",
@@ -293,6 +307,7 @@ async fn test_editorconfig_support(cx: &mut gpui::TestAppContext) {
             "e.rs": "fn e() {\n    E\n}",
         },
         "README.json": "tabs are better\n",
+        "README.md": "spaces are meaningful  \n",
     }));
 
     let path = dir.path();
@@ -303,6 +318,7 @@ async fn test_editorconfig_support(cx: &mut gpui::TestAppContext) {
     let language_registry = project.read_with(cx, |project, _| project.languages().clone());
     language_registry.add(js_lang());
     language_registry.add(json_lang());
+    language_registry.add(markdown_lang());
     language_registry.add(rust_lang());
 
     let worktree = project.update(cx, |project, cx| project.worktrees(cx).next().unwrap());
@@ -325,11 +341,14 @@ async fn test_editorconfig_support(cx: &mut gpui::TestAppContext) {
     let settings_d = settings_for("d/d.rs", cx).await;
     let settings_e = settings_for("e/e.rs", cx).await;
     let settings_readme = settings_for("README.json", cx).await;
+    let settings_markdown = settings_for("README.md", cx).await;
     // .editorconfig overrides .zed/settings
     assert_eq!(Some(settings_a.tab_size), NonZeroU32::new(3));
     assert_eq!(settings_a.hard_tabs, true);
     assert_eq!(settings_a.ensure_final_newline_on_save, true);
-    assert_eq!(settings_a.remove_trailing_whitespace_on_save, true);
+    // .editorconfig can disable trailing whitespace removal, but should not
+    // re-enable it when Zed settings have disabled it.
+    assert_eq!(settings_a.remove_trailing_whitespace_on_save, false);
     assert_eq!(settings_a.line_ending, LineEndingSetting::EnforceLf);
     assert_eq!(settings_a.preferred_line_length, 120);
 
@@ -348,6 +367,9 @@ async fn test_editorconfig_support(cx: &mut gpui::TestAppContext) {
 
     // "indent_size" is not set, so "tab_width" is used
     assert_eq!(Some(settings_c.tab_size), NonZeroU32::new(10));
+    assert_eq!(settings_c.remove_trailing_whitespace_on_save, false);
+    assert_eq!(settings_readme.remove_trailing_whitespace_on_save, true);
+    assert_eq!(settings_markdown.remove_trailing_whitespace_on_save, true);
 
     // When max_line_length is "off", default to .zed/settings.json
     assert_eq!(settings_b.preferred_line_length, 64);
@@ -3556,6 +3578,116 @@ async fn test_cancel_language_server_work(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_long_lines_disable_language_servers(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/dir"),
+        json!({
+            "minified.js": "x".repeat(20_001),
+            "normal.js": "const answer = 42;",
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    let mut fake_js_servers = language_registry.register_fake_lsp(
+        "JavaScript",
+        FakeLspAdapter {
+            name: "js-lsp",
+            ..Default::default()
+        },
+    );
+    language_registry.add(js_lang());
+
+    let _minified_buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/minified.js"), cx)
+        })
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+    assert!(fake_js_servers.next().now_or_never().is_none());
+
+    let _normal_buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/normal.js"), cx)
+        })
+        .await
+        .unwrap();
+    let mut fake_js_server = fake_js_servers.next().await.unwrap();
+    assert_eq!(
+        fake_js_server
+            .receive_notification::<lsp::notification::DidOpenTextDocument>()
+            .await
+            .text_document
+            .uri
+            .as_str(),
+        uri!("file:///dir/normal.js")
+    );
+    cx.executor().run_until_parked();
+    assert!(
+        fake_js_server
+            .receive_notification::<lsp::notification::DidOpenTextDocument>()
+            .now_or_never()
+            .is_none()
+    );
+}
+
+#[gpui::test]
+async fn test_max_buffer_line_length_can_be_overridden(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "minified.js": "x".repeat(20_001) }))
+        .await;
+
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    let mut fake_js_servers = language_registry.register_fake_lsp(
+        "JavaScript",
+        FakeLspAdapter {
+            name: "js-lsp",
+            ..Default::default()
+        },
+    );
+    language_registry.add(js_lang());
+
+    let _minified_buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/minified.js"), cx)
+        })
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+    assert!(fake_js_servers.next().now_or_never().is_none());
+
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |settings, cx| {
+            settings.update_user_settings(cx, |settings| {
+                settings.global_lsp_settings = Some(GlobalLspSettingsContent {
+                    max_buffer_line_length: Some(20_001),
+                    ..Default::default()
+                });
+            });
+        })
+    });
+
+    let mut fake_js_server = fake_js_servers.next().await.unwrap();
+    assert_eq!(
+        fake_js_server
+            .receive_notification::<lsp::notification::DidOpenTextDocument>()
+            .await
+            .text_document
+            .uri
+            .as_str(),
+        uri!("file:///dir/minified.js")
+    );
+}
+
+#[gpui::test]
 async fn test_toggling_enable_language_server(cx: &mut gpui::TestAppContext) {
     init_test(cx);
 
@@ -4706,6 +4838,94 @@ async fn test_workspace_diagnostics_pull_timeout_releases_waiters(cx: &mut gpui:
     assert!(
         !refreshed,
         "pull should report a failed refresh when the server never responds"
+    );
+}
+
+#[gpui::test]
+async fn test_workspace_diagnostics_refresh_is_answered_before_pulling(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "one two three" }))
+        .await;
+
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+
+    let document_pulls_received = Arc::new(atomic::AtomicUsize::new(0));
+    let mut fake_servers = language_registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            capabilities: lsp::ServerCapabilities {
+                diagnostic_provider: Some(lsp::DiagnosticServerCapabilities::Options(
+                    lsp::DiagnosticOptions {
+                        identifier: Some("test-refresh-response-first".to_string()),
+                        inter_file_dependencies: true,
+                        workspace_diagnostics: true,
+                        work_done_progress_options: Default::default(),
+                    },
+                )),
+                ..lsp::ServerCapabilities::default()
+            },
+            initializer: Some(Box::new({
+                let document_pulls_received = document_pulls_received.clone();
+                move |fake_server| {
+                    // Simulate a server that cannot answer any diagnostic pulls until its
+                    // own workspace/diagnostic/refresh request is answered, e.g. one that
+                    // bounds its request concurrency.
+                    fake_server
+                        .set_request_handler::<lsp::request::DocumentDiagnosticRequest, _, _>({
+                            let document_pulls_received = document_pulls_received.clone();
+                            move |_, _| {
+                                document_pulls_received.fetch_add(1, atomic::Ordering::Release);
+                                async move {
+                                    future::pending::<()>().await;
+                                    Err(anyhow::anyhow!("should never respond"))
+                                }
+                            }
+                        });
+                    fake_server
+                        .set_request_handler::<lsp::request::WorkspaceDiagnosticRequest, _, _>(
+                            move |_, _| async move {
+                                future::pending::<()>().await;
+                                Err(anyhow::anyhow!("should never respond"))
+                            },
+                        );
+                }
+            })),
+            ..FakeLspAdapter::default()
+        },
+    );
+
+    let (_buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+
+    let fake_server = fake_servers.next().await.unwrap();
+    cx.executor().run_until_parked();
+
+    let refresh_response = cx.executor().spawn(async move {
+        fake_server
+            .request::<lsp::request::WorkspaceDiagnosticRefresh>((), DEFAULT_LSP_REQUEST_TIMEOUT)
+            .await
+    });
+    cx.executor().run_until_parked();
+
+    refresh_response
+        .now_or_never()
+        .expect("workspace/diagnostic/refresh must be answered without awaiting diagnostic pulls from the same server")
+        .into_response()
+        .expect("workspace/diagnostic/refresh should succeed");
+    assert_eq!(
+        document_pulls_received.load(atomic::Ordering::Acquire),
+        1,
+        "the refresh should still trigger a document diagnostics pull for the open buffer"
     );
 }
 
@@ -12373,12 +12593,19 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         deleted: 1,
                     }),
                     rename_source: None,
+                    staged_diff_stat: None,
+                    unstaged_diff_stat: Some(DiffStat {
+                        added: 1,
+                        deleted: 1,
+                    }),
                 },
                 StatusEntry {
                     repo_path: repo_path("b.txt"),
                     status: FileStatus::Untracked,
                     diff_stat: None,
                     rename_source: None,
+                    staged_diff_stat: None,
+                    unstaged_diff_stat: None,
                 },
                 StatusEntry {
                     repo_path: repo_path("d.txt"),
@@ -12388,6 +12615,11 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         deleted: 1,
                     }),
                     rename_source: None,
+                    staged_diff_stat: None,
+                    unstaged_diff_stat: Some(DiffStat {
+                        added: 0,
+                        deleted: 1,
+                    }),
                 },
             ]
         );
@@ -12414,12 +12646,19 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         deleted: 1,
                     }),
                     rename_source: None,
+                    staged_diff_stat: None,
+                    unstaged_diff_stat: Some(DiffStat {
+                        added: 1,
+                        deleted: 1,
+                    }),
                 },
                 StatusEntry {
                     repo_path: repo_path("b.txt"),
                     status: FileStatus::Untracked,
                     diff_stat: None,
                     rename_source: None,
+                    staged_diff_stat: None,
+                    unstaged_diff_stat: None,
                 },
                 StatusEntry {
                     repo_path: repo_path("c.txt"),
@@ -12429,6 +12668,11 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         deleted: 1,
                     }),
                     rename_source: None,
+                    staged_diff_stat: None,
+                    unstaged_diff_stat: Some(DiffStat {
+                        added: 1,
+                        deleted: 1,
+                    }),
                 },
                 StatusEntry {
                     repo_path: repo_path("d.txt"),
@@ -12438,6 +12682,11 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                         deleted: 1,
                     }),
                     rename_source: None,
+                    staged_diff_stat: None,
+                    unstaged_diff_stat: Some(DiffStat {
+                        added: 0,
+                        deleted: 1,
+                    }),
                 },
             ]
         );
@@ -12476,6 +12725,11 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
                     deleted: 1,
                 }),
                 rename_source: None,
+                staged_diff_stat: None,
+                unstaged_diff_stat: Some(DiffStat {
+                    added: 0,
+                    deleted: 1,
+                }),
             }]
         );
     });
@@ -12525,6 +12779,8 @@ async fn test_git_repository_status_removes_directory_descendants(cx: &mut gpui:
                 status: FileStatus::Untracked,
                 diff_stat: None,
                 rename_source: None,
+                staged_diff_stat: None,
+                unstaged_diff_stat: None,
             }]
         );
     });
@@ -12568,6 +12824,8 @@ async fn test_git_repository_status_removes_directory_descendants(cx: &mut gpui:
                 status: FileStatus::Untracked,
                 diff_stat: None,
                 rename_source: None,
+                staged_diff_stat: None,
+                unstaged_diff_stat: None,
             }]
         );
     });
@@ -12730,6 +12988,11 @@ async fn test_git_status_postprocessing(cx: &mut gpui::TestAppContext) {
                 .into(),
                 diff_stat: None,
                 rename_source: None,
+                staged_diff_stat: Some(DiffStat {
+                    added: 0,
+                    deleted: 0,
+                }),
+                unstaged_diff_stat: None,
             }]
         )
     });
@@ -12937,6 +13200,11 @@ async fn test_repository_pending_ops_staging(
                     deleted: 0,
                 }),
                 rename_source: None,
+                staged_diff_stat: Some(DiffStat {
+                    added: 1,
+                    deleted: 0,
+                }),
+                unstaged_diff_stat: None,
             }]
         );
     });
@@ -13048,6 +13316,11 @@ async fn test_repository_pending_ops_long_running_staging(
                     deleted: 0,
                 }),
                 rename_source: None,
+                staged_diff_stat: Some(DiffStat {
+                    added: 1,
+                    deleted: 0,
+                }),
+                unstaged_diff_stat: None,
             }]
         );
     });
@@ -13174,12 +13447,16 @@ async fn test_repository_pending_ops_stage_all(
                     status: FileStatus::Untracked,
                     diff_stat: None,
                     rename_source: None,
+                    staged_diff_stat: None,
+                    unstaged_diff_stat: None,
                 },
                 StatusEntry {
                     repo_path: repo_path("b.txt"),
                     status: FileStatus::Untracked,
                     diff_stat: None,
                     rename_source: None,
+                    staged_diff_stat: None,
+                    unstaged_diff_stat: None,
                 },
             ]
         );
@@ -16533,4 +16810,202 @@ mod disable_ai_settings_tests {
             );
         });
     }
+}
+
+/// Regression test for https://github.com/zed-industries/zed/issues/60424.
+///
+/// The committed text contains repeated `end\n\n` line runs, so the deletion
+/// hunks have ambiguous placements. Before hunk placement was canonicalized,
+/// the uncommitted diff (HEAD vs worktree) and the recomputed unstaged diff
+/// (index vs worktree) could anchor the same logical deletion at different
+/// rows after a partial stage. The mismatched hunk then rendered as staged
+/// while git still had it unstaged, and unstaging it inserted a duplicate
+/// copy of its contents into the index on every click.
+#[gpui::test]
+async fn test_staging_hunks_with_ambiguous_placement(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let committed_contents = concat!(
+        "function is_empty(str)\n",
+        "    assert(type(str) == string)\n",
+        "    return str == nil or str == \"\"\n",
+        "end\n",
+        "\n",
+        "function string:starts_with(str)\n",
+        "    return self:sub(1, #str) == str\n",
+        "end\n",
+        "\n",
+        "function string:ends_with(str)\n",
+        "    return self:sub(-#str) == str\n",
+        "end\n",
+        "\n",
+        "function table:append(other)\n",
+        "    for _, val in ipairs(other) do table.insert(self, val) end\n",
+        "end\n",
+        "\n",
+        "function table:contains(elem)\n",
+        "    assert(type(self) == \"table\")\n",
+        "\n",
+        "    for _, val in ipairs(self) do\n",
+        "        if val == elem then return true end\n",
+        "    end\n",
+        "    return false\n",
+        "end\n",
+        "\n",
+        "function table:keys()\n",
+        "    local keys = {}\n",
+        "    for key, _ in pairs(self) do\n",
+        "        table.insert(keys, key)\n",
+        "    end\n",
+        "    return keys\n",
+        "end\n",
+        "\n",
+        "function has_class(el, class) return el.classes[0] == class end\n",
+    )
+    .to_string();
+    let file_contents = concat!(
+        "function table:append(other)\n",
+        "    for _, val in ipairs(other) do table.insert(self, val) end\n",
+        "end\n",
+        "\n",
+        "function table:keys()\n",
+        "    local keys = {}\n",
+        "    for key, _ in pairs(self) do\n",
+        "        table.insert(keys, key)\n",
+        "    end\n",
+        "    return keys\n",
+        "end\n",
+        "\n",
+        "function has_class(el, class) return el.classes:includes(class) end\n",
+    )
+    .to_string();
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/dir",
+        json!({
+            ".git": {},
+            "test.txt": file_contents.clone()
+        }),
+    )
+    .await;
+    fs.set_head_and_index_for_repo(
+        path!("/dir/.git").as_ref(),
+        &[("test.txt", committed_contents.clone())],
+    );
+
+    let project = Project::test(fs.clone(), ["/dir".as_ref()], cx).await;
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer("/dir/test.txt", cx)
+        })
+        .await
+        .unwrap();
+    let snapshot = buffer.read_with(cx, |buffer, _| buffer.snapshot());
+    let uncommitted_diff = project
+        .update(cx, |project, cx| {
+            project.open_uncommitted_diff(buffer.clone(), cx)
+        })
+        .await
+        .unwrap();
+
+    fn hunk_states(
+        uncommitted_diff: &Entity<BufferDiff>,
+        snapshot: &language::BufferSnapshot,
+        cx: &mut gpui::TestAppContext,
+    ) -> Vec<(Range<Point>, DiffHunkSecondaryStatus)> {
+        uncommitted_diff.read_with(cx, |diff, cx| {
+            diff.snapshot(cx)
+                .hunks(&snapshot.text)
+                .map(|hunk| (hunk.range.clone(), hunk.secondary_status))
+                .collect()
+        })
+    }
+
+    fn index_text(fs: &FakeFs) -> String {
+        fs.with_git_state(path!("/dir/.git").as_ref(), false, |state| {
+            state
+                .index_contents
+                .get(&repo_path("test.txt"))
+                .cloned()
+                .expect("file is present in the index")
+        })
+        .unwrap()
+    }
+
+    use DiffHunkSecondaryStatus::*;
+    let row = |start: u32, end: u32| Point::new(start, 0)..Point::new(end, 0);
+
+    // Two deletions and one modification, all unstaged.
+    assert_eq!(
+        hunk_states(&uncommitted_diff, &snapshot, cx),
+        vec![
+            (row(0, 0), HasSecondaryHunk),
+            (row(4, 4), HasSecondaryHunk),
+            (row(12, 13), HasSecondaryHunk),
+        ]
+    );
+
+    // Stage the first deletion (the three string functions).
+    let hunks = uncommitted_diff.read_with(cx, |diff, cx| {
+        diff.snapshot(cx).hunks(&snapshot.text).collect::<Vec<_>>()
+    });
+    project
+        .update(cx, |project, cx| {
+            let unstaged_diff = uncommitted_diff.read(cx).secondary_diff().unwrap();
+            project.stage_hunks(
+                buffer.clone(),
+                unstaged_diff,
+                vec![hunks[0].buffer_range.clone()],
+                cx,
+            )
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // Only the first hunk is staged; the other hunks must not be affected,
+    // even though the unstaged diff was recomputed against a new index text
+    // in which the remaining deletion has an ambiguous placement.
+    assert_eq!(
+        hunk_states(&uncommitted_diff, &snapshot, cx),
+        vec![
+            (row(0, 0), NoSecondaryHunk),
+            (row(4, 4), HasSecondaryHunk),
+            (row(12, 13), HasSecondaryHunk),
+        ]
+    );
+    let table_contains_offset = committed_contents
+        .find("function table:append")
+        .expect("committed text contains table:append");
+    let expected_index = &committed_contents[table_contains_offset..];
+    assert_eq!(index_text(&fs), expected_index);
+
+    // Unstaging the second deletion is a no-op, since it isn't staged. Before
+    // the fix, each such request inserted another copy of the deleted content
+    // into the index.
+    for _ in 0..3 {
+        let hunks = uncommitted_diff.read_with(cx, |diff, cx| {
+            diff.snapshot(cx).hunks(&snapshot.text).collect::<Vec<_>>()
+        });
+        project
+            .update(cx, |project, cx| {
+                project.unstage_uncommitted_hunks(
+                    buffer.clone(),
+                    uncommitted_diff.clone(),
+                    vec![hunks[1].buffer_range.clone()],
+                    cx,
+                )
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+    assert_eq!(index_text(&fs), expected_index);
+    assert_eq!(
+        hunk_states(&uncommitted_diff, &snapshot, cx),
+        vec![
+            (row(0, 0), NoSecondaryHunk),
+            (row(4, 4), HasSecondaryHunk),
+            (row(12, 13), HasSecondaryHunk),
+        ]
+    );
 }

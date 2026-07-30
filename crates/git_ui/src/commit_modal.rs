@@ -269,15 +269,19 @@ impl CommitModal {
         &self,
         id: impl Into<ElementId>,
         keybinding_target: Option<FocusHandle>,
+        disabled: bool,
     ) -> impl IntoElement {
         let menu_open = self.commit_menu_handle.is_deployed();
 
         PopoverMenu::new(id.into())
             .with_handle(self.commit_menu_handle.clone())
-            .trigger(crate::render_split_button_chevron_trigger(
-                "modal-commit-split-button-right",
-                menu_open,
-            ))
+            .trigger(
+                crate::render_split_button_chevron_trigger(
+                    "modal-commit-split-button-right",
+                    menu_open,
+                )
+                .disabled(disabled),
+            )
             .menu({
                 let git_panel_entity = self.git_panel.clone();
                 move |window, cx| {
@@ -351,6 +355,7 @@ impl CommitModal {
             is_amend_pending,
             is_signoff_enabled,
             workspace,
+            is_generating,
         ) = self.git_panel.update(cx, |git_panel, cx| {
             let (can_commit, tooltip) = git_panel.configure_commit_button(cx);
             let title = git_panel.commit_button_title(cx);
@@ -359,6 +364,7 @@ impl CommitModal {
             let active_repo = git_panel.active_repository.clone();
             let is_amend_pending = git_panel.amend_pending();
             let is_signoff_enabled = git_panel.signoff_enabled();
+            let is_generating = git_panel.is_generating_commit_message();
             (
                 can_commit,
                 tooltip,
@@ -369,6 +375,7 @@ impl CommitModal {
                 is_amend_pending,
                 is_signoff_enabled,
                 git_panel.workspace.clone(),
+                is_generating,
             )
         });
 
@@ -502,6 +509,7 @@ impl CommitModal {
                         self.render_git_commit_menu(
                             format!("split-button-right-{}", commit_label),
                             Some(focus_handle),
+                            is_generating,
                         )
                         .into_any_element(),
                     )),

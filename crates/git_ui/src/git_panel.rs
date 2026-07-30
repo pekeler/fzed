@@ -1106,6 +1106,13 @@ impl TruncatedPatch {
     }
 }
 
+struct GitPanelContextMenu {
+    menu: Entity<ContextMenu>,
+    position: Point<Pixels>,
+    target_entry_index: Option<usize>,
+    _subscription: Subscription,
+}
+
 pub struct GitPanel {
     pub(crate) active_repository: Option<Entity<Repository>>,
     pub(crate) commit_editor: Entity<Editor>,
@@ -1145,7 +1152,7 @@ pub struct GitPanel {
     update_visible_entries_task: Task<()>,
     reopen_commit_buffer_task: Task<()>,
     pub(crate) workspace: WeakEntity<Workspace>,
-    context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
+    context_menu: Option<GitPanelContextMenu>,
     context_menu_fossil_record_rename_pair: Option<(RepoPath, RepoPath)>,
     modal_open: bool,
     show_placeholders: bool,
@@ -2549,7 +2556,7 @@ impl GitPanel {
                     let task = workspace.update(cx, |workspace, cx| {
                         workspace
                             .project()
-                            .update(cx, |project, cx| project.delete_file(path, true, cx))
+                            .update(cx, |project, cx| project.trash_file(path, cx))
                     })?;
                     if let Some(task) = task {
                         task.await?;
@@ -2751,7 +2758,7 @@ impl GitPanel {
                             let project_path = active_repo
                                 .read(cx)
                                 .repo_path_to_project_path(&entry.repo_path, cx)?;
-                            project.delete_file(project_path, true, cx)
+                            project.trash_file(project_path, cx)
                         })
                     })
                     .collect::<Vec<_>>()
@@ -5073,44 +5080,12 @@ impl GitPanel {
 
         self.reopen_commit_buffer_task = cx.spawn_in(window, async move |git_panel, cx| {
             let result = async {
+                // Set up the buffer before awaiting the commit template as the
+                // request may never resolve (for example, a collab host that
+                // doesn't know about `LoadCommitTemplate`) and must not block the
+                // commit editor from attaching to the shared buffer.
                 let buffer = load_buffer.await?;
-                let template = load_template.await?;
-
-                git_panel.update_in(cx, move |git_panel, window, cx| {
-                    git_panel.commit_template = template;
-                    let restored_commit_message = git_panel
-                        .pending_commit_message_restores
-                        .remove(&active_repository_abs_path);
-                    if let Some(restored_commit_message) = restored_commit_message {
-                        git_panel.amend_pending = restored_commit_message.amend_pending;
-                        git_panel.original_commit_message =
-                            restored_commit_message.original_message;
-                        cx.notify();
-                        if let Some(message) = restored_commit_message.message
-                            && buffer.read(cx).text().trim().is_empty()
-                        {
-                            buffer.update(cx, |buffer, cx| {
-                                let start = buffer.anchor_before(0);
-                                let end = buffer.anchor_after(buffer.len());
-                                buffer.edit([(start..end, message)], None, cx);
-                            });
-                        }
-                    }
-                    if buffer.read(cx).text().trim().is_empty() {
-                        let template_text = git_panel
-                            .commit_template
-                            .as_ref()
-                            .map(|t| t.template.clone())
-                            .unwrap_or_default();
-                        if !template_text.is_empty() {
-                            buffer.update(cx, |buffer, cx| {
-                                let start = buffer.anchor_before(0);
-                                let end = buffer.anchor_after(buffer.len());
-                                buffer.edit([(start..end, template_text)], None, cx);
-                            });
-                        }
-                    }
-
+                git_panel.update_in(cx, |git_panel, window, cx| {
                     if git_panel
                         .commit_editor
                         .read(cx)
@@ -5132,16 +5107,62 @@ impl GitPanel {
                         });
                     }
 
+                    // Create subscription such that, any edit on the commit
+                    // editor's buffer will be serialized and saved to the database
+                    // in order to be able to restore it in case there's a
+                    // disconnect.
                     git_panel._commit_message_buffer_subscription =
-                        Some(cx.subscribe(&buffer, |this, _, event, cx| {
+                        Some(cx.subscribe(&buffer, |git_panel, _, event, cx| {
                             if matches!(event, BufferEvent::Edited { .. }) {
-                                this.serialize(cx);
+                                git_panel.serialize(cx);
                             }
                         }));
                 })?;
+
+                // Check whether there's a pending commit message for this
+                // repository and, if that's the case, update the buffer's
+                // text.
+                git_panel.update(cx, |git_panel, cx| {
+                    if let Some(restored_commit_message) = git_panel
+                        .pending_commit_message_restores
+                        .remove(&active_repository_abs_path)
+                    {
+                        git_panel.amend_pending = restored_commit_message.amend_pending;
+                        git_panel.original_commit_message =
+                            restored_commit_message.original_message;
+                        cx.notify();
+
+                        if let Some(message) = restored_commit_message.message
+                            && buffer.read(cx).text().trim().is_empty()
+                        {
+                            buffer.update(cx, |buffer, cx| {
+                                buffer.set_text(message, cx);
+                            });
+                        }
+                    }
+                })?;
+
+                // Only apply the template if it's non-empty and the buffer has no
+                // content, so we never override a commit message that was already
+                // in progress.
+                let commit_template = load_template.await?;
+                git_panel.update(cx, |git_panel, cx| {
+                    git_panel.commit_template = commit_template;
+
+                    if let Some(commit_template) = git_panel.commit_template.as_ref()
+                        && !commit_template.template.is_empty()
+                        && buffer.read(cx).text().trim().is_empty()
+                    {
+                        buffer.update(cx, |buffer, cx| {
+                            buffer.set_text(commit_template.template.clone(), cx);
+                        });
+                    }
+                })?;
+
                 anyhow::Ok(())
             }
             .await;
+
             result.log_err();
         });
     }
@@ -5228,21 +5249,21 @@ impl GitPanel {
 
         self.stash_entries = repo.cached_stash();
 
-        for entry in repo.cached_status() {
+        for status_entry in repo.cached_status() {
             self.changes_count += 1;
-            let is_conflict = repo.had_conflict_on_last_merge_head_change(&entry.repo_path);
-            let is_new = entry.status.is_created();
+            let is_conflict = repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path);
+            let is_new = status_entry.status.is_created();
             let staging = if repo.kind().is_fossil() {
-                if repo.fossil_path_included_for_check_in(&entry.repo_path) {
+                if repo.fossil_path_included_for_check_in(&status_entry.repo_path) {
                     StageStatus::Staged
                 } else {
                     StageStatus::Unstaged
                 }
             } else {
-                entry.status.staging()
+                status_entry.status.staging()
             };
 
-            if let Some(pending) = repo.pending_ops_for_path(&entry.repo_path)
+            if let Some(pending) = repo.pending_ops_for_path(&status_entry.repo_path)
                 && pending
                     .ops
                     .iter()
@@ -5252,11 +5273,11 @@ impl GitPanel {
             }
 
             let entry = GitStatusEntry {
-                repo_path: entry.repo_path.clone(),
-                status: entry.status,
+                repo_path: status_entry.repo_path.clone(),
+                status: status_entry.status,
                 staging,
-                diff_stat: entry.diff_stat,
-                rename_source: entry.rename_source.clone(),
+                diff_stat: status_entry.diff_stat,
+                rename_source: status_entry.rename_source.clone(),
             };
 
             if !is_conflict && !is_new {
@@ -5272,10 +5293,16 @@ impl GitPanel {
                 conflict_entries.push(entry);
             } else if group_by_staging_state {
                 if staging.has_staged() {
-                    staged_entries.push(entry.clone());
+                    staged_entries.push(GitStatusEntry {
+                        diff_stat: status_entry.staged_diff_stat,
+                        ..entry.clone()
+                    });
                 }
                 if staging.has_unstaged() {
-                    unstaged_entries.push(entry);
+                    unstaged_entries.push(GitStatusEntry {
+                        diff_stat: status_entry.unstaged_diff_stat,
+                        ..entry
+                    });
                 }
             } else if group_by_file_status && is_conflict {
                 conflict_entries.push(entry);
@@ -6092,15 +6119,16 @@ impl GitPanel {
         &self,
         id: impl Into<ElementId>,
         keybinding_target: Option<FocusHandle>,
+        disabled: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let menu_open = self.commit_menu_handle.is_deployed();
 
         PopoverMenu::new(id.into())
-            .trigger(crate::render_split_button_chevron_trigger(
-                "commit-split-button-right",
-                menu_open,
-            ))
+            .trigger(
+                crate::render_split_button_chevron_trigger("commit-split-button-right", menu_open)
+                    .disabled(disabled),
+            )
             .with_handle(self.commit_menu_handle.clone())
             .menu({
                 let git_panel = cx.entity();
@@ -6195,9 +6223,15 @@ impl GitPanel {
         true
     }
 
+    pub fn is_generating_commit_message(&self) -> bool {
+        self.generate_commit_message_task.is_some()
+    }
+
     pub fn configure_commit_button(&self, cx: &mut Context<Self>) -> (bool, &'static str) {
         let kind = self.active_repository_kind(cx);
-        if kind.is_fossil() && self.conflicted_count > 0 {
+        if self.generate_commit_message_task.is_some() {
+            (false, "Generating commit message...")
+        } else if kind.is_fossil() && self.conflicted_count > 0 {
             (false, "You must resolve conflicts before checking in")
         } else if self.has_unstaged_conflicts() {
             if kind.is_fossil() {
@@ -6753,6 +6787,7 @@ impl GitPanel {
                 self.render_git_commit_menu(
                     ElementId::Name(format!("split-button-right-{}", title).into()),
                     Some(commit_tooltip_focus_handle),
+                    self.generate_commit_message_task.is_some(),
                     cx,
                 )
                 .into_any_element(),
@@ -7098,7 +7133,7 @@ impl GitPanel {
         );
         self.focused_history_entry = Some(index);
         self.history_keyboard_nav = false;
-        self.set_context_menu(context_menu, position, window, cx);
+        self.set_context_menu(context_menu, position, Some(index), window, cx);
     }
 
     fn activate_changes_tab(
@@ -7263,6 +7298,10 @@ impl GitPanel {
         let is_panel_focused = self.focus_handle.is_focused(window);
         let show_focus_border = self.history_keyboard_nav;
         let has_context_menu = self.context_menu.is_some();
+        let context_menu_target_index = self
+            .context_menu
+            .as_ref()
+            .and_then(|context_menu| context_menu.target_entry_index);
 
         let ahead_count = active_repository
             .read(cx)
@@ -7356,6 +7395,8 @@ impl GitPanel {
                                     let is_unpushed = index < ahead_count;
                                     let is_focused = focused_history_entry == Some(index);
                                     let fossil_labels = entry.fossil_labels.clone();
+                                    let is_context_menu_target =
+                                        context_menu_target_index == Some(index);
                                     let workspace = workspace.clone();
                                     let repo = repo_weak.clone();
                                     let sha_for_click = sha_string;
@@ -7365,6 +7406,7 @@ impl GitPanel {
                                             .size(LabelSize::Small)
                                             .color(Color::Muted)
                                             .alpha(0.5)
+                                            .flex_none()
                                     };
 
                                     v_flex()
@@ -7385,6 +7427,9 @@ impl GitPanel {
                                             },
                                         )
                                         .hover(|s| s.bg(cx.theme().colors().element_hover))
+                                        .when(is_context_menu_target, |this| {
+                                            this.bg(cx.theme().colors().element_hover)
+                                        })
                                         .child(
                                             h_flex()
                                                 .gap_1()
@@ -7456,6 +7501,12 @@ impl GitPanel {
                                                                         Chip::new(format!(
                                                                             "+{hidden_tag_count}"
                                                                         ))
+                                                                        .bg_color(
+                                                                            cx.theme()
+                                                                                .colors()
+                                                                                .element_active
+                                                                                .opacity(0.8),
+                                                                        )
                                                                         .when(
                                                                             !has_context_menu,
                                                                             |chip| {
@@ -7473,20 +7524,38 @@ impl GitPanel {
                                                 )
                                                 .when(is_unpushed, |this| {
                                                     this.child(
-                                                        Icon::new(IconName::ArrowUp)
-                                                            .size(IconSize::XSmall),
+                                                        h_flex()
+                                                            .size_4()
+                                                            .flex_none()
+                                                            .justify_center()
+                                                            .rounded_sm()
+                                                            .border_1()
+                                                            .border_color(
+                                                                cx.theme().colors().border,
+                                                            )
+                                                            .bg(cx
+                                                                .theme()
+                                                                .colors()
+                                                                .element_background)
+                                                            .child(
+                                                                Icon::new(IconName::ArrowUp)
+                                                                    .size(IconSize::XSmall),
+                                                            ),
                                                     )
                                                 }),
                                         )
                                         .child(
                                             h_flex()
+                                                .w_full()
+                                                .min_w_0()
                                                 .gap_1p5()
-                                                .child(avatar)
+                                                .child(div().flex_none().child(avatar))
                                                 .when(!author_name.is_empty(), |this| {
                                                     this.child(
                                                         Label::new(author_name)
                                                             .size(LabelSize::Small)
-                                                            .color(Color::Muted),
+                                                            .color(Color::Muted)
+                                                            .truncate(),
                                                     )
                                                     .child(dot_separator())
                                                 })
@@ -7494,22 +7563,33 @@ impl GitPanel {
                                                     this.child(
                                                         Label::new(relative_time)
                                                             .size(LabelSize::Small)
-                                                            .color(Color::Muted),
+                                                            .color(Color::Muted)
+                                                            .flex_none(),
                                                     )
                                                     .child(dot_separator())
                                                 })
                                                 .child(
                                                     Label::new(short_sha.clone())
                                                         .size(LabelSize::Small)
-                                                        .color(Color::Muted),
+                                                        .color(Color::Muted)
+                                                        .flex_none(),
                                                 ),
                                         )
                                         .when(!has_context_menu, |this| {
                                             this.tooltip(move |_, cx| {
+                                                let description = if is_unpushed {
+                                                    SharedString::from(format!(
+                                                        "Contains Unpushed Changes — {}",
+                                                        short_sha.clone(),
+                                                    ))
+                                                } else {
+                                                    short_sha.clone()
+                                                };
+
                                                 Tooltip::with_meta(
                                                     history_entry_tooltip_title(repository_kind),
                                                     None,
-                                                    short_sha.clone(),
+                                                    description,
                                                     cx,
                                                 )
                                             })
@@ -8129,7 +8209,7 @@ impl GitPanel {
                     )
                 })
         });
-        self.set_context_menu(context_menu, position, window, cx);
+        self.set_context_menu(context_menu, position, Some(ix), window, cx);
     }
 
     fn deploy_panel_context_menu(
@@ -8157,24 +8237,31 @@ impl GitPanel {
             window,
             cx,
         );
-        self.set_context_menu(context_menu, position, window, cx);
+        self.set_context_menu(context_menu, position, None, window, cx);
     }
 
     fn set_context_menu(
         &mut self,
         context_menu: Entity<ContextMenu>,
         position: Point<Pixels>,
+        target_entry_index: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&context_menu.focus_handle(cx), cx);
+        let focus_handle = context_menu.focus_handle(cx);
+        window.defer(cx, move |window, cx| {
+            window.focus(&focus_handle, cx);
+        });
 
         let subscription = cx.subscribe_in(
             &context_menu,
             window,
             |this, _, _: &DismissEvent, window, cx| {
                 if this.context_menu.as_ref().is_some_and(|context_menu| {
-                    context_menu.0.focus_handle(cx).contains_focused(window, cx)
+                    context_menu
+                        .menu
+                        .focus_handle(cx)
+                        .contains_focused(window, cx)
                 }) {
                     cx.focus_self(window);
                 }
@@ -8183,7 +8270,12 @@ impl GitPanel {
                 cx.notify();
             },
         );
-        self.context_menu = Some((context_menu, position, subscription));
+        self.context_menu = Some(GitPanelContextMenu {
+            menu: context_menu,
+            position,
+            target_entry_index,
+            _subscription: subscription,
+        });
         cx.notify();
     }
 
@@ -9029,12 +9121,12 @@ impl Render for GitPanel {
                     })
                     .into_any_element(),
             )
-            .children(self.context_menu.as_ref().map(|(menu, position, _)| {
+            .children(self.context_menu.as_ref().map(|context_menu| {
                 deferred(
                     anchored()
-                        .position(*position)
+                        .position(context_menu.position)
                         .anchor(Anchor::TopLeft)
-                        .child(menu.clone()),
+                        .child(context_menu.menu.clone()),
                 )
                 .with_priority(1)
             }))
@@ -9831,6 +9923,7 @@ pub(crate) fn commit_title_exceeds_limit(title: &str, max_length: usize) -> bool
 
 #[cfg(test)]
 mod tests {
+    use editor::SplittableEditor;
     use git::{
         repository::{FossilSyncState, RepositoryKind, repo_path},
         status::{StatusCode, TrackedStatus, UnmergedStatus, UnmergedStatusCode},
@@ -9838,13 +9931,15 @@ mod tests {
     use gpui::{Action, TestAppContext, UpdateGlobal, VisualTestContext, point, px};
     use indoc::indoc;
     use project::FakeFs;
+    use search::{BufferSearchBar, buffer_search::Deploy};
     use serde_json::json;
     use settings::SettingsStore;
+    use std::any::TypeId;
     use theme::LoadThemes;
     use util::path;
     use util::rel_path::rel_path;
 
-    use workspace::MultiWorkspace;
+    use workspace::{MultiWorkspace, ToolbarItemEvent, ToolbarItemLocation};
 
     use super::*;
 
@@ -10865,7 +10960,6 @@ mod tests {
                 ("crates/util/util.rs", StatusCode::Modified.worktree()),
             ],
         );
-
         let project =
             Project::test(fs.clone(), [path!("/root/zed/crates/gpui").as_ref()], cx).await;
         let window_handle =
@@ -11506,6 +11600,16 @@ mod tests {
                 ("unstaged.rs", StatusCode::Modified.worktree()),
             ],
         );
+        fs.with_git_state(path!("/project/.git").as_ref(), true, |state| {
+            state.head_contents.insert(
+                repo_path("partial.rs"),
+                "head one\nhead two\nhead three\nhead four".into(),
+            );
+            state
+                .index_contents
+                .insert(repo_path("partial.rs"), "index one\nindex two".into());
+        })
+        .expect("fake repository should exist");
 
         let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
         let window_handle =
@@ -11579,6 +11683,24 @@ mod tests {
             assert_eq!(
                 panel.stage_intent_for_entry_index(projections[1].index),
                 StageIntent::Stage
+            );
+            assert_eq!(
+                panel.entries[projections[0].index]
+                    .status_entry()
+                    .and_then(|entry| entry.diff_stat),
+                Some(DiffStat {
+                    added: 2,
+                    deleted: 4,
+                })
+            );
+            assert_eq!(
+                panel.entries[projections[1].index]
+                    .status_entry()
+                    .and_then(|entry| entry.diff_stat),
+                Some(DiffStat {
+                    added: 1,
+                    deleted: 2,
+                })
             );
             panel.entries.clone()
         });
@@ -12151,6 +12273,7 @@ mod tests {
     #[gpui::test]
     async fn test_group_by_staging_open_diff_uses_section_diff(cx: &mut TestAppContext) {
         init_test(cx);
+        cx.update(search::buffer_search::init);
         let fs = FakeFs::new(cx.background_executor.clone());
         fs.insert_tree(
             path!("/project"),
@@ -12226,10 +12349,54 @@ mod tests {
         });
         cx.run_until_parked();
 
-        workspace.read_with(&cx, |workspace, cx| {
-            assert!(workspace.active_item_as::<SoloDiffView>(cx).is_some());
+        let search_bar = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let search_bar = cx.new(|cx| BufferSearchBar::new(None, window, cx));
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.toolbar().update(cx, |toolbar, cx| {
+                    toolbar.add_item(search_bar.clone(), window, cx)
+                });
+            });
+            search_bar
+        });
+
+        let split_editor = workspace.read_with(&cx, |workspace, cx| {
+            let solo_diff = workspace
+                .active_item_as::<SoloDiffView>(cx)
+                .expect("SoloDiffView should be active");
+            let searchable = solo_diff
+                .read(cx)
+                .as_searchable(&solo_diff, cx)
+                .expect("SoloDiffView should expose its editor to buffer search");
+            let split_editor = searchable
+                .act_as_type(TypeId::of::<SplittableEditor>(), cx)
+                .and_then(|entity| entity.downcast::<SplittableEditor>().ok())
+                .expect("the split editor should be the searchable item");
             assert_eq!(workspace.items_of_type::<StagedDiff>(cx).count(), 1);
             assert_eq!(workspace.items_of_type::<SoloDiffView>(cx).count(), 1);
+            split_editor
+        });
+
+        let mut search_bar_events = cx.events::<ToolbarItemEvent, BufferSearchBar>(&search_bar);
+        cx.dispatch_action(Deploy::find());
+        cx.run_until_parked();
+        cx.read(|cx| assert!(!search_bar.read(cx).is_dismissed()));
+        assert_eq!(
+            search_bar_events
+                .try_recv()
+                .expect("search bar location event"),
+            ToolbarItemEvent::ChangeLocation(ToolbarItemLocation::Secondary)
+        );
+
+        search_bar
+            .update_in(&mut cx, |search_bar, window, cx| {
+                search_bar.search("partial", None, false, window, cx)
+            })
+            .await
+            .expect("buffer search should complete");
+
+        let focused_editor = cx.read(|cx| split_editor.read(cx).focused_editor().clone());
+        focused_editor.update_in(&mut cx, |editor, _window, cx| {
+            assert_eq!(editor.search_background_highlights(cx).len(), 1);
         });
 
         panel.update_in(&mut cx, |panel, window, cx| {

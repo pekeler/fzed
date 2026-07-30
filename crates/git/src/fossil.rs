@@ -3,11 +3,11 @@ use crate::{
     blame::Blame,
     repository::{
         Branch, BranchesScanResult, CommitData, CommitDataReader, CommitDetails, CommitDiff,
-        CommitFile, CommitOptions, CommitSummary, CreateWorktreeTarget, DiffType, FetchOptions,
-        FileHistoryChangedFileSets, FossilSyncState, GRAPH_CHUNK_SIZE, GitCommitTemplate,
-        GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
-        PushOptions, Remote, RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode,
-        SearchCommitArgs, Worktree,
+        CommitFile, CommitOptions, CommitSummary, CreateWorktreeTarget, DiffStatType, DiffType,
+        FetchOptions, FileHistoryChangedFileSets, FossilSyncState, GRAPH_CHUNK_SIZE,
+        GitCommitTemplate, GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData,
+        LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput, RepoPath, RepositoryKind,
+        ResetMode, SearchCommitArgs, Worktree,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -1260,7 +1260,15 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
-    fn diff_stat(&self, path_prefixes: &[RepoPath]) -> BoxFuture<'static, Result<GitDiffStat>> {
+    fn diff_stat(
+        &self,
+        diff: DiffStatType,
+        path_prefixes: &[RepoPath],
+    ) -> BoxFuture<'static, Result<GitDiffStat>> {
+        if !matches!(diff, DiffStatType::HeadToWorktree) {
+            return async { Ok(GitDiffStat::default()) }.boxed();
+        }
+
         let fossil = self.fossil_binary();
         let path_prefixes = path_prefixes.to_vec();
         self.executor
@@ -2558,8 +2566,8 @@ mod tests {
     };
     use crate::{
         repository::{
-            AskPassDelegate, CommitOptions, CreateWorktreeTarget, GitRepository, LogOrder,
-            LogSource, RepoPath, SearchCommitArgs,
+            AskPassDelegate, CommitOptions, CreateWorktreeTarget, DiffStatType, GitRepository,
+            LogOrder, LogSource, RepoPath, SearchCommitArgs,
         },
         status::{FileStatus, StatusCode},
     };
@@ -3106,7 +3114,10 @@ mod tests {
             .unwrap();
         assert!(scoped_ignored_statuses.entries.is_empty());
 
-        let stats = repository.diff_stat(&[]).await.unwrap();
+        let stats = repository
+            .diff_stat(DiffStatType::HeadToWorktree, &[])
+            .await
+            .unwrap();
         let tracked_stat = stats
             .entries
             .iter()
@@ -3115,6 +3126,14 @@ mod tests {
             .unwrap();
         assert_eq!(tracked_stat.added, 1);
         assert_eq!(tracked_stat.deleted, 1);
+        assert!(
+            repository
+                .diff_stat(DiffStatType::HeadToIndex, &[])
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
 
         assert_eq!(
             repository
