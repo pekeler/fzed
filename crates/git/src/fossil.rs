@@ -1196,14 +1196,14 @@ impl GitRepository for FossilRepository {
     fn get_push_remote(&self, _branch: String) -> BoxFuture<'_, Result<Option<Remote>>> {
         let fossil = self.fossil_binary();
         self.executor
-            .spawn(async move { Ok(default_fossil_remote(&fossil).await?) })
+            .spawn(async move { default_fossil_remote(&fossil).await })
             .boxed()
     }
 
     fn get_branch_remote(&self, _branch: String) -> BoxFuture<'_, Result<Option<Remote>>> {
         let fossil = self.fossil_binary();
         self.executor
-            .spawn(async move { Ok(default_fossil_remote(&fossil).await?) })
+            .spawn(async move { default_fossil_remote(&fossil).await })
             .boxed()
     }
 
@@ -2476,6 +2476,10 @@ impl FossilBinary {
         }
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Fossil commands cannot use GitBinary::build_command"
+    )]
     fn build_command<S>(&self, args: &[S]) -> util::command::Command
     where
         S: AsRef<OsStr>,
@@ -3033,7 +3037,7 @@ mod tests {
     async fn fossil_repository_reads_real_checkout(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
 
-        if Command::new("fossil").arg("version").output().is_err() {
+        if !fossil_is_available() {
             return;
         }
 
@@ -3457,7 +3461,7 @@ mod tests {
     async fn fossil_repository_records_and_undoes_rename(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
 
-        if Command::new("fossil").arg("version").output().is_err() {
+        if !fossil_is_available() {
             return;
         }
 
@@ -3559,6 +3563,18 @@ mod tests {
         );
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test setup invokes Fossil synchronously"
+    )]
+    fn fossil_is_available() -> bool {
+        Command::new("fossil").arg("version").output().is_ok()
+    }
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "test setup invokes Fossil synchronously"
+    )]
     fn run_fossil(home: &Path, current_dir: &Path, args: &[&str]) -> Output {
         let output = Command::new("fossil")
             .env("HOME", home)
