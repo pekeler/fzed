@@ -2158,6 +2158,7 @@ fn fossil_changes_args(path_prefixes: Vec<RepoPath>) -> Vec<OsString> {
         OsString::from("changes"),
         OsString::from("--classify"),
         OsString::from("--differ"),
+        OsString::from("--dotfiles"),
         OsString::from("--no-merge"),
         OsString::from("--rel-paths"),
     ];
@@ -2555,9 +2556,10 @@ struct FossilBinaryCommandError {
 #[cfg(test)]
 mod tests {
     use super::{
-        FossilBinary, FossilRepository, filter_scoped_fossil_extras, fossil_changes_to_status,
-        fossil_oid_from_hash, fossil_output_reports_unsupported_no_verify_comment,
-        fossil_ref_names, fossil_stash_id_from_oid, fossil_sync_args, parse_fossil_blame_line,
+        FossilBinary, FossilRepository, filter_scoped_fossil_extras, fossil_changes_args,
+        fossil_changes_to_status, fossil_oid_from_hash,
+        fossil_output_reports_unsupported_no_verify_comment, fossil_ref_names,
+        fossil_stash_id_from_oid, fossil_sync_args, parse_fossil_blame_line,
         parse_fossil_branch_list_line, parse_fossil_changes_with_kind, parse_fossil_commit_info,
         parse_fossil_default_remote, parse_fossil_info, parse_fossil_numstat,
         parse_fossil_remote_list, parse_fossil_stash_list, parse_fossil_timeline_entries,
@@ -2621,6 +2623,15 @@ mod tests {
             Some(Path::new("/tmp/repo.fossil"))
         );
         assert_eq!(info.local_root.as_deref(), Some(Path::new("/tmp/checkout")));
+    }
+
+    #[test]
+    fn fossil_changes_include_dotfiles() {
+        assert!(
+            fossil_changes_args(Vec::new())
+                .iter()
+                .any(|argument| argument == "--dotfiles")
+        );
     }
 
     #[test]
@@ -3064,6 +3075,7 @@ mod tests {
 
         std::fs::write(checkout.join("tracked.txt"), "modified\n").unwrap();
         std::fs::write(checkout.join("extra.txt"), "extra").unwrap();
+        std::fs::write(checkout.join(".extra.txt"), "extra").unwrap();
         std::fs::create_dir(checkout.join(".fossil-settings")).unwrap();
         std::fs::write(
             checkout.join(".fossil-settings").join("ignore-glob"),
@@ -3102,6 +3114,7 @@ mod tests {
             Some(StatusCode::Modified.worktree())
         );
         assert_eq!(lookup_status("extra.txt"), Some(FileStatus::Untracked));
+        assert_eq!(lookup_status(".extra.txt"), Some(FileStatus::Untracked));
         assert_eq!(lookup_status("ignored.txt"), None);
         assert_eq!(lookup_status("ignored-dir/generated.txt"), None);
 

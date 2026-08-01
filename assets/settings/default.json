@@ -1013,6 +1013,9 @@
     //
     // Default: false
     "collapse_untracked_diff": false,
+    // Whether to show untracked dotfiles in the source control panel.
+    // By default, Git shows them and Fossil hides them.
+    // "show_untracked_dotfiles": null,
     /// Whether to show entries with tree or flat view in the panel
     ///
     /// Default: false

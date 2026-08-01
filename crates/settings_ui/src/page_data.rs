@@ -5891,7 +5891,7 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn git_panel_section() -> [SettingsPageItem; 17] {
+    fn git_panel_section() -> [SettingsPageItem; 18] {
         [
             SettingsPageItem::SectionHeader("Source Control Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -6029,6 +6029,29 @@ fn panels_page() -> SettingsPage {
                             .git_panel
                             .get_or_insert_default()
                             .collapse_untracked_diff = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Show Untracked Dotfiles",
+                description: "Whether to show untracked dotfiles in the source control panel. Defaults to on for Git and off for Fossil.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("git_panel.show_untracked_dotfiles"),
+                    pick: |settings_content| {
+                        settings_content
+                            .git_panel
+                            .as_ref()?
+                            .show_untracked_dotfiles
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .git_panel
+                            .get_or_insert_default()
+                            .show_untracked_dotfiles = value;
                     },
                 }),
                 metadata: None,

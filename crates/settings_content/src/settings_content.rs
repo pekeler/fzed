@@ -723,6 +723,11 @@ pub struct GitPanelSettingsContent {
     /// Default: false
     pub collapse_untracked_diff: Option<bool>,
 
+    /// Whether to show untracked dotfiles in the source control panel.
+    ///
+    /// Default: true for Git, false for Fossil
+    pub show_untracked_dotfiles: Option<bool>,
+
     /// Whether to show entries with tree or flat view in the panel
     ///
     /// Default: false

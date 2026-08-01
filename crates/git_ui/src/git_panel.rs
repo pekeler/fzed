@@ -153,6 +153,8 @@ actions!(
         /// Toggles showing entries in tree vs flat view.
         #[action(deprecated_aliases = ["git_panel::ToggleTreeView"])]
         ToggleTreeView,
+        /// Toggles showing untracked dotfiles.
+        ToggleShowUntrackedDotfiles,
         /// Expands the selected entry to show its children.
         #[action(deprecated_aliases = ["git_panel::ExpandSelectedEntry"])]
         ExpandSelectedEntry,
@@ -218,6 +220,25 @@ struct GitPanelViewOptionsMenuState {
     sort_by: GitPanelSortBy,
     group_by: GitPanelGroupBy,
     tree_view: bool,
+    show_untracked_dotfiles: bool,
+}
+
+fn show_untracked_dotfiles(repository_kind: RepositoryKind, cx: &App) -> bool {
+    GitPanelSettings::get_global(cx)
+        .show_untracked_dotfiles
+        .unwrap_or(!repository_kind.is_fossil())
+}
+
+fn should_show_status_entry(
+    show_untracked_dotfiles: bool,
+    status: FileStatus,
+    repo_path: &RepoPath,
+) -> bool {
+    show_untracked_dotfiles
+        || !status.is_untracked()
+        || !repo_path
+            .components()
+            .any(|component| component.starts_with('.'))
 }
 
 impl GitMenuState {
@@ -440,6 +461,7 @@ fn git_panel_view_options_menu(
             GitPanelSettings::get_global(cx).group_by,
         ),
         tree_view: GitPanelSettings::get_global(cx).tree_view,
+        show_untracked_dotfiles: show_untracked_dotfiles(repository_kind, cx),
     }));
 
     ContextMenu::build_persistent(window, cx, move |context_menu, _, _| {
@@ -474,6 +496,18 @@ fn git_panel_view_options_menu(
                             });
                             window.dispatch_action(Box::new(ToggleTreeView), cx);
                         }
+                    })
+            })
+            .item({
+                let view_options_menu_state = view_options_menu_state.clone();
+                ContextMenuEntry::new("Show Untracked Dotfiles")
+                    .toggle(IconPosition::End, state.show_untracked_dotfiles)
+                    .handler(move |window, cx| {
+                        view_options_menu_state.set(GitPanelViewOptionsMenuState {
+                            show_untracked_dotfiles: !state.show_untracked_dotfiles,
+                            ..state
+                        });
+                        window.dispatch_action(Box::new(ToggleShowUntrackedDotfiles), cx);
                     })
             })
             .when(!state.tree_view, |this| {
@@ -1306,6 +1340,8 @@ impl GitPanel {
             let mut was_file_icons = GitPanelSettings::get_global(cx).file_icons;
             let mut was_folder_icons = GitPanelSettings::get_global(cx).folder_icons;
             let mut was_diff_stats = GitPanelSettings::get_global(cx).diff_stats;
+            let mut was_show_untracked_dotfiles =
+                GitPanelSettings::get_global(cx).show_untracked_dotfiles;
             cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
                 let settings = GitPanelSettings::get_global(cx);
                 let sort_by = settings.sort_by;
@@ -1314,6 +1350,7 @@ impl GitPanel {
                 let file_icons = settings.file_icons;
                 let folder_icons = settings.folder_icons;
                 let diff_stats = settings.diff_stats;
+                let show_untracked_dotfiles = settings.show_untracked_dotfiles;
                 if tree_view != was_tree_view {
                     match (&mut this.view_mode, tree_view) {
                         (GitPanelViewMode::Tree(state), false) => {
@@ -1336,7 +1373,10 @@ impl GitPanel {
                     this.bulk_staging.take();
                     update_entries = true;
                 }
-                if (diff_stats != was_diff_stats) || update_entries {
+                if diff_stats != was_diff_stats
+                    || show_untracked_dotfiles != was_show_untracked_dotfiles
+                    || update_entries
+                {
                     this.update_visible_entries(window, cx);
                 }
                 if file_icons != was_file_icons || folder_icons != was_folder_icons {
@@ -1348,6 +1388,7 @@ impl GitPanel {
                 was_file_icons = file_icons;
                 was_folder_icons = folder_icons;
                 was_diff_stats = diff_stats;
+                was_show_untracked_dotfiles = show_untracked_dotfiles;
             })
             .detach();
 
@@ -4913,6 +4954,27 @@ impl GitPanel {
         }
     }
 
+    fn toggle_show_untracked_dotfiles(
+        &mut self,
+        _: &ToggleShowUntrackedDotfiles,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let show_untracked_dotfiles = show_untracked_dotfiles(self.active_repository_kind(cx), cx);
+        if let Some(workspace) = self.workspace.upgrade() {
+            let workspace = workspace.read(cx);
+            let fs = workspace.app_state().fs.clone();
+            cx.update_global::<SettingsStore, _>(|store, _cx| {
+                store.update_settings_file(fs, move |settings, _cx| {
+                    settings
+                        .git_panel
+                        .get_or_insert_default()
+                        .show_untracked_dotfiles = Some(!show_untracked_dotfiles);
+                });
+            });
+        }
+    }
+
     pub(crate) fn increase_font_size(
         &mut self,
         action: &IncreaseBufferFontSize,
@@ -5199,6 +5261,7 @@ impl GitPanel {
         let group_by_file_status = group_by == GitPanelGroupBy::Status;
         let group_by_staging_state = group_by == GitPanelGroupBy::Staging;
         let is_tree_view = matches!(self.view_mode, GitPanelViewMode::Tree(_));
+        let show_untracked_dotfiles = show_untracked_dotfiles(self.active_repository_kind(cx), cx);
 
         if let Some(active_repo) = self.active_repository.as_ref() {
             if self.git_access.is_none() {
@@ -5250,6 +5313,13 @@ impl GitPanel {
         self.stash_entries = repo.cached_stash();
 
         for status_entry in repo.cached_status() {
+            if !should_show_status_entry(
+                show_untracked_dotfiles,
+                status_entry.status,
+                &status_entry.repo_path,
+            ) {
+                continue;
+            }
             self.changes_count += 1;
             let is_conflict = repo.had_conflict_on_last_merge_head_change(&status_entry.repo_path);
             let is_new = status_entry.status.is_created();
@@ -9077,6 +9147,7 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::set_group_by_status))
             .on_action(cx.listener(Self::set_group_by_staging))
             .on_action(cx.listener(Self::toggle_tree_view))
+            .on_action(cx.listener(Self::toggle_show_untracked_dotfiles))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
@@ -9950,6 +10021,40 @@ mod tests {
             "source_control_panel::ToggleFocus"
         );
         assert!(ToggleFocus::deprecated_aliases().contains(&"git_panel::ToggleFocus"));
+    }
+
+    #[test]
+    fn untracked_dotfiles_can_be_hidden_without_hiding_tracked_dotfiles() {
+        assert!(!should_show_status_entry(
+            false,
+            FileStatus::Untracked,
+            &repo_path(".env")
+        ));
+        assert!(!should_show_status_entry(
+            false,
+            FileStatus::Untracked,
+            &repo_path("nested/.env")
+        ));
+        assert!(!should_show_status_entry(
+            false,
+            FileStatus::Untracked,
+            &repo_path(".config/settings.json")
+        ));
+        assert!(should_show_status_entry(
+            false,
+            StatusCode::Modified.worktree(),
+            &repo_path(".env")
+        ));
+        assert!(should_show_status_entry(
+            false,
+            FileStatus::Untracked,
+            &repo_path("src/main.rs")
+        ));
+        assert!(should_show_status_entry(
+            true,
+            FileStatus::Untracked,
+            &repo_path(".env")
+        ));
     }
 
     fn init_test(cx: &mut gpui::TestAppContext) {
