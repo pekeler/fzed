@@ -3352,7 +3352,7 @@ fn randomly_mutate_worktree(
             } else {
                 log::info!(
                     "overwriting file {:?} ({})",
-                    &entry.path,
+                    entry.path,
                     entry.id.to_usize()
                 );
                 let task = worktree.write_file(
@@ -4076,32 +4076,21 @@ async fn test_repo_exclude_in_worktree(executor: BackgroundExecutor, cx: &mut Te
     });
 }
 
-#[gpui::test]
-async fn test_repo_exclude_naming_a_worktree_ancestor(
+async fn assert_repository_ignore_naming_a_worktree_ancestor(
+    repository_tree: serde_json::Value,
     executor: BackgroundExecutor,
     cx: &mut TestAppContext,
 ) {
     init_test(cx);
 
     let fs = FakeFs::new(executor);
-
-    fs.insert_tree(
-        path!("/scratch/proj"),
-        json!({
-            ".git": {
-                "info": { "exclude": "scratch" }
-            },
-            "src": {
-                "main.rs": "fn main() {}",
-            }
-        }),
-    )
-    .await;
+    fs.insert_tree(path!("/scratch/proj"), repository_tree)
+        .await;
 
     let worktree = Worktree::local(
         path!("/scratch/proj").as_ref(),
         true,
-        fs.clone(),
+        fs,
         Default::default(),
         true,
         WorktreeId::from_proto(0),
@@ -4120,7 +4109,7 @@ async fn test_repo_exclude_naming_a_worktree_ancestor(
     worktree.update(cx, |worktree, _cx| {
         assert!(
             !worktree.root_entry().unwrap().is_ignored,
-            "an exclude pattern matching an ancestor must not ignore the worktree"
+            "a repository ignore pattern matching an ancestor must not ignore the worktree"
         );
         check_worktree_entries(
             worktree,
@@ -4130,6 +4119,47 @@ async fn test_repo_exclude_naming_a_worktree_ancestor(
             },
         );
     });
+}
+
+#[gpui::test]
+async fn test_repo_exclude_naming_a_worktree_ancestor(
+    executor: BackgroundExecutor,
+    cx: &mut TestAppContext,
+) {
+    assert_repository_ignore_naming_a_worktree_ancestor(
+        json!({
+            ".git": {
+                "info": { "exclude": "scratch" }
+            },
+            "src": {
+                "main.rs": "fn main() {}",
+            }
+        }),
+        executor,
+        cx,
+    )
+    .await;
+}
+
+#[gpui::test]
+async fn test_fossil_ignore_glob_naming_a_worktree_ancestor(
+    executor: BackgroundExecutor,
+    cx: &mut TestAppContext,
+) {
+    assert_repository_ignore_naming_a_worktree_ancestor(
+        json!({
+            ".fslckout": "",
+            ".fossil-settings": {
+                "ignore-glob": "scratch"
+            },
+            "src": {
+                "main.rs": "fn main() {}",
+            }
+        }),
+        executor,
+        cx,
+    )
+    .await;
 }
 
 #[gpui::test]

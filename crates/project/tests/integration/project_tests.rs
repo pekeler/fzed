@@ -7985,8 +7985,10 @@ async fn test_rename(cx: &mut gpui::TestAppContext) {
 
 // Regression test for https://github.com/zed-industries/zed/issues/59077:
 // a "rename symbol" whose workspace edit also renames the file used to swap the
-// two files' contents. The edited content must end up in the renamed file.
-#[gpui::test]
+// two files' contents. The edited content must end up in the renamed file, and
+// the open buffer must follow the rename regardless of the order the filesystem
+// watcher reports the change (hence the seed iterations).
+#[gpui::test(iterations = 30)]
 async fn test_rename_that_also_renames_file(cx: &mut gpui::TestAppContext) {
     init_test(cx);
 
@@ -9334,7 +9336,7 @@ async fn test_multiple_language_server_hovers(cx: &mut gpui::TestAppContext) {
         let new_server = language_servers[i].next().await.unwrap_or_else(|| {
             panic!(
                 "Failed to get language server #{i} with name {}",
-                &language_server_names[i]
+                language_server_names[i]
             )
         });
         let new_server_name = new_server.server.name();
@@ -9729,7 +9731,7 @@ async fn test_multiple_language_server_actions(cx: &mut gpui::TestAppContext) {
         let new_server = language_server_rxs[i].next().await.unwrap_or_else(|| {
             panic!(
                 "Failed to get language server #{i} with name {}",
-                &language_server_names[i]
+                language_server_names[i]
             )
         });
         let new_server_name = new_server.server.name();
@@ -13758,14 +13760,17 @@ async fn test_fossil_stash_commands_refresh_repository_status(
         );
     });
 
-    repo.update(cx, |repo, cx| repo.stash_all(cx))
-        .await
-        .unwrap();
+    repo.update(cx, |repo, cx| {
+        repo.stash_all(Some("named Fossil stash".to_string()), cx)
+    })
+    .await
+    .unwrap();
     cx.run_until_parked();
 
     repo.read_with(cx, |repo, _| {
         assert_eq!(repo.status_for_path(&repo_path("tracked.txt")), None);
         assert_eq!(repo.cached_stash().entries.len(), 1);
+        assert_eq!(repo.cached_stash().entries[0].message, "named Fossil stash");
     });
 
     fs.insert_file(
@@ -13779,7 +13784,7 @@ async fn test_fossil_stash_commands_refresh_repository_status(
         .await;
     cx.run_until_parked();
 
-    repo.update(cx, |repo, cx| repo.stash_all(cx))
+    repo.update(cx, |repo, cx| repo.stash_all(None, cx))
         .await
         .unwrap();
     cx.run_until_parked();

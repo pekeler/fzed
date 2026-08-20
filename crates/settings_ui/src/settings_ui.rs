@@ -600,6 +600,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::CodeFade>(render_editable_number_field)
         .add_basic_renderer::<settings::DelayMs>(render_editable_number_field)
         .add_basic_renderer::<settings::FontWeightContent>(render_editable_number_field)
+        .add_basic_renderer::<settings::PixelSetting>(render_editable_number_field)
         .add_basic_renderer::<settings::CenteredPaddingSettings>(render_editable_number_field)
         .add_basic_renderer::<settings::InactiveOpacity>(render_editable_number_field)
         .add_basic_renderer::<settings::MinimumContrast>(render_editable_number_field)
@@ -633,6 +634,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::IconThemeSelectionDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::IconThemeName>(render_icon_theme_picker)
         .add_basic_renderer::<settings::BufferLineHeightDiscriminants>(render_dropdown)
+        .add_basic_renderer::<settings::GitGutterWidthDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::AutosaveSettingDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::WorkingDirectoryDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::IncludeIgnoredContent>(render_dropdown)
@@ -1530,14 +1532,14 @@ fn render_settings_item_link(
 
     div()
         .absolute()
-        .top(rems_from_px(18.))
+        .top(rems_from_px(18_f32))
         .map(|this| {
             if sub_field {
                 this.visible_on_hover("setting-sub-item")
-                    .left(rems_from_px(-8.5))
+                    .left(rems_from_px(-8.5_f32))
             } else {
                 this.visible_on_hover("setting-item")
-                    .left(rems_from_px(-22.))
+                    .left(rems_from_px(-22.0_f32))
             }
         })
         .child(

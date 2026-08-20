@@ -2606,18 +2606,14 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 let git = git?;
-                let mut args = vec![
-                    "stash".to_string(),
-                    "push".to_string(),
-                    "--quiet".to_string(),
-                    "--include-untracked".to_string(),
-                ];
-                if let Some(message) = message.filter(|message| !message.trim().is_empty()) {
-                    args.push("-m".to_string());
-                    args.push(message);
+                let mut args = vec!["stash", "push", "--quiet", "--include-untracked"];
+                if let Some(message) = message
+                    .as_deref()
+                    .filter(|message| !message.trim().is_empty())
+                {
+                    args.extend_from_slice(&["--message", message]);
                 }
-                args.push("--".to_string());
-
+                args.push("--");
                 let output = git
                     .build_command(&args)
                     .envs(env.iter())

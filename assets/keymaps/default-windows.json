@@ -1017,6 +1017,8 @@
       "shift-alt-y": "git::UnstageFile",
       "space": "git::ToggleStaged",
       "shift-space": "git::StageRange",
+      "shift-alt-c": "workspace::CopyPath",
+      "ctrl-k ctrl-shift-c": "workspace::CopyRelativePath",
       "tab": "source_control_panel::FocusEditor",
       "shift-tab": "source_control_panel::FocusEditor",
       "escape": "source_control_panel::ToggleFocus",

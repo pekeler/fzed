@@ -3128,6 +3128,8 @@ impl GitStore {
         let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
         let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
 
+        let message = envelope.payload.message;
+
         let entries = envelope
             .payload
             .paths
@@ -3137,12 +3139,7 @@ impl GitStore {
 
         repository_handle
             .update(&mut cx, |repository_handle, cx| {
-                repository_handle.stash_entries_with_message(
-                    entries,
-                    (!envelope.payload.message.trim().is_empty())
-                        .then_some(envelope.payload.message),
-                    cx,
-                )
+                repository_handle.stash_entries(entries, message, cx)
             })
             .await?;
 
@@ -5769,7 +5766,7 @@ impl RepositorySnapshot {
         Self::abs_path_to_repo_path_inner(&self.work_directory_abs_path, abs_path, self.path_style)
     }
 
-    fn repo_path_to_abs_path(&self, repo_path: &RepoPath) -> PathBuf {
+    pub fn repo_path_to_abs_path(&self, repo_path: &RepoPath) -> PathBuf {
         let repo_path = repo_path.display(self.path_style);
         PathBuf::from(
             self.path_style
@@ -7924,7 +7921,11 @@ impl Repository {
         })
     }
 
-    pub fn stash_all(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<()>> {
+    pub fn stash_all(
+        &mut self,
+        message: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
         let is_fossil = self.snapshot.kind.is_fossil();
         let to_stash = self
             .cached_status()
@@ -7936,18 +7937,10 @@ impl Repository {
             return Task::ready(Ok(()));
         }
 
-        self.stash_entries(to_stash, cx)
+        self.stash_entries(to_stash, message, cx)
     }
 
     pub fn stash_entries(
-        &mut self,
-        entries: Vec<RepoPath>,
-        cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<()>> {
-        self.stash_entries_with_message(entries, None, cx)
-    }
-
-    pub fn stash_entries_with_message(
         &mut self,
         entries: Vec<RepoPath>,
         message: Option<String>,
@@ -7988,7 +7981,7 @@ impl Repository {
                                             .into_iter()
                                             .map(|repo_path| repo_path.as_unix_str().to_owned())
                                             .collect(),
-                                        message: message.unwrap_or_default(),
+                                        message,
                                     })
                                     .await?;
                                 Ok::<(), anyhow::Error>(())
