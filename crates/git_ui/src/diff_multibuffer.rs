@@ -870,7 +870,7 @@ impl DiffMultibuffer {
             .collect()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) fn rename_source_for_buffer_id(&self, buffer_id: BufferId) -> Option<RepoPath> {
         self.buffer_rename_sources.borrow().get(&buffer_id).cloned()
     }

@@ -460,7 +460,6 @@ async fn open_checkout_after_setup(
             workspace
                 .update(cx, move |workspace, cx| {
                     let app_state = workspace.app_state().clone();
-                    let checkout_dir = checkout_dir.clone();
 
                     workspace::open_new(
                         Default::default(),
@@ -468,7 +467,6 @@ async fn open_checkout_after_setup(
                         cx,
                         move |workspace, window, cx| {
                             cx.activate(true);
-                            let checkout_dir = checkout_dir.clone();
                             let create_task = workspace.project().update(cx, |project, cx| {
                                 project.create_worktree(&checkout_dir, true, cx)
                             });

@@ -166,11 +166,11 @@ impl GitRepository for FossilRepository {
         RepositoryKind::Fossil
     }
 
-    fn load_index_text(&self, _path: RepoPath) -> BoxFuture<'_, Option<String>> {
+    fn load_index_text(&self, _path: RepoPath) -> BoxFuture<'_, Option<Vec<u8>>> {
         async move { None }.boxed()
     }
 
-    fn load_committed_text(&self, path: RepoPath) -> BoxFuture<'_, Option<String>> {
+    fn load_committed_text(&self, path: RepoPath) -> BoxFuture<'_, Option<Vec<u8>>> {
         let fossil = self.fossil_binary();
         self.executor
             .spawn(async move {
@@ -181,18 +181,19 @@ impl GitRepository for FossilRepository {
                     ])
                     .await
                     .ok()
+                    .map(String::into_bytes)
             })
             .boxed()
     }
 
-    fn load_blob_content(&self, _oid: Oid) -> BoxFuture<'_, Result<String>> {
+    fn load_blob_content(&self, _oid: Oid) -> BoxFuture<'_, Result<Vec<u8>>> {
         Self::unsupported("loading blobs by Git object ID")
     }
 
     fn set_index_text(
         &self,
         _path: RepoPath,
-        _content: Option<String>,
+        _content: Option<Vec<u8>>,
         _env: Arc<HashMap<String, String>>,
         _is_executable: bool,
     ) -> BoxFuture<'_, Result<()>> {
@@ -296,7 +297,10 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
-    fn load_revisions(&self, revisions: Vec<String>) -> BoxFuture<'_, Result<Vec<Option<String>>>> {
+    fn load_revisions(
+        &self,
+        revisions: Vec<String>,
+    ) -> BoxFuture<'_, Result<Vec<Option<Vec<u8>>>>> {
         let fossil = self.fossil_binary();
         self.executor
             .spawn(async move {
@@ -311,7 +315,8 @@ impl GitRepository for FossilRepository {
                             fossil
                                 .run_raw(&[OsString::from("cat"), OsString::from(path)])
                                 .await
-                                .ok(),
+                                .ok()
+                                .map(String::into_bytes),
                         ),
                         _ => return Err(anyhow!("unsupported Fossil revision: {source}")),
                     }
@@ -834,6 +839,23 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
+    fn blame_at_revision(&self, path: RepoPath, revision: Oid) -> BoxFuture<'_, Result<Blame>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let output = fossil
+                    .run_raw(&[
+                        OsString::from("blame"),
+                        OsString::from("--revision"),
+                        OsString::from(revision.to_string()),
+                        path.as_std_path().as_os_str().to_owned(),
+                    ])
+                    .await?;
+                fossil_blame_from_output(&fossil, &path, &output).await
+            })
+            .boxed()
+    }
+
     fn path(&self) -> PathBuf {
         self.checkout_db_path.clone()
     }
@@ -1050,6 +1072,14 @@ impl GitRepository for FossilRepository {
                 Ok(())
             })
             .boxed()
+    }
+
+    fn stash_staged(
+        &self,
+        _message: Option<String>,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        Self::unsupported("Git-style staging")
     }
 
     fn stash_pop(
@@ -1861,8 +1891,8 @@ fn push_fossil_diff_file(files: &mut Vec<CommitFile>, file: Option<FossilDiffFil
 
     files.push(CommitFile {
         path,
-        old_text: (!file.old_is_null).then_some(file.old_text),
-        new_text: (!file.new_is_null).then_some(file.new_text),
+        old_content: (!file.old_is_null).then_some(file.old_text.into_bytes()),
+        new_content: (!file.new_is_null).then_some(file.new_text.into_bytes()),
         is_binary: false,
     });
 }
@@ -3002,10 +3032,19 @@ mod tests {
         assert_eq!(diff.stats, Some((2, 1)));
         assert_eq!(diff.files.len(), 2);
         assert_eq!(diff.files[0].path, RepoPath::new("a.txt").unwrap());
-        assert_eq!(diff.files[0].old_text.as_deref(), Some("one\ntwo\n"));
-        assert_eq!(diff.files[0].new_text.as_deref(), Some("one\nthree\n"));
-        assert_eq!(diff.files[1].old_text, None);
-        assert_eq!(diff.files[1].new_text.as_deref(), Some("new\n"));
+        assert_eq!(
+            diff.files[0].old_content.as_deref(),
+            Some(b"one\ntwo\n".as_slice())
+        );
+        assert_eq!(
+            diff.files[0].new_content.as_deref(),
+            Some(b"one\nthree\n".as_slice())
+        );
+        assert_eq!(diff.files[1].old_content, None);
+        assert_eq!(
+            diff.files[1].new_content.as_deref(),
+            Some(b"new\n".as_slice())
+        );
 
         let diff = parse_fossil_unified_diff(
             "Index: a.txt\n==================================================================\n--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-old a\n+new a\nIndex: b.txt\n==================================================================\n--- b.txt\n+++ b.txt\n@@ -1 +1 @@\n-old b\n+new b\n",
@@ -3014,11 +3053,23 @@ mod tests {
         assert_eq!(diff.stats, Some((2, 2)));
         assert_eq!(diff.files.len(), 2);
         assert_eq!(diff.files[0].path, RepoPath::new("a.txt").unwrap());
-        assert_eq!(diff.files[0].old_text.as_deref(), Some("old a\n"));
-        assert_eq!(diff.files[0].new_text.as_deref(), Some("new a\n"));
+        assert_eq!(
+            diff.files[0].old_content.as_deref(),
+            Some(b"old a\n".as_slice())
+        );
+        assert_eq!(
+            diff.files[0].new_content.as_deref(),
+            Some(b"new a\n".as_slice())
+        );
         assert_eq!(diff.files[1].path, RepoPath::new("b.txt").unwrap());
-        assert_eq!(diff.files[1].old_text.as_deref(), Some("old b\n"));
-        assert_eq!(diff.files[1].new_text.as_deref(), Some("new b\n"));
+        assert_eq!(
+            diff.files[1].old_content.as_deref(),
+            Some(b"old b\n".as_slice())
+        );
+        assert_eq!(
+            diff.files[1].new_content.as_deref(),
+            Some(b"new b\n".as_slice())
+        );
 
         let timeline = parse_fossil_timeline_entries(
             "1234567890abcdef1234567890abcdef12345678\t2026-05-13 06:44:31\ttester\tsecond\ttrunk\ttrunk\n+++ no more data (1) +++\n",
@@ -3156,13 +3207,13 @@ mod tests {
             repository
                 .load_committed_text(RepoPath::new("tracked.txt").unwrap())
                 .await,
-            Some("initial\n".to_string())
+            Some(b"initial\n".to_vec())
         );
         assert_eq!(
             repository
                 .load_committed_text(RepoPath::new("no-newline.txt").unwrap())
                 .await,
-            Some("no newline".to_string())
+            Some(b"no newline".to_vec())
         );
 
         repository
@@ -3367,10 +3418,13 @@ mod tests {
             .iter()
             .find(|file| file.path == RepoPath::new("notes.txt").unwrap())
             .unwrap();
-        assert_eq!(notes_diff.old_text.as_deref(), Some("first\nsecond\n"));
         assert_eq!(
-            notes_diff.new_text.as_deref(),
-            Some("first changed\nsecond\nthird\n")
+            notes_diff.old_content.as_deref(),
+            Some(b"first\nsecond\n".as_slice())
+        );
+        assert_eq!(
+            notes_diff.new_content.as_deref(),
+            Some(b"first changed\nsecond\nthird\n".as_slice())
         );
 
         let blame = repository
@@ -3382,6 +3436,12 @@ mod tests {
             .await
             .unwrap();
         assert!(!blame.entries.is_empty());
+
+        let historical_blame = repository
+            .blame_at_revision(RepoPath::new("notes.txt").unwrap(), head_oid)
+            .await
+            .unwrap();
+        assert!(!historical_blame.entries.is_empty());
 
         let (graph_tx, graph_rx) = async_channel::bounded(1);
         repository

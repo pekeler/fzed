@@ -12,8 +12,7 @@ use git::{
     BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, Oid, ParsedGitRemote,
     parse_git_remote_url,
     repository::{
-        CommitDiff, CommitFile, InitialGraphCommitData, LogOrder, LogSource, RepoPath,
-        RepositoryKind, SearchCommitArgs,
+        InitialGraphCommitData, LogOrder, LogSource, RepoPath, RepositoryKind, SearchCommitArgs,
     },
     status::{FileStatus, StatusCode, TrackedStatus},
 };
@@ -32,8 +31,8 @@ use picker::{Picker, PickerDelegate};
 use project::{
     ProjectPath,
     git_store::{
-        CommitDataState, GitGraphEvent, GitStore, GitStoreEvent, GraphDataResponse, Repository,
-        RepositoryEvent, RepositoryId,
+        CommitDataState, CommitDiff, CommitFile, GitGraphEvent, GitStore, GitStoreEvent,
+        GraphDataResponse, Repository, RepositoryEvent, RepositoryId,
     },
 };
 use smallvec::{SmallVec, smallvec};
@@ -1768,6 +1767,10 @@ impl GitGraph {
         Chip::new(name.clone())
             .label_size(LabelSize::Small)
             .truncate()
+            .tooltip({
+                let name = name.clone();
+                move |_, cx| Tooltip::simple(name.clone(), cx)
+            })
             .map(|chip| {
                 if is_head {
                     chip.icon(IconName::Check)
@@ -1797,6 +1800,7 @@ impl GitGraph {
             return chip.into_any_element();
         };
         div()
+            .min_w_0()
             .child(chip)
             .on_mouse_down(
                 MouseButton::Right,
@@ -4799,7 +4803,7 @@ mod tests {
     use collections::{HashMap, HashSet};
     use fs::FakeFs;
     use git::Oid;
-    use git::repository::{CommitData, CommitDiff, InitialGraphCommitData};
+    use git::repository::{CommitData, InitialGraphCommitData};
     use gpui::{TestAppContext, UpdateGlobal};
     use project::git_store::{GitStoreEvent, RepositoryEvent};
     use project::{
@@ -5541,7 +5545,7 @@ mod tests {
         let commits = generate_random_commit_dag(&mut rng, 10, false);
         fs.set_graph_commits(Path::new("/project/.git"), commits.clone());
 
-        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let project = Project::test(fs.clone(), [], cx).await;
         let observed_repository_events = Arc::new(Mutex::new(Vec::new()));
         project.update(cx, |project, cx| {
             let observed_repository_events = observed_repository_events.clone();
@@ -5555,6 +5559,13 @@ mod tests {
             })
             .detach();
         });
+        project
+            .update(cx, |project, cx| {
+                project.create_worktree("/project", true, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
 
         let repository = project.read_with(cx, |project, cx| {
             project

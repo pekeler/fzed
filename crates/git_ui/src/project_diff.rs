@@ -331,7 +331,7 @@ impl ProjectDiff {
         let editor = diff.editor().read(cx).rhs_editor().clone();
         let editor = editor.read(cx);
         let snapshot = diff.multibuffer().read(cx).snapshot(cx);
-        let prev_next = snapshot.diff_hunks().nth(1).is_some();
+        let prev_next = snapshot.diff_hunks().next().is_some();
         let (selection, ranges) = diff.selected_ranges(cx);
         let mut has_staged_hunks = false;
         let mut has_unstaged_hunks = false;
@@ -2208,7 +2208,9 @@ mod tests {
 
         fs.with_git_state(Path::new(path!("/project/.fslckout")), true, |state| {
             let new_path = RepoPath::from_rel_path(rel_path("new.txt"));
-            state.head_contents.insert(new_path.clone(), original_text);
+            state
+                .head_contents
+                .insert(new_path.clone(), original_text.into_bytes());
             state.status_renames = vec![StatusRename {
                 source: RepoPath::from_rel_path(rel_path("old.txt")),
                 target: new_path,
