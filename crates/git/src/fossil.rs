@@ -846,7 +846,7 @@ impl GitRepository for FossilRepository {
                 let output = fossil
                     .run_raw(&[
                         OsString::from("blame"),
-                        OsString::from("--revision"),
+                        OsString::from("-r"),
                         OsString::from(revision.to_string()),
                         path.as_std_path().as_os_str().to_owned(),
                     ])
