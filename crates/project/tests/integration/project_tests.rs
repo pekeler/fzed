@@ -14952,15 +14952,15 @@ async fn test_fossil_repository_check_in_uses_selected_paths(
     fs.with_git_state(path!("/root/my-repo/.fslckout").as_ref(), false, |state| {
         assert_eq!(
             state.head_contents.get(&repo_path("tracked.txt")),
-            Some(&"tracked changed".to_string())
+            Some(&b"tracked changed".to_vec())
         );
         assert_eq!(
             state.head_contents.get(&repo_path("other-tracked.txt")),
-            Some(&"other initial".to_string())
+            Some(&b"other initial".to_vec())
         );
         assert_eq!(
             state.head_contents.get(&repo_path("extra.txt")),
-            Some(&"extra".to_string())
+            Some(&b"extra".to_vec())
         );
         assert_eq!(state.head_contents.get(&repo_path("other-extra.txt")), None);
     })
