@@ -287,7 +287,7 @@ identifier = "dev.fzed.fzed-dev"
 name = "FZed Dev"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["fzed"]
+osx_url_schemes = ["fzed", "fzed-cli"]
 
 [package.metadata.bundle-nightly]
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
@@ -295,7 +295,7 @@ identifier = "dev.fzed.fzed-nightly"
 name = "FZed Nightly"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["fzed"]
+osx_url_schemes = ["fzed", "fzed-cli"]
 
 [package.metadata.bundle-preview]
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
@@ -303,7 +303,7 @@ identifier = "dev.fzed.fzed-preview"
 name = "FZed Preview"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["fzed"]
+osx_url_schemes = ["fzed", "fzed-cli"]
 
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon-fzed@2x.png", "resources/app-icon-fzed.png"]
@@ -311,7 +311,7 @@ identifier = "dev.fzed.fzed"
 name = "FZed"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["fzed"]
+osx_url_schemes = ["fzed", "fzed-cli"]
 
 [package.metadata.cargo-machete]
 ignored = ["profiling", "zstd", "tracing"]

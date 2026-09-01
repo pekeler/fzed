@@ -1821,6 +1821,7 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
                 || arg.starts_with("zed://")
                 || arg.starts_with("fzed://")
                 || arg.starts_with("zed-cli://")
+                || arg.starts_with("fzed-cli://")
                 || arg.starts_with("ssh://")
                 || parse_zed_link(arg, cx).is_some()
             {
