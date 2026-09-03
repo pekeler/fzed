@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # FZed
 
 [![CI](https://github.com/pekeler/fzed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/pekeler/fzed/actions/workflows/run_tests.yml)
@@ -222,3 +225,5 @@ There are no perks or entitlements associated with sponsorship.
 - agent: runs the tests unsandboxed
 - me: use the terminal to ls this directory
 - agent: runs `ls` *sandboxed*
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.

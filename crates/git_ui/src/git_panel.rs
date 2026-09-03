@@ -218,6 +218,7 @@ struct GitMenuState {
     can_select_files: bool,
     is_fossil: bool,
     has_tracked_changes: bool,
+    has_staged_tracked_changes: bool,
     has_staged_changes: bool,
     has_unstaged_changes: bool,
     has_new_changes: bool,
@@ -524,6 +525,11 @@ fn git_panel_context_menu(
                     "Unstage All"
                 },
                 UnstageAll.boxed_clone(),
+            )
+            .action_disabled_when(
+                !state.can_restore || !state.has_staged_tracked_changes,
+                "Restore All Changes",
+                RestoreTrackedFiles.boxed_clone(),
             )
             .separator()
             .action_disabled_when(
@@ -2431,6 +2437,19 @@ impl GitPanel {
             .unique_by(|entry| entry.repo_path.clone())
     }
 
+    fn directory_context_descendants(&self) -> Option<&[GitStatusEntry]> {
+        let entry_index = self.context_menu.as_ref()?.target_entry_index?;
+        let GitListEntry::Directory(directory) = self.entries.get(entry_index)? else {
+            return None;
+        };
+
+        self.view_mode
+            .tree_state()?
+            .directory_descendants
+            .get(&directory.key)
+            .map(Vec::as_slice)
+    }
+
     fn open_diff(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab == GitPanelTab::History {
             self.open_selected_history_commit(window, cx);
@@ -2936,12 +2955,14 @@ impl GitPanel {
             return;
         };
         let entries = self
-            .change_entries_by_path()
+            .directory_context_descendants()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.change_entries_by_path().cloned().collect())
+            .into_iter()
             .filter(|status_entry| {
                 !status_entry.status.is_created()
                     && Self::stage_status_for_entry(status_entry, repository).has_staged()
             })
-            .cloned()
             .collect::<Vec<_>>();
 
         match entries.len() {
@@ -6111,6 +6132,13 @@ impl GitPanel {
         self.tracked_count > 0
     }
 
+    fn has_staged_tracked_changes(&self, repository: &Repository) -> bool {
+        self.change_entries_by_path().any(|status_entry| {
+            !status_entry.status.is_created()
+                && Self::stage_status_for_entry(status_entry, repository).has_staged()
+        })
+    }
+
     fn stash_selection_paths(&self, repository: &Repository) -> Vec<RepoPath> {
         let use_staged_selection = self.has_staged_changes();
 
@@ -6792,6 +6820,10 @@ impl GitPanel {
             can_select_files: has_write_access && self.can_select_files_for_active_repository(cx),
             is_fossil: self.active_repository_kind(cx).is_fossil(),
             has_tracked_changes: self.has_tracked_changes(),
+            has_staged_tracked_changes: self
+                .active_repository
+                .as_ref()
+                .is_some_and(|repository| self.has_staged_tracked_changes(repository.read(cx))),
             has_staged_changes: self.has_staged_changes(),
             has_unstaged_changes: self.has_unstaged_changes(),
             has_new_changes: self.new_count > 0,
@@ -8411,7 +8443,7 @@ impl GitPanel {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            this.deploy_panel_context_menu(event.position, false, window, cx)
+                            this.deploy_panel_context_menu(event.position, None, false, window, cx)
                         }),
                     )
                     .custom_scrollbars(
@@ -8587,7 +8619,7 @@ impl GitPanel {
         self.context_menu_fossil_record_rename_pair = None;
         if matches!(self.entries.get(ix), Some(GitListEntry::Directory(_))) {
             self.selected_entry = Some(ix);
-            self.deploy_panel_context_menu(position, true, window, cx);
+            self.deploy_panel_context_menu(position, Some(ix), true, window, cx);
             return;
         }
 
@@ -8706,6 +8738,7 @@ impl GitPanel {
     fn deploy_panel_context_menu(
         &mut self,
         position: Point<Pixels>,
+        target_entry_index: Option<usize>,
         include_copy_paths: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -8720,6 +8753,10 @@ impl GitPanel {
                     && self.can_select_files_for_active_repository(cx),
                 is_fossil: self.active_repository_kind(cx).is_fossil(),
                 has_tracked_changes: self.has_tracked_changes(),
+                has_staged_tracked_changes: self
+                    .active_repository
+                    .as_ref()
+                    .is_some_and(|repository| self.has_staged_tracked_changes(repository.read(cx))),
                 has_staged_changes: self.has_staged_changes(),
                 has_unstaged_changes: self.has_unstaged_changes(),
                 has_new_changes: self.new_count > 0,
@@ -8731,7 +8768,7 @@ impl GitPanel {
             window,
             cx,
         );
-        self.set_context_menu(context_menu, position, None, window, cx);
+        self.set_context_menu(context_menu, position, target_entry_index, window, cx);
     }
 
     fn set_context_menu(
@@ -11146,6 +11183,7 @@ mod tests {
             can_select_files: true,
             is_fossil: true,
             has_tracked_changes: true,
+            has_staged_tracked_changes: false,
             has_staged_changes: false,
             has_unstaged_changes: true,
             has_new_changes: false,
