@@ -2,7 +2,7 @@
 description = "The fast, collaborative code editor."
 edition.workspace = true
 name = "zed"
-version = "1.18.1-fzed.0"
+version = "1.18.1-fzed.1"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
@@ -128,6 +128,7 @@ image = { workspace = true, optional = true }
 itertools.workspace = true
 rayon.workspace = true
 semver.workspace = true
+spin = "0.10.0"
 system_specs.workspace = true
 tabular_data_preview.workspace = true
 tempfile = { workspace = true, optional = true }

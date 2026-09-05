@@ -22764,7 +22764,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "1.18.1-fzed.0"
+version = "1.18.1-fzed.1"
 dependencies = [
  "acp_thread",
  "acp_tools",
@@ -22896,6 +22896,7 @@ dependencies = [
  "smol",
  "snippet_provider",
  "snippets_ui",
+ "spin 0.10.0",
  "svg_preview",
  "sysinfo 0.37.2",
  "system_specs",
