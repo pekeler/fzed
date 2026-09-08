@@ -8,12 +8,14 @@ Usage: script/fzed-release [options]
 Publishes a FZed GitHub release without serializing CI and local bundling.
 
 The script:
-  1. verifies the current clean main checkout and FZed version
-  2. creates the vX.Y.Z-fzed.N tag
-  3. pushes main and the tag
-  4. dispatches run_tests on GitHub
-  5. builds the Apple Silicon macOS DMG locally while CI runs
-  6. publishes the GitHub release after both CI and the bundle succeed
+  1. verifies the current clean main checkout and version against published releases
+  2. pushes main and starts run_tests on GitHub
+  3. builds the Apple Silicon macOS DMG locally while CI runs
+  4. creates and pushes the tag after both CI and the bundle succeed
+  5. publishes the GitHub release
+
+Each upstream version starts at -fzed.0. Only published releases advance the
+suffix; keep the same version when retrying a failed build or release.
 
 Options:
   --summary TEXT       One concise FZed user-facing release note paragraph.
@@ -101,12 +103,29 @@ version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -n 1
 
 tag_name="v${version}"
 head_sha="$(git rev-parse HEAD)"
+upstream_version="${version%%-fzed.*}"
+
+published_tags="$(gh api --paginate "repos/$repo/releases?per_page=100" \
+  --jq '.[] | select(.draft == false) | .tag_name')" \
+  || fail "could not read published releases; refusing to choose a release version"
+next_revision=0
+while IFS= read -r published_tag; do
+  if [[ "$published_tag" == "v${upstream_version}-fzed."* ]]; then
+    revision="${published_tag##*-fzed.}"
+    [[ "$revision" =~ ^[0-9]+$ ]] || continue
+    if (( 10#$revision >= next_revision )); then
+      next_revision=$((10#$revision + 1))
+    fi
+  fi
+done <<< "$published_tags"
+expected_version="${upstream_version}-fzed.${next_revision}"
+[[ "$version" == "$expected_version" ]] \
+  || fail "expected $expected_version based on published releases, got $version; update crates/zed/Cargo.toml and Cargo.lock. Unpublished tags and failed builds do not advance the FZed suffix"
 
 if [[ -n "$notes_file" ]]; then
   [[ -f "$notes_file" ]] || fail "release notes file not found: $notes_file"
 else
   [[ -n "$summary" ]] || fail "provide --summary or --notes-file"
-  upstream_version="${version%%-fzed.*}"
   upstream_tag="v${upstream_version}"
   generated_notes_file="$(mktemp)"
   notes_file="$generated_notes_file"
@@ -148,14 +167,12 @@ fi
 
 if git rev-parse --verify --quiet "$tag_name" >/dev/null; then
   tag_commit="$(git rev-parse "$tag_name^{commit}")"
-  [[ "$tag_commit" == "$head_sha" ]] || fail "$tag_name already exists and does not point at HEAD"
-else
-  git tag -a "$tag_name" -m "FZed $version"
+  [[ "$tag_commit" == "$head_sha" ]] || fail "$tag_name already exists and does not point at HEAD; resolve the unpublished tag without bumping the version"
 fi
 
 triggered_after="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-echo "Pushing main and $tag_name"
-git push origin HEAD:main "$tag_name"
+echo "Pushing main for CI"
+git push origin HEAD:main
 
 run_id=""
 echo "Finding push CI run for $head_sha"
@@ -237,6 +254,11 @@ checksum_path="${versioned_dmg_path}.sha256"
 
 cp "$dmg_path" "$versioned_dmg_path"
 shasum -a 256 "$versioned_dmg_path" > "$checksum_path"
+
+if ! git rev-parse --verify --quiet "$tag_name" >/dev/null; then
+  git tag -a "$tag_name" -m "FZed $version"
+fi
+git push origin "$tag_name"
 
 echo "Publishing $tag_name"
 gh release create "$tag_name" \

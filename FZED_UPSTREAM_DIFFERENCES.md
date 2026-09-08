@@ -62,8 +62,7 @@ release.
 
 ### Versioning
 
-Files: `README.md`, `crates/zed/Cargo.toml`, `Cargo.lock`, future release
-tooling
+Files: `README.md`, `crates/zed/Cargo.toml`, `Cargo.lock`, `script/fzed-release`
 
 FZed release versions are derived from the upstream Zed release tag they are
 based on:
@@ -73,6 +72,12 @@ based on:
   `X.Y.Z-fzed.1`, `X.Y.Z-fzed.2`, and so on
 - moving to a newer upstream Zed release tag resets the suffix to `fzed.0` for
   that upstream version
+- only published GitHub releases advance the suffix; failed builds, drafts,
+  and unpublished tags retain the same version when retried
+
+`script/fzed-release` checks the next suffix against published GitHub releases
+and defers tagging until CI and the local build succeed. Preserve these checks
+when merging upstream release tooling.
 
 Reason: the upstream baseline remains visible in every FZed release, while
 FZed-only fixes still have an ordered release sequence. Use a prerelease suffix,

@@ -158,6 +158,19 @@ Release Notes:
 
 # FZed release hygiene
 
+Keep release procedures and coding-agent instructions in this file.
+`README.md` is intended for project marketing.
+
+When preparing a FZed release:
+
+- When upgrading to upstream Zed `vX.Y.Z`, set the version in
+  `crates/zed/Cargo.toml` and `Cargo.lock` to `X.Y.Z-fzed.0`.
+- For fork-only follow-ups on the same upstream version, increment the highest
+  published FZed suffix by one.
+- Count only published GitHub releases. Failed builds, draft releases, and
+  unpublished tags do not consume a version. Keep the same version while fixing
+  and retrying them; do not bump the suffix to bypass an unpublished tag.
+
 When publishing or editing FZed GitHub release notes:
 
 - Keep notes concise and useful to potential FZed users. Mention the upstream
