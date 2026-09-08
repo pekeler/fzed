@@ -183,6 +183,8 @@ pub mod fossil_actions {
             ExcludeAll,
             /// Stashes tracked changes in the active Fossil checkout.
             StashTracked,
+            /// Saves a stash of the selected managed files without reverting their saved changes.
+            SnapshotStash,
             /// Pops the most recent Fossil stash.
             PopStash,
             /// Applies the most recent Fossil stash.

@@ -177,6 +177,66 @@ impl FakeGitRepository {
             .context("repository has no working directory")
     }
 
+    fn stash_paths_with_mode(
+        &self,
+        paths: Vec<RepoPath>,
+        message: Option<String>,
+        keep_changes: bool,
+    ) -> BoxFuture<'_, Result<()>> {
+        let message = message
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| "fake stash".to_string());
+        let stashed_contents = paths
+            .iter()
+            .cloned()
+            .map(|path| {
+                let content = self.read_worktree_contents(&path);
+                (path, content)
+            })
+            .collect::<HashMap<_, _>>();
+
+        let checkout_contents = self.fs.with_git_state(&self.dot_git_path, false, |state| {
+            let stash_number = state.stash_contents.len() + 1;
+            let oid_bytes = [stash_number as u8; 20];
+            let oid = Oid::from_bytes(&oid_bytes)?;
+            let mut entries = state.stash_entries.entries.to_vec();
+            entries.insert(
+                0,
+                StashEntry {
+                    index: 0,
+                    oid,
+                    message,
+                    branch: state.current_branch_name.clone(),
+                    timestamp: 0,
+                },
+            );
+            for (index, entry) in entries.iter_mut().enumerate() {
+                entry.index = index;
+            }
+            state.stash_entries.entries = entries.into();
+            state.stash_contents.insert(0, stashed_contents);
+
+            Ok(paths
+                .into_iter()
+                .map(|path| {
+                    let content = state.index_contents.get(&path).cloned();
+                    (path, content)
+                })
+                .collect::<Vec<_>>())
+        });
+
+        let result = checkout_contents
+            .and_then(|checkout_contents| checkout_contents)
+            .and_then(|checkout_contents| {
+                if keep_changes {
+                    Ok(())
+                } else {
+                    self.write_worktree_contents_without_event(checkout_contents)
+                }
+            });
+        future::ready(result).boxed()
+    }
+
     fn read_worktree_contents(&self, path: &RepoPath) -> Option<Vec<u8>> {
         let workdir_path = self.workdir_path().ok()?;
         self.fs
@@ -1250,54 +1310,16 @@ impl GitRepository for FakeGitRepository {
         message: Option<String>,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
-        let message = message
-            .filter(|message| !message.trim().is_empty())
-            .unwrap_or_else(|| "fake stash".to_string());
-        let stashed_contents = paths
-            .iter()
-            .cloned()
-            .map(|path| {
-                let content = self.read_worktree_contents(&path);
-                (path, content)
-            })
-            .collect::<HashMap<_, _>>();
+        self.stash_paths_with_mode(paths, message, false)
+    }
 
-        let checkout_contents = self.fs.with_git_state(&self.dot_git_path, false, |state| {
-            let stash_number = state.stash_contents.len() + 1;
-            let oid_bytes = [stash_number as u8; 20];
-            let oid = Oid::from_bytes(&oid_bytes)?;
-            let mut entries = state.stash_entries.entries.to_vec();
-            entries.insert(
-                0,
-                StashEntry {
-                    index: 0,
-                    oid,
-                    message,
-                    branch: state.current_branch_name.clone(),
-                    timestamp: 0,
-                },
-            );
-            for (index, entry) in entries.iter_mut().enumerate() {
-                entry.index = index;
-            }
-            state.stash_entries.entries = entries.into();
-            state.stash_contents.insert(0, stashed_contents);
-
-            Ok(paths
-                .into_iter()
-                .map(|path| {
-                    let content = state.index_contents.get(&path).cloned();
-                    (path, content)
-                })
-                .collect::<Vec<_>>())
-        });
-
-        let result = checkout_contents
-            .and_then(|checkout_contents| checkout_contents)
-            .and_then(|checkout_contents| {
-                self.write_worktree_contents_without_event(checkout_contents)
-            });
-        future::ready(result).boxed()
+    fn snapshot_stash_paths(
+        &self,
+        paths: Vec<RepoPath>,
+        message: Option<String>,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        self.stash_paths_with_mode(paths, message, true)
     }
 
     fn stash_staged(

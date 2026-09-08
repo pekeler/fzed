@@ -8527,6 +8527,39 @@ impl Repository {
         })
     }
 
+    pub fn snapshot_stash_entries(
+        &mut self,
+        entries: Vec<RepoPath>,
+        message: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        if entries.is_empty() {
+            return Task::ready(Ok(()));
+        }
+
+        let this = self.this.clone();
+        let result = self.send_job(
+            "snapshot_stash_entries",
+            Some("fossil stash snapshot".into()),
+            move |repository, mut cx| async move {
+                let RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) = repository
+                else {
+                    bail!("Fossil stash snapshots are not supported in remote projects yet");
+                };
+
+                backend
+                    .snapshot_stash_paths(entries, message, environment)
+                    .await?;
+                refresh_fossil_snapshot_after_command(this, backend, &mut cx).await
+            },
+        );
+        cx.spawn(async move |_, _| result.await?)
+    }
+
     pub fn stash_staged(
         &mut self,
         message: Option<String>,

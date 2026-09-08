@@ -135,8 +135,16 @@ Fossil users:
 - navigation and repository state: `fossil::Branch`,
   `fossil::SwitchBranch`, `fossil::Checkouts`, `fossil::SelectRepo`,
   `fossil::OpenModifiedFiles`, `fossil::CopyBranchName`
-- stash: `fossil::StashTracked`, `fossil::PopStash`,
+- stash: `fossil::StashTracked`, `fossil::SnapshotStash`, `fossil::PopStash`,
   `fossil::ApplyStash`, `fossil::ViewStash`
+
+The check-in menu's "Snapshot Stash (Keep Changes)" action uses
+`fossil stash snapshot` with the current managed-file selection and message.
+With no files included, it snapshots all managed changes.
+It preserves saved working changes, file inclusion, and the message draft,
+and refreshes the existing stash list. Untracked extras are excluded;
+files already added with Fossil are included. This action requires a local
+project.
 
 Reason: users should be able to discover Fossil operations directly from the
 command palette. Do not add one-for-one aliases for Git-only concepts such as

@@ -466,6 +466,13 @@ pub fn init(cx: &mut App) {
                 });
             },
         );
+        workspace.register_action(
+            |workspace, action: &git::fossil_actions::SnapshotStash, window, cx| {
+                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                    panel.snapshot_stash(action, window, cx);
+                });
+            },
+        );
         workspace.register_action(|workspace, _: &git::fossil_actions::PopStash, window, cx| {
             with_fossil_panel(workspace, window, cx, |panel, window, cx| {
                 panel.stash_pop(&git::StashPop, window, cx);

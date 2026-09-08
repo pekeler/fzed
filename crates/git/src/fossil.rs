@@ -105,6 +105,32 @@ impl FossilRepository {
         )
     }
 
+    fn stash_paths_with_mode(
+        &self,
+        paths: Vec<RepoPath>,
+        message: Option<String>,
+        keep_changes: bool,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let message = message
+                    .filter(|message| !message.trim().is_empty())
+                    .unwrap_or_else(|| "fzed stash".to_string());
+                let mut args = vec![
+                    OsString::from("stash"),
+                    OsString::from(if keep_changes { "snapshot" } else { "save" }),
+                    OsString::from("--comment"),
+                    OsString::from(message),
+                ];
+                args.extend(repo_paths_to_args(paths));
+                fossil.run_with_env(&args, env).await?;
+                Ok(())
+            })
+            .boxed()
+    }
+
     async fn info(&self) -> Result<FossilInfo> {
         let output = self.fossil_binary().run(&["info"]).await?;
         let info = parse_fossil_info(&output);
@@ -1055,23 +1081,16 @@ impl GitRepository for FossilRepository {
         message: Option<String>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
-        let fossil = self.fossil_binary();
-        self.executor
-            .spawn(async move {
-                let message = message
-                    .filter(|message| !message.trim().is_empty())
-                    .unwrap_or_else(|| "fzed stash".to_string());
-                let mut args = vec![
-                    OsString::from("stash"),
-                    OsString::from("save"),
-                    OsString::from("--comment"),
-                    OsString::from(message),
-                ];
-                args.extend(repo_paths_to_args(paths));
-                fossil.run_with_env(&args, env).await?;
-                Ok(())
-            })
-            .boxed()
+        self.stash_paths_with_mode(paths, message, false, env)
+    }
+
+    fn snapshot_stash_paths(
+        &self,
+        paths: Vec<RepoPath>,
+        message: Option<String>,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        self.stash_paths_with_mode(paths, message, true, env)
     }
 
     fn stash_staged(
@@ -3481,6 +3500,79 @@ mod tests {
             "stashed change\nsecond\nthird\n",
         )
         .unwrap();
+        std::fs::write(checkout.join("added file.txt"), "new file\n").unwrap();
+        run_fossil(&fossil_home, &checkout, &["add", "added file.txt"]);
+        let status_before_snapshot = repository.status(&[]).await.unwrap();
+        let snapshot_paths = ["notes.txt", "added file.txt"];
+        let contents_before_snapshot = snapshot_paths.map(|path| {
+            (
+                std::fs::read(checkout.join(path)).unwrap(),
+                std::fs::metadata(checkout.join(path))
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
+            )
+        });
+        repository
+            .snapshot_stash_paths(
+                snapshot_paths
+                    .map(|path| RepoPath::new(path).unwrap())
+                    .to_vec(),
+                Some("before experiment".to_string()),
+                Arc::new(HashMap::default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repository.status(&[]).await.unwrap().entries,
+            status_before_snapshot.entries
+        );
+        for (path, (contents, modified)) in snapshot_paths.iter().zip(&contents_before_snapshot) {
+            assert_eq!(std::fs::read(checkout.join(path)).unwrap(), *contents);
+            assert_eq!(
+                std::fs::metadata(checkout.join(path))
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
+                *modified
+            );
+        }
+
+        let snapshots = repository.stash_entries().await.unwrap();
+        assert_eq!(snapshots.entries.len(), 1);
+        let snapshot = snapshots.entries.first().unwrap();
+        assert_eq!(snapshot.message, "before experiment");
+        let snapshot_diff = repository
+            .load_commit(snapshot.oid.to_string(), cx.to_async())
+            .await
+            .unwrap();
+        assert_eq!(snapshot_diff.files.len(), snapshot_paths.len());
+        for (path, (contents, _)) in snapshot_paths.iter().zip(&contents_before_snapshot) {
+            let file = snapshot_diff
+                .files
+                .iter()
+                .find(|file| file.path == RepoPath::new(*path).unwrap())
+                .unwrap();
+            assert_eq!(file.new_content.as_ref(), Some(contents));
+        }
+        std::fs::write(checkout.join("notes.txt"), "later experiment\n").unwrap();
+        run_fossil(
+            &fossil_home,
+            &checkout,
+            &["revert", "notes.txt", "added file.txt"],
+        );
+        repository
+            .stash_apply(Some(snapshot.index), Arc::new(HashMap::default()))
+            .await
+            .unwrap();
+        for (path, (contents, _)) in snapshot_paths.iter().zip(&contents_before_snapshot) {
+            assert_eq!(std::fs::read(checkout.join(path)).unwrap(), *contents);
+        }
+        repository
+            .stash_drop(Some(snapshot.index), Arc::new(HashMap::default()))
+            .await
+            .unwrap();
+
         repository
             .stash_paths(
                 vec![RepoPath::new("notes.txt").unwrap()],

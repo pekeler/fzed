@@ -1049,6 +1049,16 @@ pub trait GitRepository: Send + Sync {
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
 
+    fn snapshot_stash_paths(
+        &self,
+        _paths: Vec<RepoPath>,
+        _message: Option<String>,
+        _env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        async { anyhow::bail!("Stash snapshots are only supported for Fossil repositories") }
+            .boxed()
+    }
+
     fn stash_staged(
         &self,
         message: Option<String>,
