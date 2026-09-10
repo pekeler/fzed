@@ -2,7 +2,7 @@
 description = "The fast, collaborative code editor."
 edition.workspace = true
 name = "zed"
-version = "1.18.1-fzed.2"
+version = "1.19.2-fzed.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
@@ -81,6 +81,7 @@ auto_update.workspace = true
 auto_update_ui.workspace = true
 breadcrumbs.workspace = true
 call.workspace = true
+call_hierarchy.workspace = true
 channel.workspace = true
 chrono.workspace = true
 clap.workspace = true

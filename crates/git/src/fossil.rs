@@ -785,7 +785,12 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
-    fn load_commit(&self, commit: String, _cx: AsyncApp) -> BoxFuture<'_, Result<CommitDiff>> {
+    fn load_commit(
+        &self,
+        commit: String,
+        _ignore_shallow_boundary: bool,
+        _cx: AsyncApp,
+    ) -> BoxFuture<'_, Result<CommitDiff>> {
         let fossil = self.fossil_binary();
         let cached_commit_data = self.cached_commit_data.clone();
         self.executor
@@ -811,6 +816,7 @@ impl GitRepository for FossilRepository {
                             return Ok(CommitDiff {
                                 files: Vec::new(),
                                 stats: Some((0, 0)),
+                                is_shallow_boundary: false,
                             });
                         };
                         (parent.to_string(), commit_data.sha.to_string())
@@ -820,6 +826,7 @@ impl GitRepository for FossilRepository {
                             return Ok(CommitDiff {
                                 files: Vec::new(),
                                 stats: Some((0, 0)),
+                                is_shallow_boundary: false,
                             });
                         };
                         (parent, info.hash)
@@ -1234,6 +1241,9 @@ impl GitRepository for FossilRepository {
             .spawn(async move {
                 let remote_name = match fetch_options {
                     FetchOptions::All => None,
+                    FetchOptions::Unshallow => {
+                        anyhow::bail!("Fossil does not support shallow clones")
+                    }
                     FetchOptions::Remote(remote) => Some(remote.name.to_string()),
                 };
                 let args = fossil_sync_args(&fossil, remote_name).await?;
@@ -1897,6 +1907,7 @@ fn parse_fossil_unified_diff(output: &str) -> Result<CommitDiff> {
     Ok(CommitDiff {
         files,
         stats: Some((added, removed)),
+        is_shallow_boundary: false,
     })
 }
 
@@ -2033,6 +2044,7 @@ async fn fossil_blame_from_output(
         }
 
         entries.push(crate::blame::BlameEntry {
+            boundary: false,
             sha,
             range: raw_line.line_number..raw_line.line_number + 1,
             original_line_number: raw_line.line_number + 1,
@@ -3431,7 +3443,10 @@ mod tests {
         let details = repository.show(head.clone()).await.unwrap();
         assert_eq!(details.message, "notes update");
         assert_eq!(details.author_name, "tester");
-        let commit_diff = repository.load_commit(head, cx.to_async()).await.unwrap();
+        let commit_diff = repository
+            .load_commit(head, false, cx.to_async())
+            .await
+            .unwrap();
         let notes_diff = commit_diff
             .files
             .iter()
@@ -3543,7 +3558,7 @@ mod tests {
         let snapshot = snapshots.entries.first().unwrap();
         assert_eq!(snapshot.message, "before experiment");
         let snapshot_diff = repository
-            .load_commit(snapshot.oid.to_string(), cx.to_async())
+            .load_commit(snapshot.oid.to_string(), false, cx.to_async())
             .await
             .unwrap();
         assert_eq!(snapshot_diff.files.len(), snapshot_paths.len());
@@ -3586,7 +3601,7 @@ mod tests {
         let stash_entry = stash_entries.entries[0].clone();
         assert_eq!(stash_entry.message, "notes stash");
         let stash_diff = repository
-            .load_commit(stash_entry.oid.to_string(), cx.to_async())
+            .load_commit(stash_entry.oid.to_string(), false, cx.to_async())
             .await
             .unwrap();
         assert_eq!(stash_diff.files.len(), 1);

@@ -357,12 +357,14 @@ impl GitRepository for FakeGitRepository {
     fn load_commit(
         &self,
         _commit: String,
+        _ignore_shallow_boundary: bool,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<git::repository::CommitDiff>> {
         async {
             Ok(git::repository::CommitDiff {
                 files: Vec::new(),
                 stats: None,
+                is_shallow_boundary: false,
             })
         }
         .boxed()
