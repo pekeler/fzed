@@ -448,9 +448,9 @@ impl Render for DeleteWorktreeTooltip {
                 },
                 Some(&DeleteWorktree),
                 if repository_kind.is_fossil() {
-                    "Hold alt to force close"
+                    concat!("Hold ", ui::alt_key_name!(), " to force close")
                 } else {
-                    "Hold alt to force delete"
+                    concat!("Hold ", ui::alt_key_name!(), " to force delete")
                 },
                 &self.focus_handle,
                 cx,

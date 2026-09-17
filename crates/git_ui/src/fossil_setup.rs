@@ -12,7 +12,7 @@ use ui::{
     Button, Color, Icon, IconName, IconSize, IntoElement, Label, LabelSize, ParentElement, Render,
     Styled, StyledExt, div, h_flex, prelude::*, rems,
 };
-use util::command::new_command;
+use util::command::{Stdio, new_command};
 use workspace::{ModalView, Workspace};
 
 pub struct FossilCloneModal {
@@ -128,11 +128,11 @@ pub fn clone_remote(
                     let destination_dir = destination_dir.clone();
                     let repo_url = repo_url.clone();
                     cx.background_spawn(async move {
-                        let _job = fs.start_job(SharedString::from(format!(
+                        let job = fs.start_job(SharedString::from(format!(
                             "Cloning Fossil repository {}",
                             repo_url
                         )));
-                        fossil_clone_to_checkout(&repo_url, &destination_dir).await
+                        fossil_clone_to_checkout(&repo_url, &destination_dir, &job).await
                     })
                 })
                 .ok()?
@@ -277,7 +277,11 @@ struct FossilSetupResult {
     checkout_dir: PathBuf,
 }
 
-async fn fossil_clone_to_checkout(repo_url: &str, parent_dir: &Path) -> Result<FossilSetupResult> {
+async fn fossil_clone_to_checkout(
+    repo_url: &str,
+    parent_dir: &Path,
+    job: &project::JobTracker,
+) -> Result<FossilSetupResult> {
     if repo_url.trim().is_empty() {
         bail!("Fossil repository URL is required");
     }
@@ -296,8 +300,10 @@ async fn fossil_clone_to_checkout(repo_url: &str, parent_dir: &Path) -> Result<F
             OsString::from(repo_url),
             repository_db.as_os_str().to_owned(),
         ],
+        Some(job),
     )
     .await?;
+    job.update("Opening Fossil checkout".into());
     run_fossil(
         parent_dir,
         [
@@ -306,6 +312,7 @@ async fn fossil_clone_to_checkout(repo_url: &str, parent_dir: &Path) -> Result<F
             OsString::from("--workdir"),
             checkout_dir.as_os_str().to_owned(),
         ],
+        None,
     )
     .await?;
 
@@ -328,6 +335,7 @@ async fn fossil_open_repository(repository_db: &Path, checkout_dir: &Path) -> Re
             OsString::from("--workdir"),
             checkout_dir.as_os_str().to_owned(),
         ],
+        None,
     )
     .await
 }
@@ -346,6 +354,7 @@ async fn fossil_init_checkout(checkout_dir: &Path) -> Result<()> {
     run_fossil(
         repository_db.parent().unwrap_or(checkout_dir),
         [OsString::from("init"), repository_db.as_os_str().to_owned()],
+        None,
     )
     .await?;
     run_fossil(
@@ -357,22 +366,49 @@ async fn fossil_init_checkout(checkout_dir: &Path) -> Result<()> {
             checkout_dir.as_os_str().to_owned(),
             OsString::from("--force"),
         ],
+        None,
     )
     .await
 }
 
-async fn run_fossil(working_dir: &Path, args: impl IntoIterator<Item = OsString>) -> Result<()> {
+async fn run_fossil(
+    working_dir: &Path,
+    args: impl IntoIterator<Item = OsString>,
+    job: Option<&project::JobTracker>,
+) -> Result<()> {
     let fossil_binary = git::fossil::resolve_fossil_binary(None, working_dir)?;
-    let output = new_command(&fossil_binary)
+    let mut child = new_command(&fossil_binary)
         .current_dir(working_dir)
         .args(args)
-        .output()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .with_context(|| format!("running Fossil executable at {}", fossil_binary.display()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to read Fossil output")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to read Fossil errors")?;
+    let (stdout, stderr) = futures::try_join!(
+        project::read_command_progress(stdout, |message| {
+            // Fossil prints the new administrator's password after cloning.
+            if !message.starts_with("admin-user:")
+                && let Some(job) = job
+            {
+                job.update(message.into());
+            }
+        }),
+        project::read_command_progress(stderr, |_| {}),
+    )?;
+    let status = child.status().await?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        let stdout = String::from_utf8_lossy(&stdout);
         let message = if stderr.trim().is_empty() {
             stdout.trim()
         } else {
@@ -592,6 +628,64 @@ fn sanitize_checkout_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    async fn test_fossil_clone_progress(cx: &mut gpui::TestAppContext) -> Result<()> {
+        use fs::Fs as _;
+        use futures::StreamExt as _;
+
+        cx.executor().allow_parking();
+        let tree = util::test::TempTree::new(serde_json::json!({"destination": {}}));
+        let source = tree.path().join("source.fossil");
+        run_fossil(
+            tree.path(),
+            [OsString::from("init"), source.as_os_str().to_owned()],
+            None,
+        )
+        .await?;
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let mut events = fs.subscribe_to_jobs();
+        let job = fs.start_job("Cloning Fossil repository".into());
+        let result = fossil_clone_to_checkout(
+            source.to_str().context("non-UTF-8 source path")?,
+            &tree.path().join("destination"),
+            &job,
+        )
+        .await?;
+        assert!(result.checkout_dir.is_dir());
+        assert!(tree.path().join("destination/source.fossil").is_file());
+        drop(job);
+
+        let mut messages = Vec::new();
+        while let Some(event) = events.next().await {
+            match event {
+                fs::JobEvent::Updated { message, .. } => messages.push(message),
+                fs::JobEvent::Completed { .. } => break,
+                fs::JobEvent::Started { .. } => {}
+            }
+        }
+        assert!(
+            messages.len() > 1,
+            "clone output should update the activity"
+        );
+        assert_eq!(
+            messages.last().map(|message| message.as_ref()),
+            Some("Opening Fossil checkout")
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| !message.contains("initial password"))
+        );
+
+        let error = run_fossil(tree.path(), [OsString::from("invalid-fzed-command")], None)
+            .await
+            .expect_err("invalid Fossil command should fail");
+        assert!(error.to_string().contains("fossil command failed:"));
+        assert!(error.to_string().contains("invalid-fzed-command"));
+        Ok(())
+    }
 
     #[test]
     fn derives_checkout_name_from_fossil_urls() {
