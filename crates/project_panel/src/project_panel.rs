@@ -1600,7 +1600,7 @@ impl ProjectPanel {
         loop {
             let entry_id = entry.id;
             match expanded_dir_ids.binary_search(&entry_id) {
-                Ok(ix) => {
+                Ok(ix) if entry.is_dir() => {
                     expanded_dir_ids.remove(ix);
                     self.selection = Some(SelectedEntry {
                         worktree_id,
@@ -1616,7 +1616,7 @@ impl ProjectPanel {
                     cx.notify();
                     break;
                 }
-                Err(_) => {
+                Ok(_) | Err(_) => {
                     if let Some(parent_entry) =
                         entry.path.parent().and_then(|p| worktree.entry_for_path(p))
                     {
@@ -1778,7 +1778,9 @@ impl ProjectPanel {
         };
         let include_ignored_dirs = !entry.is_ignored;
 
-        if let Err(ix) = expanded_dir_ids.binary_search(&entry_id) {
+        if entry.is_dir()
+            && let Err(ix) = expanded_dir_ids.binary_search(&entry_id)
+        {
             expanded_dir_ids.insert(ix, entry_id);
         }
 
@@ -1870,7 +1872,9 @@ impl ProjectPanel {
 
                 if let Some(mut entry) = worktree.entry_for_id(entry_id) {
                     loop {
-                        if let Err(ix) = expanded_dir_ids.binary_search(&entry.id) {
+                        if entry.is_dir()
+                            && let Err(ix) = expanded_dir_ids.binary_search(&entry.id)
+                        {
                             expanded_dir_ids.insert(ix, entry.id);
                         }
 
@@ -4984,7 +4988,9 @@ impl ProjectPanel {
 
                 if let Some(mut entry) = worktree.entry_for_id(entry_id) {
                     loop {
-                        if let Err(ix) = expanded_dir_ids.binary_search(&entry.id) {
+                        if entry.is_dir()
+                            && let Err(ix) = expanded_dir_ids.binary_search(&entry.id)
+                        {
                             expanded_dir_ids.insert(ix, entry.id);
                         }
 
