@@ -1333,12 +1333,36 @@ impl GitRepository for FossilRepository {
         self.executor
             .spawn(async move {
                 let mut args = vec![OsString::from("diff"), OsString::from("--numstat")];
-                for prefix in path_prefixes {
+                for prefix in &path_prefixes {
                     if !prefix.is_empty() {
                         args.push(prefix.as_std_path().as_os_str().to_owned());
                     }
                 }
-                let output = fossil.run(&args).await?;
+                let output = match fossil.run(&args).await {
+                    Ok(output) => output,
+                    Err(error)
+                        if !path_prefixes.is_empty()
+                            && error
+                                .downcast_ref::<FossilBinaryCommandError>()
+                                .is_some_and(|error| error.stderr.starts_with("not found:")) =>
+                    {
+                        // Fossil rejects scoped diffs of deleted untracked files, which
+                        // would otherwise prevent their stale statuses from being removed.
+                        let output = fossil.run(&["diff", "--numstat"]).await?;
+                        let stats = parse_fossil_numstat(&output);
+                        return Ok(GitDiffStat {
+                            entries: stats
+                                .entries
+                                .iter()
+                                .filter(|(path, _)| {
+                                    path_prefixes.iter().any(|prefix| path.starts_with(prefix))
+                                })
+                                .cloned()
+                                .collect(),
+                        });
+                    }
+                    Err(error) => return Err(error),
+                };
                 Ok(parse_fossil_numstat(&output))
             })
             .boxed()
@@ -3225,6 +3249,54 @@ mod tests {
             .unwrap();
         assert_eq!(tracked_stat.added, 1);
         assert_eq!(tracked_stat.deleted, 1);
+
+        let deleted_path = RepoPath::new("deleted untracked.txt").expect("valid repository path");
+        let deleted_abs_path = checkout.join(deleted_path.as_std_path());
+        std::fs::write(&deleted_abs_path, "new file\n").expect("create untracked file");
+        assert_eq!(
+            repository
+                .status(std::slice::from_ref(&deleted_path))
+                .await
+                .expect("read untracked status")
+                .entries
+                .as_ref(),
+            &[(deleted_path.clone(), FileStatus::Untracked)]
+        );
+        std::fs::remove_file(&deleted_abs_path).expect("delete untracked file");
+        assert!(
+            repository
+                .status(std::slice::from_ref(&deleted_path))
+                .await
+                .expect("refresh deleted file status")
+                .entries
+                .is_empty()
+        );
+        assert!(
+            repository
+                .diff_stat(
+                    DiffStatType::HeadToWorktree,
+                    std::slice::from_ref(&deleted_path),
+                )
+                .await
+                .expect("refresh deleted file diff stats")
+                .entries
+                .is_empty()
+        );
+        assert_eq!(
+            repository
+                .diff_stat(
+                    DiffStatType::HeadToWorktree,
+                    &[
+                        deleted_path,
+                        RepoPath::new("tracked.txt").expect("valid repository path"),
+                    ],
+                )
+                .await
+                .expect("refresh tracked and deleted file diff stats")
+                .entries,
+            stats.entries
+        );
+
         assert!(
             repository
                 .diff_stat(DiffStatType::HeadToIndex, &[])
