@@ -1062,7 +1062,7 @@ mod tests {
     use multi_buffer::PathKey;
     use project::{
         FakeFs,
-        git_store::{GitStoreEvent, MAX_CONCURRENT_BLOB_READS},
+        git_store::{GitStoreEvent, MAX_CONCURRENT_OBJECT_READS},
     };
     use serde_json::json;
     use settings::{DiffViewStyle, GitPanelGroupBy, GitPanelSortBy, SettingsStore};
@@ -1821,7 +1821,7 @@ mod tests {
     async fn test_merge_base_loading_is_incremental(cx: &mut TestAppContext) {
         init_test(cx);
 
-        const FILE_COUNT: usize = MAX_CONCURRENT_BLOB_READS + 4;
+        const FILE_COUNT: usize = MAX_CONCURRENT_OBJECT_READS + 4;
 
         let names = (0..FILE_COUNT)
             .map(|index| format!("f{index:02}.txt"))

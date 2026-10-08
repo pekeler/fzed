@@ -2213,7 +2213,7 @@ impl GitGraph {
             let Some(diff_receiver) = this
                 .update(cx, |this, cx| {
                     let repository = this.get_repository(cx)?;
-                    Some(repository.update(cx, |repo, _| repo.load_commit_diff(sha, false)))
+                    Some(repository.update(cx, |repo, cx| repo.load_commit_diff(sha, false, cx)))
                 })
                 .ok()
                 .flatten()
@@ -2221,7 +2221,7 @@ impl GitGraph {
                 return;
             };
 
-            if let Ok(Ok(diff)) = diff_receiver.await {
+            if let Ok(diff) = diff_receiver.await {
                 let (diff, stats) = if let Some(stats) = diff.stats {
                     (diff, stats)
                 } else {

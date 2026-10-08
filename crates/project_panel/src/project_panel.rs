@@ -29,6 +29,7 @@ use gpui::{
     UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, div, hsla,
     linear_color_stop, linear_gradient, point, px, size, transparent_white, uniform_list,
 };
+use itertools::Itertools;
 use language::DiagnosticSeverity;
 use markdown_preview::markdown_preview_view::MarkdownPreviewView;
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -65,7 +66,7 @@ use ui::{
     ScrollAxes, ScrollableHandle, Scrollbars, StickyCandidate, Tooltip, WithScrollbar, prelude::*,
 };
 use util::{
-    ResultExt, TakeUntilExt, TryFutureExt,
+    ResultExt, TryFutureExt,
     markdown::MarkdownInlineCode,
     maybe,
     paths::{PathExt, PathStyle, compare_paths},
@@ -5759,7 +5760,9 @@ impl ProjectPanel {
 
                 let first = first_iter
                     .enumerate()
-                    .take_until(|(count, entry)| entry.entry == root_entry && *count != 0usize)
+                    .take_while_inclusive(|(count, entry)| {
+                        entry.entry != root_entry || *count == 0usize
+                    })
                     .map(|(_, entry)| entry)
                     .find(|ele| predicate(*ele, tree_id))
                     .map(|ele| ele.to_owned());
@@ -5769,7 +5772,7 @@ impl ProjectPanel {
 
                 let second = if reverse_search {
                     second_iter
-                        .take_until(|ele| ele.id == start.entry_id)
+                        .take_while_inclusive(|ele| ele.id != start.entry_id)
                         .filter(|ele| predicate(*ele, tree_id))
                         .last()
                         .map(|ele| ele.to_owned())
