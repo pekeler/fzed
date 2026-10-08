@@ -2164,6 +2164,86 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_save_all_after_restoring_and_refreshing(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".git": {},
+                "foo.txt": "FOO\n",
+                "other.txt": "OTHER\n",
+            }),
+        )
+        .await;
+        fs.set_head_and_index_for_repo(
+            Path::new(path!("/project/.git")),
+            &[("foo.txt", "foo\n".into()), ("other.txt", "other\n".into())],
+        );
+        let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |workspace, _| workspace.workspace().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            ProjectDiff::deploy_at(workspace, None, window, cx);
+        });
+        cx.run_until_parked();
+        let diff = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<ProjectDiff>(cx)
+                .next()
+                .expect("project diff")
+        });
+        let buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer(Path::new(path!("/project/foo.txt")), cx)
+            })
+            .await
+            .expect("open buffer");
+
+        let editor = diff.read_with(cx, |diff, cx| diff.editor(cx).read(cx).rhs_editor().clone());
+        editor.update_in(cx, |editor, window, cx| {
+            editor.git_restore(&Default::default(), window, cx);
+        });
+        cx.run_until_parked();
+        buffer.read_with(cx, |buffer, _| {
+            assert_eq!(buffer.text(), "foo\n");
+            assert!(buffer.is_dirty());
+        });
+        assert_eq!(
+            fs.read_file_sync(path!("/project/foo.txt"))
+                .expect("read file"),
+            b"FOO\n"
+        );
+
+        diff.update_in(cx, |diff, window, cx| {
+            let diff = diff.diff.downgrade();
+            window.spawn(cx, async move |cx| DiffMultibuffer::refresh(diff, cx).await)
+        })
+        .await
+        .expect("refresh diff");
+        cx.run_until_parked();
+        diff.read_with(cx, |diff, cx| {
+            assert!(diff.is_dirty(cx));
+            assert_eq!(diff.excerpt_file_paths(cx), ["foo.txt", "other.txt"]);
+        });
+
+        cx.dispatch_action(workspace::SaveAll { save_intent: None });
+        cx.run_until_parked();
+        assert_eq!(
+            fs.read_file_sync(path!("/project/foo.txt"))
+                .expect("read file"),
+            b"foo\n"
+        );
+        assert!(!buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
+        assert_eq!(
+            diff.read_with(cx, |diff, cx| diff.excerpt_file_paths(cx)),
+            ["other.txt"]
+        );
+    }
+
+    #[gpui::test]
     async fn test_fossil_project_diff_supports_hunk_restore_without_staging(
         cx: &mut TestAppContext,
     ) {

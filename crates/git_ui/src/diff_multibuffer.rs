@@ -17,7 +17,7 @@ use gpui::{
     App, AppContext as _, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Task, WeakEntity,
 };
-use language::{Anchor, Buffer, BufferId, Capability, OffsetRangeExt};
+use language::{Anchor, Buffer, BufferId, Capability, OffsetRangeExt, Point};
 use multi_buffer::{MultiBuffer, PathKey};
 use project::{
     ConflictSet, Project, ProjectPath,
@@ -517,7 +517,7 @@ impl DiffMultibuffer {
         let snapshot = display_buffer.read(cx).snapshot();
         let diff_snapshot = diff.read(cx).snapshot(cx);
 
-        let excerpt_ranges = {
+        let mut excerpt_ranges = {
             let diff_hunk_ranges = diff_snapshot
                 .hunks_intersecting_range(
                     Anchor::min_max_range_for_buffer(snapshot.remote_id()),
@@ -536,6 +536,10 @@ impl DiffMultibuffer {
 
             conflict_ranges.unwrap_or_else(|| diff_hunk_ranges.collect())
         };
+        // Unsaved restores must remain reachable by Save All even without diff hunks.
+        if excerpt_ranges.is_empty() && display_buffer.read(cx).is_dirty() {
+            excerpt_ranges.push(Point::zero()..snapshot.max_point());
+        }
 
         let buffer_id = snapshot.text.remote_id();
         let mut needs_fold = false;
