@@ -119,6 +119,12 @@ To view File History:
 - Right-click on an editor tab and select "View File History"
 - Use the Command Palette and search for "file history"
 
+## Tags
+
+To create a lightweight Git tag at `HEAD`, use {#action git::CreateTagAtHead} from the Command Palette. Git tags are created locally and are not pushed automatically.
+
+For Fossil, use {#action fossil::CreateTagAtHead} to tag the current check-in, or choose **Create Tag…** from a check-in's context menu in history or the timeline. Tags apply only to the selected check-in, without propagating to descendants. They are created locally and shared on subsequent syncs. As in Fossil itself, you can reuse a tag name on multiple check-ins. FZed tag names cannot start with `-` or contain whitespace, commas, or control characters.
+
 ## Fetch, Push, and Pull
 
 Fetch, push, or pull from your Git repository in Zed via the buttons available on the Source Control Panel or via the Command Palette by looking at the respective actions: {#action git::Fetch}, {#action git::Push}, and {#action git::Pull}.
@@ -361,7 +367,7 @@ However, if your self-hosted Git instance URL doesn't contain identifying keywor
 }
 ```
 
-The `provider` field specifies which type of hosting service you're using. Supported `provider` values are `github`, `gitlab`, `bitbucket`, `gitea`, `forgejo`, `sourcehut`, and `tangled`. The `name` is optional and used as a display name for your instance, and `base_url` is the root URL of your self-hosted server.
+The `provider` field specifies which type of hosting service you're using. Supported `provider` values are `github`, `gitlab`, `bitbucket`, `gitea`, `forgejo`, `sourcehut`, `tangled`, and `gitiles`. The `name` is optional and used as a display name for your instance, and `base_url` is the root URL of your self-hosted server. For the `gitiles` provider, set `base_url` to the Gitiles browse root (e.g. `https://android.googlesource.com` or `https://git.example.com/plugins/gitiles`).
 
 You can configure multiple custom providers if you work with several self-hosted instances.
 

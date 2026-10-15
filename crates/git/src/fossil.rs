@@ -1540,6 +1540,31 @@ impl GitRepository for FossilRepository {
         ))
     }
 
+    fn create_ref(&self, ref_name: String, commit: String) -> BoxFuture<'_, Result<()>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let tag_name = ref_name
+                    .strip_prefix("refs/tags/")
+                    .context("Fossil only supports creating symbolic tags")?;
+                // Timeline and check-in info parse tags using commas and whitespace.
+                anyhow::ensure!(
+                    !tag_name.is_empty()
+                        && !tag_name.starts_with('-')
+                        && !tag_name.contains(',')
+                        && !tag_name.chars().any(|character| character.is_whitespace() || character.is_control()),
+                    "Fossil tag names must be nonempty, must not start with '-', and cannot contain whitespace, commas, or control characters"
+                );
+                let commit = Oid::try_from(commit.as_str()).context("Invalid check-in hash")?;
+                // Fossil's tag command does not consume a `--` argument separator.
+                fossil
+                    .run(&["tag", "add", tag_name, &commit.to_string()])
+                    .await?;
+                Ok(())
+            })
+            .boxed()
+    }
+
     fn update_ref(&self, _ref_name: String, _commit: String) -> BoxFuture<'_, Result<()>> {
         Self::unsupported("updating refs")
     }
@@ -3137,6 +3162,138 @@ mod tests {
         assert_eq!(blame_line.hash_prefix, "1234567890");
         assert_eq!(blame_line.author, "tester");
         assert_eq!(blame_line.line_number, 0);
+    }
+
+    #[gpui::test]
+    async fn fossil_creates_symbolic_tags_on_selected_check_ins(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        if !fossil_is_available() {
+            return;
+        }
+        let temp_dir = tempfile::tempdir().expect("temporary directory");
+        let home = temp_dir.path().join("home");
+        let checkout = temp_dir.path().join("checkout");
+        let database = temp_dir.path().join("repo.fossil");
+        std::fs::create_dir(&home).expect("home directory");
+        std::fs::create_dir(&checkout).expect("checkout directory");
+        run_fossil(
+            &home,
+            &checkout,
+            &["init", database.to_str().expect("database path")],
+        );
+        run_fossil(
+            &home,
+            &checkout,
+            &["open", database.to_str().expect("database path")],
+        );
+        let repository = FossilRepository::new_for_test(
+            &checkout.join(".fslckout"),
+            Some("fossil".into()),
+            cx.executor(),
+            HashMap::from_iter([("HOME".into(), home.to_string_lossy().into_owned())]),
+        )
+        .expect("Fossil repository");
+        let first = repository
+            .info()
+            .await
+            .expect("checkout info")
+            .checkout
+            .expect("check-in");
+        repository
+            .create_ref("refs/tags/release/one".into(), first.clone())
+            .await
+            .expect("create tag");
+        let tags = repository
+            .fossil_binary()
+            .run(&["tag", "list", "--tagtype", "singleton", &first])
+            .await
+            .expect("tags");
+        assert!(tags.lines().any(|tag| tag == "release/one"));
+        run_fossil(
+            &home,
+            &checkout,
+            &["commit", "--allow-empty", "--nosync", "-m", "second"],
+        );
+        let second = repository
+            .info()
+            .await
+            .expect("checkout info")
+            .checkout
+            .expect("check-in");
+        assert_ne!(first, second);
+        let tags = repository
+            .fossil_binary()
+            .run(&["tag", "list", &second])
+            .await
+            .expect("tags");
+        assert!(!tags.lines().any(|tag| tag == "release/one"));
+        repository
+            .create_ref("refs/tags/older-check-in".into(), first.clone())
+            .await
+            .expect("tag older check-in");
+        repository
+            .create_ref("refs/tags/release/one".into(), second.clone())
+            .await
+            .expect("Fossil permits reusing a tag on another check-in");
+        let (sender, receiver) = async_channel::unbounded();
+        repository
+            .initial_graph_data(LogSource::All, LogOrder::TopoOrder, sender)
+            .await
+            .expect("timeline");
+        let commits = receiver.recv().await.expect("timeline entries");
+        assert!(commits.iter().any(|commit| {
+            commit.sha.to_string() == first
+                && commit
+                    .ref_names
+                    .iter()
+                    .any(|name| name == "tag: older-check-in")
+        }));
+        assert!(commits.iter().any(|commit| {
+            commit.sha.to_string() == second
+                && commit
+                    .ref_names
+                    .iter()
+                    .any(|name| name == "tag: release/one")
+        }));
+        for name in [
+            "refs/heads/not-a-tag",
+            "refs/tags/",
+            "refs/tags/--propagate",
+            "refs/tags/bad\nname",
+            "refs/tags/ padded",
+            "refs/tags/release candidate",
+            "refs/tags/release,candidate",
+            "refs/tags/wiki-reserved",
+        ] {
+            assert!(
+                repository
+                    .create_ref(name.into(), first.clone())
+                    .await
+                    .is_err(),
+                "{name}"
+            );
+        }
+        assert!(
+            repository
+                .create_ref("refs/tags/bad-target".into(), "--propagate".into())
+                .await
+                .is_err()
+        );
+        assert!(
+            repository
+                .create_ref("refs/tags/missing-target".into(), "0".repeat(64))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            repository
+                .info()
+                .await
+                .expect("checkout info")
+                .checkout
+                .as_deref(),
+            Some(second.as_str())
+        );
     }
 
     #[gpui::test]

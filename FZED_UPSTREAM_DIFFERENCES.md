@@ -119,6 +119,9 @@ Collaborative selected-path propagation mirrors Git staging state and is
 intentional as long as it remains session/editor state rather than Fossil
 repository state.
 
+Upstream bulk file actions also apply to Fossil selections: copying paths,
+opening files and diffs, viewing timelines, and adding extras to ignore-glob.
+
 ### Fossil Commands
 
 Files: `crates/git/src/git.rs`, `crates/git_ui`
@@ -155,6 +158,12 @@ Reason: users should be able to discover Fossil operations directly from the
 command palette. Do not add one-for-one aliases for Git-only concepts such as
 hunk staging, amend, signoff, rebase, force-push, GitHub pull requests,
 `.gitignore`, or `fossil ui`.
+
+Tag creation maps the shared create-ref API's `refs/tags/` prefix to native
+`fossil tag add`. Fossil tags apply only to the selected check-in and are shared
+on sync; names may be reused on multiple check-ins, as in Fossil itself.
+The command palette exposes `fossil::CreateTagAtHead`. Other Git ref operations
+remain unsupported for Fossil.
 
 ### User-Facing SCM Names
 
