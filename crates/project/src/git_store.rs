@@ -12466,6 +12466,7 @@ mod tests {
     use gpui::proptest::prelude::*;
     use gpui::{TestAppContext, UpdateGlobal};
     use rand::{Rng as _, SeedableRng, rngs::StdRng};
+    use rpc::ProtoClient;
     use serde_json::json;
     use settings::SettingsStore;
     use std::path::{Path, PathBuf};
