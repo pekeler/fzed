@@ -703,7 +703,7 @@ impl GitRepository for FossilRepository {
 
     fn checkout_files(
         &self,
-        commit: String,
+        commit: Option<String>,
         paths: Vec<RepoPath>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
@@ -715,7 +715,7 @@ impl GitRepository for FossilRepository {
                 }
 
                 let mut args = vec![OsString::from("revert")];
-                if commit != "HEAD" {
+                if let Some(commit) = commit.filter(|commit| commit != "HEAD") {
                     args.push(OsString::from("--revision"));
                     args.push(OsString::from(commit));
                 }
@@ -3476,18 +3476,21 @@ mod tests {
             Some(b"no newline".to_vec())
         );
 
-        repository
-            .checkout_files(
-                "HEAD".to_string(),
-                vec![RepoPath::new("tracked.txt").unwrap()],
-                Arc::new(HashMap::default()),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(checkout.join("tracked.txt")).unwrap(),
-            "initial\n"
-        );
+        for commit in [Some("HEAD".to_string()), None] {
+            std::fs::write(checkout.join("tracked.txt"), "modified\n").unwrap();
+            repository
+                .checkout_files(
+                    commit,
+                    vec![RepoPath::new("tracked.txt").unwrap()],
+                    Arc::new(HashMap::default()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(checkout.join("tracked.txt")).unwrap(),
+                "initial\n"
+            );
+        }
         std::fs::write(checkout.join("tracked.txt"), "modified\n").unwrap();
 
         let head = repository.head_sha().await.unwrap();

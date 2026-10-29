@@ -655,7 +655,7 @@ impl GitRepository for FakeGitRepository {
 
     fn checkout_files(
         &self,
-        _commit: String,
+        commit: Option<String>,
         paths: Vec<RepoPath>,
         _env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>> {
@@ -672,15 +672,27 @@ impl GitRepository for FakeGitRepository {
                 .context("repository has no working directory")?
                 .to_path_buf();
             let checkout_contents = fs.with_git_state(&dot_git_path, false, |state| {
-                paths
+                if let Some(commit) = &commit {
+                    let head_sha = state.refs.get("HEAD").map(String::as_str);
+                    anyhow::ensure!(
+                        commit == "HEAD" || Some(commit.as_str()) == head_sha,
+                        "fake git repository can only check out files from HEAD, got {commit}"
+                    );
+                }
+                let source = if commit.is_some() {
+                    &state.head_contents
+                } else {
+                    &state.index_contents
+                };
+                Ok(paths
                     .iter()
                     .cloned()
                     .map(|path| {
-                        let content = state.head_contents.get(&path).cloned();
+                        let content = source.get(&path).cloned();
                         (path, content)
                     })
-                    .collect::<Vec<_>>()
-            })?;
+                    .collect::<Vec<_>>())
+            })??;
 
             for (path, content) in checkout_contents.clone() {
                 let abs_path = workdir_path.join(path.as_std_path());
@@ -700,6 +712,9 @@ impl GitRepository for FakeGitRepository {
 
             executor.simulate_random_delay().await;
             fs.with_git_state(&dot_git_path, true, |state| {
+                if commit.is_none() {
+                    return Ok(());
+                }
                 for (path, content) in checkout_contents {
                     if let Some(content) = content {
                         state.index_contents.insert(path, content);
