@@ -2,7 +2,7 @@
 description = "The fast, collaborative code editor."
 edition.workspace = true
 name = "zed"
-version = "1.26.2-fzed.0"
+version = "1.27.0-fzed.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
@@ -287,7 +287,7 @@ icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
 identifier = "dev.fzed.fzed-dev"
 name = "FZed Dev"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["fzed", "fzed-cli"]
 
@@ -296,7 +296,7 @@ icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
 identifier = "dev.fzed.fzed-nightly"
 name = "FZed Nightly"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["fzed", "fzed-cli"]
 
@@ -305,7 +305,7 @@ icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
 identifier = "dev.fzed.fzed-preview"
 name = "FZed Preview"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["fzed", "fzed-cli"]
 
@@ -314,7 +314,7 @@ icon = ["resources/app-icon-fzed@2x.png", "resources/app-icon-fzed.png"]
 identifier = "dev.fzed.fzed"
 name = "FZed"
 category = "Developer Tool"
-osx_minimum_system_version = "10.15.7"
+osx_minimum_system_version = "12.0"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["fzed", "fzed-cli"]
 

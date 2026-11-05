@@ -5,9 +5,9 @@ use crate::{
         Branch, BranchesScanResult, CommitData, CommitDataReader, CommitDetails, CommitDiff,
         CommitFile, CommitOptions, CommitSummary, CreateWorktreeTarget, DiffStatType, DiffType,
         FetchOptions, FileHistoryChangedFileSets, FossilSyncState, GRAPH_CHUNK_SIZE,
-        GitCommitTemplate, GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData,
-        LogOrder, LogSource, PushOptions, Remote, RemoteCommandOutput, RepoPath, RepositoryKind,
-        ResetMode, SearchCommitArgs, Worktree,
+        GitCommitTemplate, GitRepository, InitialGraphCommitData, LogOrder, LogSource, PushOptions,
+        Remote, RemoteCommandOutput, RepoPath, RepositoryKind, ResetMode, SearchCommitArgs,
+        Worktree,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -766,14 +766,27 @@ impl GitRepository for FossilRepository {
                     });
                 }
 
-                let commit = if matches!(commit.as_str(), "HEAD" | "checkout" | "current") {
+                let ancestor_count = commit
+                    .strip_prefix("HEAD~")
+                    .map(str::parse::<usize>)
+                    .transpose()?;
+                let commit = if ancestor_count.is_some()
+                    || matches!(commit.as_str(), "HEAD" | "checkout" | "current")
+                {
                     parse_fossil_info(&fossil.run(&["info"]).await?)
                         .checkout
                         .context("Fossil checkout hash is unavailable")?
                 } else {
                     commit
                 };
-                let info = fossil_commit_info(&fossil, &commit).await?;
+                let mut info = fossil_commit_info(&fossil, &commit).await?;
+                for _ in 0..ancestor_count.unwrap_or_default() {
+                    let parent = info
+                        .parents
+                        .first()
+                        .context("Fossil commit has no parent")?;
+                    info = fossil_commit_info(&fossil, parent).await?;
+                }
                 Ok(CommitDetails {
                     sha: SharedString::from(info.hash),
                     message: SharedString::from(info.comment),
@@ -1368,17 +1381,6 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
-    fn checkpoint(&self) -> BoxFuture<'static, Result<GitRepositoryCheckpoint>> {
-        Self::unsupported("checkpoints")
-    }
-
-    fn restore_checkpoint(
-        &self,
-        _checkpoint: GitRepositoryCheckpoint,
-    ) -> BoxFuture<'_, Result<()>> {
-        Self::unsupported("restoring checkpoints")
-    }
-
     fn create_archive_checkpoint(&self) -> BoxFuture<'_, Result<(String, String)>> {
         Self::unsupported("archive checkpoints")
     }
@@ -1389,22 +1391,6 @@ impl GitRepository for FossilRepository {
         _unstaged_sha: String,
     ) -> BoxFuture<'_, Result<()>> {
         Self::unsupported("restoring archive checkpoints")
-    }
-
-    fn compare_checkpoints(
-        &self,
-        _left: GitRepositoryCheckpoint,
-        _right: GitRepositoryCheckpoint,
-    ) -> BoxFuture<'_, Result<bool>> {
-        Self::unsupported("comparing checkpoints")
-    }
-
-    fn diff_checkpoints(
-        &self,
-        _base_checkpoint: GitRepositoryCheckpoint,
-        _target_checkpoint: GitRepositoryCheckpoint,
-    ) -> BoxFuture<'_, Result<String>> {
-        Self::unsupported("diffing checkpoints")
     }
 
     fn load_commit_template(&self) -> BoxFuture<'_, Result<Option<GitCommitTemplate>>> {
@@ -3497,6 +3483,9 @@ mod tests {
         let head_details = repository.show("HEAD".to_string()).await.unwrap();
         assert_eq!(head_details.sha.as_ref(), head.as_str());
         assert_eq!(head_details.message.as_ref(), "initial");
+        let parent_details = repository.show("HEAD~1".to_string()).await.unwrap();
+        assert_ne!(parent_details.sha, head_details.sha);
+        assert!(repository.show("HEAD~999".to_string()).await.is_err());
         let branches = repository.branches().await.unwrap().branches;
         let head_branch = branches
             .iter()
