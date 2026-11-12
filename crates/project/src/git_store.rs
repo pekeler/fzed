@@ -13535,6 +13535,7 @@ mod tests {
     fn test_new_worktree_path_rejects_names_outside_worktree_directory() {
         let unix_snapshot = RepositorySnapshot::empty(
             RepositoryId(0),
+            RepositoryKind::Git,
             Path::new("/home/user/dev/lsp-tests").into(),
             None,
             None,
@@ -13544,6 +13545,7 @@ mod tests {
 
         let windows_snapshot = RepositorySnapshot::empty(
             RepositoryId(0),
+            RepositoryKind::Git,
             Path::new(r"C:\Users\user\dev\lsp-tests").into(),
             None,
             None,
@@ -13652,6 +13654,7 @@ mod tests {
         {
             let snapshot = RepositorySnapshot::empty(
                 RepositoryId(0),
+                RepositoryKind::Git,
                 Path::new(work_directory).into(),
                 Some(Path::new(repository_dir).into()),
                 Some(Path::new(dot_git).into()),
