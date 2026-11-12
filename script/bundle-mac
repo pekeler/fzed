@@ -366,7 +366,7 @@ function extract_debug_symbols() {
         cat target/dsymutil.log
         exit 1
     fi
-    if ! dsymutil --flat "target/${target_triple}/${target_dir}/remote_server" 2> target/dsymutil.log; then
+    if ! dsymutil --flat "target/${target_triple}/${target_dir}/remote-server" 2> target/dsymutil.log; then
         echo "dsymutil failed"
         cat target/dsymutil.log
         exit 1
@@ -384,7 +384,7 @@ function upload_debug_symbols() {
             echo "Sentry upload attempt $attempt..."
             if sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev \
                 "target/${target_triple}/${target_dir}/fzed.dwarf" \
-                "target/${target_triple}/${target_dir}/remote_server.dwarf"; then
+                "target/${target_triple}/${target_dir}/remote-server.dwarf"; then
                 break
             else
                 echo "Sentry upload failed on attempt $attempt"
@@ -408,13 +408,13 @@ if [[ "$target_dir" == "release" && "$local_install" != true ]]; then
     extract_debug_symbols
     strip -x "target/${target_triple}/${target_dir}/fzed"
     strip -x "target/${target_triple}/${target_dir}/cli"
-    strip -x "target/${target_triple}/${target_dir}/remote_server"
+    strip -x "target/${target_triple}/${target_dir}/remote-server"
 fi
 
 cp target/${target_triple}/${target_dir}/fzed "${app_path}/Contents/MacOS/fzed"
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
 sign_app_binaries
 
-remote_server_path="target/$target_triple/$target_dir/remote_server"
+remote_server_path="target/$target_triple/$target_dir/remote-server"
 sign_binary "$remote_server_path"
 gzip -f --stdout --best "$remote_server_path" > target/zed-remote-server-macos-$arch_suffix.gz

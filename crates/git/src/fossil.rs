@@ -1245,7 +1245,7 @@ impl GitRepository for FossilRepository {
     fn fetch(
         &self,
         fetch_options: FetchOptions,
-        _askpass: askpass::AskPassDelegate,
+        _askpass: Option<askpass::AskPassDelegate>,
         env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>> {
