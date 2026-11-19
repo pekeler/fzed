@@ -1,6 +1,3 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
-
 # FZed
 
 [![CI](https://github.com/pekeler/fzed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/pekeler/fzed/actions/workflows/run_tests.yml)

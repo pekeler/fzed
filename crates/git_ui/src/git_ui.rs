@@ -8,7 +8,7 @@ mod blame_ui;
 pub mod clone;
 
 use git::{
-    Oid,
+    Oid, normalize_branch_name,
     repository::{
         Branch, CommitDetails, RepositoryKind, Upstream, UpstreamTracking, UpstreamTrackingStatus,
     },
@@ -52,6 +52,7 @@ pub mod git_panel;
 mod git_panel_settings;
 pub mod git_picker;
 mod git_runtime_diagnostics;
+mod git_timestamp;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
@@ -85,6 +86,19 @@ fn with_fossil_panel(
 
     panel.update(cx, |panel, cx| {
         if panel.active_repository_kind(cx).is_fossil() {
+            update(panel, window, cx);
+        }
+    });
+}
+
+fn with_fossil_change_selection(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    update: impl FnOnce(&mut GitPanel, &mut Window, &mut Context<GitPanel>),
+) {
+    with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+        if !panel.is_branch_mode() {
             update(panel, window, cx);
         }
     });
@@ -213,42 +227,42 @@ pub fn init(cx: &mut App) {
         );
         workspace.register_action(
             |workspace, _: &git::fossil_actions::IncludeFile, window, cx| {
-                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                with_fossil_change_selection(workspace, window, cx, |panel, window, cx| {
                     panel.stage_selected(&git::StageFile, window, cx);
                 });
             },
         );
         workspace.register_action(
             |workspace, _: &git::fossil_actions::ExcludeFile, window, cx| {
-                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                with_fossil_change_selection(workspace, window, cx, |panel, window, cx| {
                     panel.unstage_selected(&git::UnstageFile, window, cx);
                 });
             },
         );
         workspace.register_action(
             |workspace, _: &git::fossil_actions::ToggleIncluded, window, cx| {
-                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                with_fossil_change_selection(workspace, window, cx, |panel, window, cx| {
                     panel.toggle_staged_for_selected(&git::ToggleStaged, window, cx);
                 });
             },
         );
         workspace.register_action(
             |workspace, _: &git::fossil_actions::RecordRename, window, cx| {
-                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                with_fossil_change_selection(workspace, window, cx, |panel, window, cx| {
                     panel.record_fossil_rename(&git::fossil_actions::RecordRename, window, cx);
                 });
             },
         );
         workspace.register_action(
             |workspace, _: &git::fossil_actions::UndoRecordedRename, window, cx| {
-                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                with_fossil_change_selection(workspace, window, cx, |panel, window, cx| {
                     panel.undo_fossil_rename(&git::fossil_actions::UndoRecordedRename, window, cx);
                 });
             },
         );
         workspace.register_action(
             |workspace, _: &git::fossil_actions::IncludeRange, window, cx| {
-                with_fossil_panel(workspace, window, cx, |panel, window, cx| {
+                with_fossil_change_selection(workspace, window, cx, |panel, window, cx| {
                     panel.stage_range(&git::StageRange, window, cx);
                 });
             },
@@ -719,6 +733,7 @@ struct RenameBranchModal {
     current_branch: SharedString,
     editor: Entity<Editor>,
     repo: Entity<Repository>,
+    _editor_subscription: Subscription,
 }
 
 impl RenameBranchModal {
@@ -733,10 +748,16 @@ impl RenameBranchModal {
             editor.set_text(current_branch.clone(), window, cx);
             editor
         });
+        let editor_subscription = cx.subscribe(&editor, |_, _, event, cx| {
+            if let editor::EditorEvent::BufferEdited = event {
+                cx.notify();
+            }
+        });
         Self {
             current_branch: current_branch.into(),
             editor,
             repo,
+            _editor_subscription: editor_subscription,
         }
     }
 
@@ -745,7 +766,7 @@ impl RenameBranchModal {
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        let new_name = self.editor.read(cx).text(cx);
+        let new_name = normalize_branch_name(&self.editor.read(cx).text(cx));
         if new_name.is_empty() || new_name == self.current_branch.as_ref() {
             cx.emit(DismissEvent);
             return;
@@ -780,6 +801,7 @@ impl Focusable for RenameBranchModal {
 
 impl Render for RenameBranchModal {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let new_name = normalize_branch_name(&self.editor.read(cx).text(cx));
         v_flex()
             .key_context("RenameBranchModal")
             .on_action(cx.listener(Self::cancel))
@@ -799,7 +821,21 @@ impl Render for RenameBranchModal {
                             .size(HeadlineSize::XSmall),
                     ),
             )
-            .child(div().px_3().pb_3().w_full().child(self.editor.clone()))
+            .child(
+                v_flex()
+                    .px_3()
+                    .pb_3()
+                    .w_full()
+                    .gap_2()
+                    .child(self.editor.clone())
+                    .child(
+                        Label::new(new_name)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .single_line()
+                            .truncate(),
+                    ),
+            )
     }
 }
 
@@ -1133,8 +1169,7 @@ impl RefPickerModal {
                                 details.sha.to_string(),
                                 repo.downgrade(),
                                 workspace.weak_handle(),
-                                None,
-                                None,
+                                Default::default(),
                                 window,
                                 cx,
                             );

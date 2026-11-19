@@ -636,76 +636,84 @@ impl DiffMultibuffer {
 
     #[instrument(skip(this, cx))]
     pub(crate) async fn refresh(this: WeakEntity<Self>, cx: &mut AsyncWindowContext) -> Result<()> {
-        let (entries, paths_to_replace_excerpts) = this.update(cx, |this, cx| {
-            let (repo, buffers_to_load) = this.branch_diff.update(cx, |branch_diff, cx| {
-                let load_buffers = branch_diff.load_buffers(cx);
-                (branch_diff.repo().cloned(), load_buffers)
-            });
-            let mut previous_paths = this
-                .multibuffer
-                .read(cx)
-                .snapshot(cx)
-                .buffers_with_paths()
-                .map(|(buffer_snapshot, path_key)| (path_key.clone(), buffer_snapshot.remote_id()))
-                .collect::<HashMap<_, _>>();
-
-            let mut entries = BTreeMap::new();
-            let mut paths_to_replace_excerpts = HashSet::default();
-            let mut live_repo_paths = HashSet::default();
-            if let Some(repo) = repo {
-                let repo = repo.read(cx);
-                for diff_buffer in buffers_to_load {
-                    live_repo_paths.insert(diff_buffer.repo_path.clone());
-                    let path_key = project_diff_path_key(
-                        &repo,
-                        &diff_buffer.repo_path,
-                        diff_buffer.file_status,
-                        cx,
-                    );
-                    if let Some(previous_buffer_id) = previous_paths.remove(&path_key) {
-                        let previous_rename_source = this
-                            .buffer_rename_sources
-                            .borrow()
-                            .get(&previous_buffer_id)
-                            .cloned();
-                        if diff_buffer.rename_source.is_some()
-                            && previous_rename_source != diff_buffer.rename_source
-                        {
-                            paths_to_replace_excerpts.insert(path_key.clone());
-                        }
-                    }
-                    entries.insert(path_key, diff_buffer);
-                }
-            }
-
-            let repo_path_by_display_id = this
-                .buffer_subscriptions
-                .iter()
-                .map(|(repo_path, sub)| {
-                    (sub.display_buffer.read(cx).remote_id(), repo_path.clone())
-                })
-                .collect::<HashMap<_, _>>();
-
-            this.editor.update(cx, |editor, cx| {
-                for (path, buffer_id) in previous_paths {
-                    if let Some(repo_path) = repo_path_by_display_id.get(&buffer_id) {
-                        this.buffer_subscriptions.remove(repo_path);
-                    }
-                    editor.rhs_editor().update(cx, |editor, cx| {
-                        conflict_view::buffers_removed(editor, &[buffer_id], cx);
+        let (entries, paths_to_replace_excerpts, list_was_loading) =
+            this.update(cx, |this, cx| {
+                let (repo, buffers_to_load, list_was_loading) =
+                    this.branch_diff.update(cx, |branch_diff, cx| {
+                        let load_buffers = branch_diff.load_buffers(cx);
+                        (
+                            branch_diff.repo().cloned(),
+                            load_buffers,
+                            branch_diff.is_awaiting_tree_diff(),
+                        )
                     });
-                    let _span = ztracing::info_span!("remove_excerpts_for_path");
-                    _span.enter();
-                    editor.remove_excerpts_for_path(path, cx);
-                    this.buffer_rename_sources.borrow_mut().remove(&buffer_id);
+                let mut previous_paths = this
+                    .multibuffer
+                    .read(cx)
+                    .snapshot(cx)
+                    .buffers_with_paths()
+                    .map(|(buffer_snapshot, path_key)| {
+                        (path_key.clone(), buffer_snapshot.remote_id())
+                    })
+                    .collect::<HashMap<_, _>>();
+
+                let mut entries = BTreeMap::new();
+                let mut paths_to_replace_excerpts = HashSet::default();
+                let mut live_repo_paths = HashSet::default();
+                if let Some(repo) = repo {
+                    let repo = repo.read(cx);
+                    for diff_buffer in buffers_to_load {
+                        live_repo_paths.insert(diff_buffer.repo_path.clone());
+                        let path_key = project_diff_path_key(
+                            &repo,
+                            &diff_buffer.repo_path,
+                            diff_buffer.file_status,
+                            cx,
+                        );
+                        if let Some(previous_buffer_id) = previous_paths.remove(&path_key) {
+                            let previous_rename_source = this
+                                .buffer_rename_sources
+                                .borrow()
+                                .get(&previous_buffer_id)
+                                .cloned();
+                            if diff_buffer.rename_source.is_some()
+                                && previous_rename_source != diff_buffer.rename_source
+                            {
+                                paths_to_replace_excerpts.insert(path_key.clone());
+                            }
+                        }
+                        entries.insert(path_key, diff_buffer);
+                    }
                 }
-            });
 
-            this.buffer_subscriptions
-                .retain(|repo_path, _| live_repo_paths.contains(repo_path));
+                let repo_path_by_display_id = this
+                    .buffer_subscriptions
+                    .iter()
+                    .map(|(repo_path, sub)| {
+                        (sub.display_buffer.read(cx).remote_id(), repo_path.clone())
+                    })
+                    .collect::<HashMap<_, _>>();
 
-            (entries, paths_to_replace_excerpts)
-        })?;
+                this.editor.update(cx, |editor, cx| {
+                    for (path, buffer_id) in previous_paths {
+                        if let Some(repo_path) = repo_path_by_display_id.get(&buffer_id) {
+                            this.buffer_subscriptions.remove(repo_path);
+                        }
+                        editor.rhs_editor().update(cx, |editor, cx| {
+                            conflict_view::buffers_removed(editor, &[buffer_id], cx);
+                        });
+                        let _span = ztracing::info_span!("remove_excerpts_for_path");
+                        _span.enter();
+                        editor.remove_excerpts_for_path(path, cx);
+                        this.buffer_rename_sources.borrow_mut().remove(&buffer_id);
+                    }
+                });
+
+                this.buffer_subscriptions
+                    .retain(|repo_path, _| live_repo_paths.contains(repo_path));
+
+                (entries, paths_to_replace_excerpts, list_was_loading)
+            })?;
 
         let mut buffers_to_fold = Vec::new();
 
@@ -769,7 +777,11 @@ impl DiffMultibuffer {
                         .update(cx, |editor, cx| editor.fold_buffers(buffers_to_fold, cx));
                 });
             }
-            this.pending_scroll.take();
+            // A list still loading had no files to scroll to, so the scroll
+            // waits for the refresh that brings them.
+            if !list_was_loading {
+                this.pending_scroll.take();
+            }
             cx.notify();
         })?;
 

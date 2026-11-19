@@ -12,7 +12,7 @@ use crate::{
     stash::{GitStash, StashEntry},
     status::{
         DiffStat, DiffTreeType, FileStatus, GitDiffStat, GitStatus, StatusCode, StatusRename,
-        TreeDiff, UnmergedStatus, UnmergedStatusCode,
+        TreeDiff, TreeDiffStatus, UnmergedStatus, UnmergedStatusCode,
     },
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -212,8 +212,16 @@ impl GitRepository for FossilRepository {
             .boxed()
     }
 
-    fn load_blob_content(&self, _oid: Oid) -> BoxFuture<'_, Result<Vec<u8>>> {
-        Self::unsupported("loading blobs by Git object ID")
+    fn load_blob_content(&self, oid: Oid) -> BoxFuture<'_, Result<Vec<u8>>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                Ok(fossil
+                    .checked_output(&["artifact", &oid.to_string()], None)
+                    .await?
+                    .stdout)
+            })
+            .boxed()
     }
 
     fn set_index_text(
@@ -376,13 +384,27 @@ impl GitRepository for FossilRepository {
         })
     }
 
-    fn diff_tree(&self, _request: DiffTreeType) -> BoxFuture<'_, Result<TreeDiff>> {
-        async move {
-            Ok(TreeDiff {
-                entries: HashMap::default(),
+    fn diff_tree(&self, request: DiffTreeType) -> BoxFuture<'_, Result<TreeDiff>> {
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let (base, head, merge, worktree) = match request {
+                    DiffTreeType::MergeBase { base, head } => (base, head, true, false),
+                    DiffTreeType::MergeBaseWithWorktree { base } => {
+                        (base, "HEAD".into(), true, true)
+                    }
+                    DiffTreeType::Since { base, head } => (base, head, false, false),
+                };
+                let head = fossil.checkin_id(&head).await?;
+                let base = fossil.checkin_id(&base).await?;
+                let base = if merge {
+                    fossil.merge_base(base, head).await?
+                } else {
+                    base
+                };
+                fossil.tree_diff(base, (!worktree).then_some(head)).await
             })
-        }
-        .boxed()
+            .boxed()
     }
 
     fn stash_entries(&self) -> BoxFuture<'static, Result<GitStash>> {
@@ -1324,9 +1346,21 @@ impl GitRepository for FossilRepository {
                         fossil.run_raw(&["diff", "--internal", "--unified"]).await
                     }
                     DiffType::HeadToIndex => Ok(String::new()),
-                    DiffType::MergeBase { .. } => Err(anyhow!(
-                        "Fossil backend does not support merge-base diffs yet"
-                    )),
+                    DiffType::MergeBase { base_ref } => {
+                        let base = fossil.checkin_id(&base_ref).await?;
+                        let head = fossil.checkin_id("HEAD").await?;
+                        let base = fossil.merge_base(base, head).await?;
+                        fossil
+                            .run_raw(&[
+                                "diff",
+                                "--internal",
+                                "--unified",
+                                "--verbose",
+                                "--from",
+                                &base.to_string(),
+                            ])
+                            .await
+                    }
                 }
             })
             .boxed()
@@ -1401,7 +1435,26 @@ impl GitRepository for FossilRepository {
         &self,
         _include_remote_name: bool,
     ) -> BoxFuture<'_, Result<Option<SharedString>>> {
-        async move { Ok(Some(SharedString::from("trunk"))) }.boxed()
+        let fossil = self.fossil_binary();
+        self.executor
+            .spawn(async move {
+                let output = fossil.run(&["settings", "main-branch"]).await?;
+                let setting = output
+                    .strip_prefix("main-branch")
+                    .context("Missing Fossil main-branch setting")?
+                    .trim();
+                let branch = setting
+                    .strip_prefix("(local)")
+                    .or_else(|| setting.strip_prefix("(global)"))
+                    .unwrap_or(setting)
+                    .trim();
+                Ok(Some(if branch.is_empty() {
+                    "trunk".into()
+                } else {
+                    branch.to_owned().into()
+                }))
+            })
+            .boxed()
     }
 
     fn initial_graph_data(
@@ -2527,6 +2580,18 @@ impl FossilBinary {
     where
         S: AsRef<OsStr>,
     {
+        let output = self.checked_output(args, env).await?;
+        Ok(RemoteCommandOutput {
+            stdout: String::from_utf8(output.stdout)?,
+            stderr: String::from_utf8(output.stderr)?,
+        })
+    }
+
+    async fn checked_output<S: AsRef<OsStr>>(
+        &self,
+        args: &[S],
+        env: Option<Arc<HashMap<String, String>>>,
+    ) -> Result<std::process::Output> {
         let _lock = self.command_lock.lock().await;
         let output = self.run_command_output_with_retries(args, env).await?;
         anyhow::ensure!(
@@ -2537,10 +2602,7 @@ impl FossilBinary {
                 status: output.status,
             }
         );
-        Ok(RemoteCommandOutput {
-            stdout: String::from_utf8(output.stdout)?,
-            stderr: String::from_utf8(output.stderr)?,
-        })
+        Ok(output)
     }
 
     async fn run_command_output_with_retries<S>(
@@ -2585,6 +2647,158 @@ impl FossilBinary {
         command.envs(self.envs.iter());
         command.args(args);
         command
+    }
+
+    async fn checkin_id(&self, revision: &str) -> Result<Oid> {
+        let name = if revision == "HEAD" {
+            "current".to_owned()
+        } else if let Some(branch) = revision.strip_prefix("refs/heads/") {
+            format!("tag:{branch}")
+        } else if revision.starts_with('-') {
+            format!("tag:{revision}")
+        } else {
+            revision.to_owned()
+        };
+        let output = self.run(&["whatis", "--type", "ci", &name]).await?;
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("artifact:"))
+            .with_context(|| format!("Unknown Fossil check-in: {revision}"))?
+            .trim()
+            .parse()
+    }
+
+    async fn merge_base(&self, base: Oid, head: Oid) -> Result<Oid> {
+        // Fossil reports the parent when both arguments identify the same check-in.
+        if base == head {
+            return Ok(head);
+        }
+        let output = self
+            .run(&["merge-base", &base.to_string(), &head.to_string()])
+            .await?;
+        output
+            .strip_prefix("pivot=")
+            .context("Missing Fossil merge base")?
+            .parse()
+    }
+
+    async fn tree_diff(&self, base: Oid, head: Option<Oid>) -> Result<TreeDiff> {
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            path: String,
+            old: Option<String>,
+            old_perm: Option<String>,
+            present: i32,
+            inspect_disk: i32,
+        }
+
+        let target = if let Some(head) = head {
+            format!("SELECT filename, uuid, perm, 0 AS dirty FROM files_of_checkin('{head}')")
+        } else {
+            // Refresh Fossil's checkout signatures before consulting vfile. Its path columns
+            // preserve names (including newlines) that cannot be parsed from CLI status lines.
+            self.run(&["changes", "--hash", "--no-merge"]).await?;
+            "SELECT pathname AS filename, blob.uuid, CASE WHEN islink THEN 'l' WHEN isexe THEN 'x' END AS perm,
+                    chnged != 0 OR vfile.rid = 0 AS dirty
+             FROM localdb.vfile LEFT JOIN blob ON blob.rid = vfile.rid
+             WHERE NOT deleted AND vid = (SELECT value FROM localdb.vvar WHERE name = 'checkout')".into()
+        };
+        let query = format!(
+            "WITH files(path, old, new, old_perm, new_perm, present, dirty) AS (
+                SELECT filename, uuid, NULL, perm, NULL, 0, 0 FROM files_of_checkin('{base}')
+                UNION ALL
+                SELECT filename, NULL, uuid, NULL, perm, 1, dirty FROM ({target})
+             )
+             SELECT path, max(old) AS old, max(old_perm) AS old_perm, max(present) AS present,
+                    max(dirty) OR NOT max(present) AS inspect_disk
+             FROM files GROUP BY path
+             HAVING count(*) = 1 OR max(dirty) OR max(old) IS NOT max(new)
+                OR max(old_perm) IS NOT max(new_perm)"
+        );
+        let output = self.run(&["sql", "--readonly", "-json", &query]).await?;
+        let rows: Vec<Entry> = if output.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(&output)?
+        };
+        let mut entries = HashMap::default();
+        for entry in rows {
+            let path = RepoPath::new(&entry.path)?;
+            let old = entry.old.map(|hash| hash.parse::<Oid>()).transpose()?;
+            let status = if head.is_none() && entry.inspect_disk != 0 {
+                self.working_file_change(&path, old, entry.old_perm.as_deref())
+                    .await?
+            } else {
+                match (old, entry.present != 0) {
+                    (None, true) => Some(TreeDiffStatus::Added),
+                    (Some(old), true) => Some(TreeDiffStatus::Modified { old }),
+                    (Some(old), false) => Some(TreeDiffStatus::Deleted { old }),
+                    (None, false) => None,
+                }
+            };
+            if let Some(status) = status {
+                entries.insert(path, status);
+            }
+        }
+        Ok(TreeDiff { entries })
+    }
+
+    async fn working_file_change(
+        &self,
+        path: &RepoPath,
+        old: Option<Oid>,
+        old_perm: Option<&str>,
+    ) -> Result<Option<TreeDiffStatus>> {
+        let full_path = self.working_directory.join(path.as_std_path());
+        let metadata = match smol::fs::symlink_metadata(&full_path).await {
+            Ok(metadata) if metadata.is_file() || metadata.is_symlink() => metadata,
+            Ok(_) => return Ok(old.map(|old| TreeDiffStatus::Deleted { old })),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(old.map(|old| TreeDiffStatus::Deleted { old }));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some(old) = old else {
+            return Ok(Some(TreeDiffStatus::Added));
+        };
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = old_perm == Some("x");
+        let perm = if metadata.is_symlink() {
+            Some("l")
+        } else if executable {
+            Some("x")
+        } else {
+            None
+        };
+        if perm == old_perm {
+            let command = if old.as_bytes().len() == 20 {
+                "sha1sum"
+            } else {
+                "sha3sum"
+            };
+            let output = self
+                .run(&[command, &format!("./{}", path.as_unix_str())])
+                .await?;
+            let hash: Oid = output
+                .split_ascii_whitespace()
+                .next()
+                .context("Missing Fossil file checksum")?
+                .parse()?;
+            if hash == old {
+                return Ok(None);
+            }
+        }
+        Ok(Some(TreeDiffStatus::Modified { old }))
     }
 
     fn for_working_directory(&self, working_directory: PathBuf) -> Self {
@@ -3280,6 +3494,204 @@ mod tests {
                 .as_deref(),
             Some(second.as_str())
         );
+    }
+
+    #[gpui::test]
+    async fn fossil_compares_diverged_branches_and_working_files(cx: &mut TestAppContext) {
+        compare_real_fossil_branches(cx)
+            .await
+            .expect("compare Fossil branches");
+    }
+
+    async fn compare_real_fossil_branches(cx: &mut TestAppContext) -> anyhow::Result<()> {
+        use crate::{
+            repository::DiffType,
+            status::{DiffTreeType, TreeDiffStatus},
+        };
+
+        cx.executor().allow_parking();
+        if !fossil_is_available() {
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let checkout = temp.path().join("checkout");
+        let home = temp.path().join("home");
+        std::fs::create_dir(&checkout)?;
+        std::fs::create_dir(&home)?;
+        let fossil = |args: &[&str]| run_fossil(&home, &checkout, args);
+        fossil(&["init", "../repo.fossil"]);
+        fossil(&["open", "../repo.fossil"]);
+        fossil(&["settings", "binary-glob", "binary"]);
+        let write = |path: &str, text: &[u8]| std::fs::write(checkout.join(path), text);
+        write("edited", b"original")?;
+        write("old name", b"renamed")?;
+        write("deleted", b"removed")?;
+        write("binary", &[0, 0xff, 1])?;
+        write("local edit", b"clean")?;
+        fossil(&["add", "."]);
+        fossil(&["commit", "--no-prompt", "-m", "base"]);
+        write("edited", b"feature")?;
+        write("added", b"added")?;
+        write("binary", &[0, 0xff, 2, 3])?;
+        fossil(&["mv", "--hard", "old name", "new name"]);
+        fossil(&["rm", "--hard", "deleted"]);
+        fossil(&["add", "added"]);
+        fossil(&[
+            "commit",
+            "--no-prompt",
+            "--branch",
+            "feature",
+            "-m",
+            "feature",
+        ]);
+        fossil(&["update", "trunk"]);
+        write("only on trunk", b"other branch")?;
+        fossil(&["add", "only on trunk"]);
+        fossil(&["commit", "--no-prompt", "-m", "diverge"]);
+        fossil(&["update", "feature"]);
+
+        let repository = FossilRepository::new_for_test(
+            &checkout.join(".fslckout"),
+            Some("fossil".into()),
+            cx.executor(),
+            HashMap::from_iter([("HOME".into(), home.to_string_lossy().into_owned())]),
+        )?;
+        assert_eq!(
+            repository.default_branch(true).await?.as_deref(),
+            Some("trunk")
+        );
+        fossil(&["settings", "main-branch", "feature"]);
+        assert_eq!(
+            repository.default_branch(true).await?.as_deref(),
+            Some("feature")
+        );
+
+        let same_checkin = repository
+            .diff_tree(DiffTreeType::MergeBase {
+                base: "refs/heads/feature".into(),
+                head: "HEAD".into(),
+            })
+            .await?;
+        assert!(same_checkin.entries.is_empty());
+        let committed = repository
+            .diff_tree(DiffTreeType::MergeBase {
+                base: "trunk".into(),
+                head: "HEAD".into(),
+            })
+            .await?
+            .entries;
+        assert_eq!(committed.len(), 6);
+        let status = |name: &str| committed.get(&RepoPath::new(name).unwrap()).unwrap();
+        for name in ["added", "new name"] {
+            assert_eq!(status(name), &TreeDiffStatus::Added);
+        }
+        for (name, expected) in [("old name", b"renamed".as_slice()), ("deleted", b"removed")] {
+            let TreeDiffStatus::Deleted { old } = status(name) else {
+                panic!("expected deletion of {name}")
+            };
+            assert_eq!(repository.load_blob_content(*old).await?, expected);
+        }
+        for (name, expected) in [
+            ("edited", b"original".as_slice()),
+            ("binary", &[0, 0xff, 1]),
+        ] {
+            let TreeDiffStatus::Modified { old } = status(name) else {
+                panic!("expected change to {name}")
+            };
+            assert_eq!(repository.load_blob_content(*old).await?, expected);
+        }
+        let from_tip = repository
+            .diff_tree(DiffTreeType::Since {
+                base: "trunk".into(),
+                head: "feature".into(),
+            })
+            .await?;
+        assert!(matches!(
+            from_tip.entries.get(&RepoPath::new("only on trunk")?),
+            Some(TreeDiffStatus::Deleted { .. })
+        ));
+
+        write("edited", b"original")?;
+        write("deleted", b"recreated")?;
+        write("local edit", b"dirty")?;
+        std::fs::remove_file(checkout.join("added"))?;
+        write("working addition", b"local")?;
+        fossil(&["add", "working addition"]);
+        let work = repository
+            .diff_tree(DiffTreeType::MergeBaseWithWorktree {
+                base: "trunk".into(),
+            })
+            .await?
+            .entries;
+        assert_eq!(work.len(), 6, "{work:?}");
+        assert_eq!(
+            work.get(&RepoPath::new("new name")?),
+            Some(&TreeDiffStatus::Added)
+        );
+        assert_eq!(
+            work.get(&RepoPath::new("working addition")?),
+            Some(&TreeDiffStatus::Added)
+        );
+        assert_eq!(
+            work.get(&RepoPath::new("old name")?),
+            Some(status("old name"))
+        );
+        assert_eq!(work.get(&RepoPath::new("binary")?), Some(status("binary")));
+        for (name, expected) in [("deleted", "removed"), ("local edit", "clean")] {
+            let Some(TreeDiffStatus::Modified { old }) = work.get(&RepoPath::new(name)?) else {
+                panic!("missing working diff for {name}");
+            };
+            assert_eq!(
+                repository.load_blob_content(*old).await?,
+                expected.as_bytes()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+            fossil(&["settings", "allow-symlinks", "on"]);
+            write("local edit", b"clean")?;
+            std::fs::set_permissions(
+                checkout.join("local edit"),
+                std::fs::Permissions::from_mode(0o755),
+            )?;
+            std::fs::remove_file(checkout.join("edited"))?;
+            symlink("local edit", checkout.join("edited"))?;
+            let modes = repository
+                .diff_tree(DiffTreeType::MergeBaseWithWorktree {
+                    base: "trunk".into(),
+                })
+                .await?;
+            for name in ["local edit", "edited"] {
+                assert!(
+                    matches!(
+                        modes.entries.get(&RepoPath::new(name)?),
+                        Some(TreeDiffStatus::Modified { .. })
+                    ),
+                    "missing mode change for {name}"
+                );
+            }
+            std::fs::remove_file(checkout.join("edited"))?;
+            write("edited", b"original")?;
+            write("local edit", b"dirty")?;
+        }
+        let patch = repository
+            .diff(DiffType::MergeBase {
+                base_ref: "trunk".into(),
+            })
+            .await?;
+        assert!(patch.contains("+dirty"));
+        assert!(!patch.contains("only on trunk"));
+        assert!(
+            repository
+                .diff_tree(DiffTreeType::MergeBaseWithWorktree {
+                    base: "missing-branch".into()
+                })
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     #[gpui::test]
