@@ -1258,6 +1258,13 @@ pub enum ContentDelta {
 pub struct MessageDelta {
     pub stop_reason: Option<String>,
     pub stop_sequence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_details: Option<RefusalStopDetails>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RefusalStopDetails {
+    pub category: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1371,7 +1378,9 @@ pub fn parse_prompt_too_long(message: &str) -> Option<u64> {
 impl From<language_model_core::Speed> for Speed {
     fn from(speed: language_model_core::Speed) -> Self {
         match speed {
-            language_model_core::Speed::Standard => Speed::Standard,
+            language_model_core::Speed::Standard | language_model_core::Speed::Ultrafast => {
+                Speed::Standard
+            }
             language_model_core::Speed::Fast => Speed::Fast,
         }
     }

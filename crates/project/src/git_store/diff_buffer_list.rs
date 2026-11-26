@@ -379,7 +379,7 @@ impl DiffBufferList {
                 );
 
                 output.push(DiffBuffer {
-                    repo_path: item.repo_path.clone(),
+                    repo_path: item.repo_path,
                     load: task,
                     file_status: status,
                     rename_source: item.rename_source.clone(),

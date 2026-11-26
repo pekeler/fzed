@@ -32,16 +32,16 @@ const RESPONSE_MESSAGE_PHASE_COMMENTARY: &str = "commentary";
 const RESPONSE_MESSAGE_PHASE_FINAL_ANSWER: &str = "final_answer";
 
 /// Translates the request's `Speed` into the corresponding OpenAI service tier.
-/// Only `Fast` produces a value; `Standard` leaves the field unset so that the
-/// project's default tier applies.
+/// `Standard` leaves the field unset so that the project's default tier applies.
 fn service_tier_for(speed: Option<language_model_core::Speed>) -> Option<ServiceTier> {
     match speed? {
         language_model_core::Speed::Fast => Some(ServiceTier::Priority),
+        language_model_core::Speed::Ultrafast => Some(ServiceTier::Ultrafast),
         language_model_core::Speed::Standard => None,
     }
 }
 
-/// Omitting effort enables reasoning on Sol/Luna, which then reject temperature.
+/// Omitting effort enables reasoning on Sol/Luna/Terra, which then reject temperature.
 fn temperature_for_model(
     model_id: &str,
     temperature: Option<f32>,
@@ -49,7 +49,9 @@ fn temperature_for_model(
 ) -> Option<f32> {
     temperature.filter(|_| match model_id {
         "gpt-6-astra" | "gpt-6.1-sol" => false,
-        "gpt-6-sol" | "gpt-6-luna" => reasoning_effort == Some(ReasoningEffort::None),
+        "gpt-6-sol" | "gpt-6-luna" | "gpt-6.1-terra" => {
+            reasoning_effort == Some(ReasoningEffort::None)
+        }
         _ => true,
     })
 }
@@ -907,7 +909,7 @@ impl OpenAiResponseEventMapper {
             }
             ResponsesStreamEvent::RefusalDelta { .. }
             | ResponsesStreamEvent::RefusalDone { .. } => {
-                self.pending_stop_reason = Some(StopReason::Refusal);
+                self.pending_stop_reason = Some(refusal_stop_reason("refusal"));
                 Vec::new()
             }
             ResponsesStreamEvent::FunctionCallArgumentsDelta { item_id, delta, .. } => {
@@ -1000,8 +1002,9 @@ impl OpenAiResponseEventMapper {
                 let mut stop_reason = match reason {
                     Some("max_tokens" | "max_output_tokens") => StopReason::MaxTokens,
                     Some("content_filter") => {
-                        self.pending_stop_reason = Some(StopReason::Refusal);
-                        StopReason::Refusal
+                        let refusal = refusal_stop_reason("content_filter");
+                        self.pending_stop_reason = Some(refusal.clone());
+                        refusal
                     }
                     _ => self
                         .pending_stop_reason
@@ -1014,8 +1017,10 @@ impl OpenAiResponseEventMapper {
                 if response_output_contains_refusal(&response.output)
                     && !matches!(stop_reason, StopReason::MaxTokens)
                 {
-                    self.pending_stop_reason = Some(StopReason::Refusal);
-                    stop_reason = StopReason::Refusal;
+                    if !stop_reason.is_refusal() {
+                        stop_reason = refusal_stop_reason("refusal");
+                    }
+                    self.pending_stop_reason = Some(stop_reason.clone());
                 }
                 if self.pending_stop_reason.is_none() {
                     events.extend(self.emit_tool_calls_from_output(&response.output));
@@ -1142,7 +1147,7 @@ impl OpenAiResponseEventMapper {
         events.extend(self.capture_reasoning_items_from_output(&response.output));
 
         if response_output_contains_refusal(&response.output) {
-            self.pending_stop_reason = Some(StopReason::Refusal);
+            self.pending_stop_reason = Some(refusal_stop_reason("refusal"));
         }
 
         if self.pending_stop_reason.is_none() {
@@ -1186,8 +1191,8 @@ impl OpenAiResponseEventMapper {
                         Ok(input) => {
                             events.push(Ok(LanguageModelCompletionEvent::ToolUse(
                                 LanguageModelToolUse {
-                                    id: LanguageModelToolUseId::from(call_id.clone()),
-                                    name: name.clone(),
+                                    id: LanguageModelToolUseId::from(call_id),
+                                    name,
                                     is_input_complete: true,
                                     input: LanguageModelToolUseInput::Json(input),
                                     raw_input: arguments.clone(),
@@ -1197,8 +1202,8 @@ impl OpenAiResponseEventMapper {
                         }
                         Err(error) => {
                             events.push(Ok(LanguageModelCompletionEvent::ToolUseJsonParseError {
-                                id: LanguageModelToolUseId::from(call_id.clone()),
-                                tool_name: name.clone(),
+                                id: LanguageModelToolUseId::from(call_id),
+                                tool_name: name,
                                 raw_input: Arc::<str>::from(arguments.clone()),
                                 json_parse_error: error.to_string(),
                             }));
@@ -1461,6 +1466,14 @@ fn response_error_message(error: &ResponseError) -> String {
         (None, false) => message.to_string(),
         (None, true) => "response error".to_string(),
     }
+}
+
+fn refusal_stop_reason(reason: &str) -> StopReason {
+    StopReason::Refusal(Some(language_model_core::RefusalDetails {
+        reason: reason.into(),
+        categories: Vec::new(),
+        stage: Some(language_model_core::RefusalStage::Output),
+    }))
 }
 
 fn response_output_contains_refusal(output: &[ResponseOutputItem]) -> bool {
@@ -2393,6 +2406,9 @@ mod tests {
         for (model_id, temperature, effort, expected_temperature) in [
             ("gpt-6.1-sol", Some(0.25), None, None),
             ("gpt-6.1-sol", None, None, None),
+            ("gpt-6.1-terra", Some(0.25), None, None),
+            ("gpt-6.1-terra", Some(0.25), Some(Medium), None),
+            ("gpt-6.1-terra", Some(0.25), Some(NoReasoning), Some(0.25)),
             ("gpt-6-astra", Some(0.25), None, None),
             ("gpt-6-astra", None, None, None),
             ("gpt-6-sol", Some(0.25), None, None),
@@ -2449,15 +2465,13 @@ mod tests {
         Ok(())
     }
 
-    /// `Speed::Fast` should translate to `service_tier: "priority"` on the
-    /// outgoing Responses request, while `Standard` / `None` should leave the
-    /// field unset so the project's default tier wins.
     #[test]
-    fn into_open_ai_response_sets_service_tier_for_fast_speed() -> Result<()> {
+    fn into_open_ai_response_sets_service_tier_for_speed() -> Result<()> {
         for (speed, expected) in [
             (None, None),
             (Some(Speed::Standard), None),
             (Some(Speed::Fast), Some("priority")),
+            (Some(Speed::Ultrafast), Some("ultrafast")),
         ] {
             let request = LanguageModelRequest {
                 thread_id: None,
@@ -3373,9 +3387,34 @@ mod tests {
 
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
-            mapped[0],
-            LanguageModelCompletionEvent::Stop(StopReason::Refusal)
+            &mapped[0],
+            LanguageModelCompletionEvent::Stop(StopReason::Refusal(Some(details)))
+                if details.reason == "refusal" && details.categories.is_empty()
         ));
+    }
+
+    #[test]
+    fn responses_content_filter_preserves_structured_reason() {
+        let mapped = map_response_events(vec![
+            serde_json::from_value(json!({
+                "type": "response.incomplete",
+                "response": {
+                    "incomplete_details": {"reason": "content_filter"},
+                    "output": [{"type":"message","content":[{"type":"refusal","refusal":"Declined"}]}]
+                }
+            }))
+            .unwrap(),
+        ]);
+        assert_eq!(
+            mapped,
+            vec![LanguageModelCompletionEvent::Stop(StopReason::Refusal(
+                Some(language_model_core::RefusalDetails {
+                    reason: "content_filter".into(),
+                    categories: Vec::new(),
+                    stage: Some(language_model_core::RefusalStage::Output),
+                })
+            )),]
+        );
     }
 
     #[test]
@@ -3399,7 +3438,7 @@ mod tests {
         assert_eq!(mapped.len(), 1);
         assert!(matches!(
             mapped[0],
-            LanguageModelCompletionEvent::Stop(StopReason::Refusal)
+            LanguageModelCompletionEvent::Stop(StopReason::Refusal(_))
         ));
     }
 
