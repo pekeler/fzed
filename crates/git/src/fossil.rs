@@ -26,6 +26,7 @@ use smallvec::SmallVec;
 use smol::lock::Mutex as AsyncMutex;
 use std::{
     ffi::{OsStr, OsString},
+    fmt::Write as _,
     path::{Path, PathBuf},
     process::ExitStatus,
     str::FromStr,
@@ -118,6 +119,9 @@ impl FossilRepository {
                 let message = message
                     .filter(|message| !message.trim().is_empty())
                     .unwrap_or_else(|| "fzed stash".to_string());
+                if !keep_changes {
+                    return fossil.stash_selected_paths(paths, message, env).await;
+                }
                 let mut args = vec![
                     OsString::from("stash"),
                     OsString::from(if keep_changes { "snapshot" } else { "save" }),
@@ -2593,6 +2597,14 @@ impl FossilBinary {
         env: Option<Arc<HashMap<String, String>>>,
     ) -> Result<std::process::Output> {
         let _lock = self.command_lock.lock().await;
+        self.checked_output_unlocked(args, env).await
+    }
+
+    async fn checked_output_unlocked<S: AsRef<OsStr>>(
+        &self,
+        args: &[S],
+        env: Option<Arc<HashMap<String, String>>>,
+    ) -> Result<std::process::Output> {
         let output = self.run_command_output_with_retries(args, env).await?;
         anyhow::ensure!(
             output.status.success(),
@@ -2603,6 +2615,171 @@ impl FossilBinary {
             }
         );
         Ok(output)
+    }
+
+    async fn stash_selected_paths(
+        &self,
+        paths: Vec<RepoPath>,
+        message: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        // Keep other FZed commands from observing or changing the temporary additions.
+        let _lock = self.command_lock.lock().await;
+        let run = async |args: Vec<OsString>| -> Result<String> {
+            let output = self
+                .checked_output_unlocked(&args, Some(env.clone()))
+                .await?;
+            Ok(String::from_utf8(output.stdout)?)
+        };
+        let output = run(vec![
+            "sql".into(),
+            "--readonly".into(),
+            "-json".into(),
+            "SELECT pathname, rid FROM localdb.vfile".into(),
+        ])
+        .await?;
+        #[derive(serde::Deserialize)]
+        struct ManagedFile {
+            pathname: String,
+            rid: u64,
+        }
+        let managed: Vec<ManagedFile> = serde_json::from_str(if output.trim().is_empty() {
+            "[]"
+        } else {
+            &output
+        })?;
+        let managed: HashMap<_, _> = managed
+            .into_iter()
+            .map(|file| (file.pathname, file.rid))
+            .collect();
+        let extras: Vec<_> = paths
+            .iter()
+            .filter(|path| !managed.contains_key(path.as_unix_str()))
+            .cloned()
+            .collect();
+        for path in paths
+            .iter()
+            .filter(|path| managed.get(path.as_unix_str()).is_none_or(|rid| *rid == 0))
+        {
+            let metadata =
+                smol::fs::symlink_metadata(self.working_directory.join(path.as_std_path())).await?;
+            // Fossil restores newly added symlinks as regular files when applying a stash.
+            anyhow::ensure!(
+                !metadata.is_symlink(),
+                "Cannot stash new symbolic link {}: Fossil cannot restore it as a symbolic link",
+                path.as_unix_str()
+            );
+            anyhow::ensure!(
+                metadata.is_file(),
+                "Cannot stash {}: expected a file",
+                path.as_unix_str()
+            );
+        }
+
+        let result = async {
+            if !extras.is_empty() {
+                let mut args = vec![
+                    "add".into(),
+                    "--force".into(),
+                    "--dotfiles".into(),
+                    "--".into(),
+                ];
+                args.extend(repo_paths_to_args(extras.clone()));
+                run(args).await?;
+            }
+            let mut args = vec![
+                "stash".into(),
+                "save".into(),
+                "--comment".into(),
+                message.into(),
+                "--".into(),
+            ];
+            args.extend(repo_paths_to_args(paths.clone()));
+            run(args).await
+        }
+        .await;
+        let output = match result {
+            Ok(output) => output,
+            Err(error) => {
+                if !extras.is_empty() {
+                    let mut args = vec!["forget".into(), "--".into()];
+                    args.extend(repo_paths_to_args(extras));
+                    if let Err(rollback_error) = run(args).await {
+                        return Err(error.context(format!(
+                            "Also failed to undo temporary Fossil additions: {rollback_error:#}"
+                        )));
+                    }
+                }
+                return Err(error);
+            }
+        };
+        let stash_id: usize = output
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("stash ")?.strip_suffix(" saved"))
+            .context("Stash saved, but could not identify it. New files were kept on disk.")?
+            .parse()?;
+        // Added files store their full bytes, including binary data, in stashfile.delta.
+        let query = format!(
+            "SELECT newname AS path, hex(delta) AS content, isLink AS is_link FROM localdb.stashfile WHERE stashid={stash_id} AND isAdded"
+        );
+        let output = run(vec![
+            "sql".into(),
+            "--readonly".into(),
+            "-json".into(),
+            query.into(),
+        ])
+        .await
+        .context("Stash saved, but could not verify its new files. Working copies were kept.")?;
+        #[derive(serde::Deserialize)]
+        struct StashedFile {
+            path: String,
+            content: String,
+            is_link: i32,
+        }
+        let files: Vec<StashedFile> = serde_json::from_str(if output.trim().is_empty() {
+            "[]"
+        } else {
+            &output
+        })?;
+        for path in &extras {
+            anyhow::ensure!(
+                files.iter().any(|file| file.path == path.as_unix_str()),
+                "Stash {stash_id} did not capture {}. New files were kept on disk.",
+                path.as_unix_str()
+            );
+        }
+        for file in files {
+            let path = RepoPath::new(&file.path)?;
+            anyhow::ensure!(
+                paths.contains(&path),
+                "Stash {stash_id} contains an unexpected new file: {}. Its working copy was kept.",
+                file.path
+            );
+            let full_path = self.working_directory.join(path.as_std_path());
+            let cleanup = async {
+                let metadata = smol::fs::symlink_metadata(&full_path).await?;
+                anyhow::ensure!(
+                    metadata.is_symlink() == (file.is_link != 0),
+                    "File type changed while stashing"
+                );
+                anyhow::ensure!(metadata.is_file(), "Path is no longer a regular file");
+                let content = smol::fs::read(&full_path).await?;
+                let mut content_hex = String::with_capacity(file.content.len());
+                for byte in content {
+                    write!(content_hex, "{byte:02X}")?;
+                }
+                anyhow::ensure!(content_hex == file.content, "File changed while stashing");
+                smol::fs::remove_file(&full_path).await?;
+                anyhow::Ok(())
+            }
+            .await;
+            cleanup.with_context(|| format!("Stash {stash_id} was saved, but {} could not be removed. Review the working copy before popping the stash", file.path))?;
+        }
+        Ok(())
     }
 
     async fn run_command_output_with_retries<S>(
@@ -4259,6 +4436,217 @@ mod tests {
             .await
             .unwrap();
         assert!(repository.stash_entries().await.unwrap().entries.is_empty());
+    }
+
+    #[gpui::test]
+    async fn fossil_stashes_selected_new_files(cx: &mut TestAppContext) {
+        async {
+            cx.executor().allow_parking();
+            if !fossil_is_available() {
+                return anyhow::Ok(());
+            }
+            let temp = tempfile::tempdir()?;
+            let home = temp.path().join("home");
+            let checkout = temp.path().join("checkout");
+            std::fs::create_dir(&home)?;
+            std::fs::create_dir(&checkout)?;
+            let fossil = |args: &[&str]| run_fossil(&home, &checkout, args);
+            fossil(&["init", "../repo.fossil"]);
+            fossil(&["open", "../repo.fossil"]);
+            std::fs::write(checkout.join("tracked"), "baseline\n")?;
+            fossil(&["add", "tracked"]);
+            fossil(&["commit", "--no-prompt", "-m", "baseline"]);
+            std::fs::write(checkout.join("tracked"), "modified tracked content\n")?;
+            std::fs::write(checkout.join("unselected"), "leave alone")?;
+            let new_files: &[(&str, &[u8])] = &[
+                ("new file", b"new contents\n"),
+                (".hidden", b"hidden contents"),
+                ("binary", &[0, 0xff, 0x80, 1]),
+                ("empty", b""),
+                ("already added", b"already managed"),
+                ("--dash", b"not an option"),
+            ];
+            for (path, contents) in new_files {
+                std::fs::write(checkout.join(path), contents)?;
+            }
+            fossil(&["add", "already added"]);
+            fossil(&["settings", "ignore-glob", "binary"]);
+            fossil(&["settings", "keep-glob", "new*"]);
+            let repository = FossilRepository::new_for_test(
+                &checkout.join(".fslckout"),
+                None,
+                cx.background_executor.clone(),
+                HashMap::from_iter([("FOSSIL_HOME".into(), home.to_string_lossy().into_owned())]),
+            )?;
+            let paths = std::iter::once("tracked")
+                .chain(new_files.iter().map(|(path, _)| *path))
+                .map(RepoPath::new)
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            repository
+                .stash_paths(paths, Some("selected files".into()), Arc::default())
+                .await?;
+            for (path, _) in new_files {
+                assert!(!checkout.join(path).exists(), "{path} was left on disk");
+            }
+            assert_eq!(
+                std::fs::read_to_string(checkout.join("tracked"))?,
+                "baseline\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(checkout.join("unselected"))?,
+                "leave alone"
+            );
+            repository.stash_pop(None, Arc::default()).await?;
+            for (path, contents) in new_files {
+                assert_eq!(std::fs::read(checkout.join(path))?, *contents, "{path}");
+            }
+            assert_eq!(
+                std::fs::read_to_string(checkout.join("tracked"))?,
+                "modified tracked content\n"
+            );
+            assert!(repository.stash_entries().await?.entries.is_empty());
+            #[cfg(unix)]
+            {
+                fossil(&["settings", "allow-symlinks", "on"]);
+                std::os::unix::fs::symlink("unselected", checkout.join("new link"))?;
+                for already_added in [false, true] {
+                    if already_added {
+                        fossil(&["add", "new link"]);
+                    }
+                    let error = repository
+                        .stash_paths(
+                            vec![RepoPath::new("tracked")?, RepoPath::new("new link")?],
+                            None,
+                            Arc::default(),
+                        )
+                        .await
+                        .expect_err("reject new symlink before stashing");
+                    assert!(error.to_string().contains("symbolic link"));
+                    assert!(checkout.join("new link").is_symlink());
+                    assert_eq!(
+                        std::fs::read_to_string(checkout.join("tracked"))?,
+                        "modified tracked content\n"
+                    );
+                    assert!(repository.stash_entries().await?.entries.is_empty());
+                }
+            }
+            anyhow::Ok(())
+        }
+        .await
+        .expect("stash and restore selected new files");
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn fossil_stash_failures_preserve_new_files(cx: &mut TestAppContext) {
+        async {
+            cx.executor().allow_parking();
+            if !fossil_is_available() {
+                return anyhow::Ok(());
+            }
+            let real_fossil = which::which("fossil")?;
+            for mode in ["add", "save", "changed", "directory", "rollback"] {
+                let temp = tempfile::tempdir()?;
+                let home = temp.path().join("home");
+                let checkout = temp.path().join("checkout");
+                std::fs::create_dir(&home)?;
+                std::fs::create_dir(&checkout)?;
+                run_fossil(&home, &checkout, &["init", "../repo.fossil"]);
+                run_fossil(&home, &checkout, &["open", "../repo.fossil"]);
+                std::fs::write(checkout.join("new file"), "original")?;
+                std::fs::write(checkout.join("previously added"), "keep managed")?;
+                run_fossil(&home, &checkout, &["add", "previously added"]);
+                let wrapper = temp.path().join("fossil-wrapper");
+                write_executable_script(
+                    &wrapper,
+                    r#"#!/bin/sh
+if [ "$1" = stash ] && [ "$2" = save ]; then
+    case "$FZED_TEST_MODE" in save|rollback) echo 'injected save failure' >&2; exit 1;; esac
+fi
+if [ "$1" = forget ] && [ "$FZED_TEST_MODE" = rollback ]; then
+    echo 'injected rollback failure' >&2
+    exit 1
+fi
+"$FZED_TEST_FOSSIL" "$@" || exit $?
+if [ "$1" = add ] && [ "$FZED_TEST_MODE" = add ]; then
+    echo 'injected add failure' >&2
+    exit 1
+fi
+if [ "$1" = stash ] && [ "$2" = save ]; then
+    case "$FZED_TEST_MODE" in
+        changed) printf later > 'new file';;
+        directory) rm 'new file' && mkdir 'new file' && printf unrelated > 'new file/child';;
+    esac
+fi
+"#,
+                )?;
+                let repository = FossilRepository::new_for_test(
+                    &checkout.join(".fslckout"),
+                    Some(wrapper),
+                    cx.background_executor.clone(),
+                    HashMap::from_iter([
+                        ("FOSSIL_HOME".into(), home.to_string_lossy().into_owned()),
+                        (
+                            "FZED_TEST_FOSSIL".into(),
+                            real_fossil.to_string_lossy().into_owned(),
+                        ),
+                        ("FZED_TEST_MODE".into(), mode.into()),
+                    ]),
+                )?;
+                let error = repository
+                    .stash_paths(vec![RepoPath::new("new file")?], None, Arc::default())
+                    .await
+                    .expect_err(mode);
+                let error = format!("{error:#}");
+                assert_eq!(
+                    std::fs::read_to_string(checkout.join("previously added"))?,
+                    "keep managed"
+                );
+                assert!(
+                    repository
+                        .status(&[])
+                        .await?
+                        .entries
+                        .iter()
+                        .any(|(path, status)| path.as_unix_str() == "previously added"
+                            && *status == StatusCode::Added.worktree())
+                );
+                if mode == "changed" || mode == "directory" {
+                    assert!(error.contains("was saved"), "{error}");
+                    assert_eq!(repository.stash_entries().await?.entries.len(), 1);
+                    if mode == "changed" {
+                        assert_eq!(std::fs::read_to_string(checkout.join("new file"))?, "later");
+                    } else {
+                        assert_eq!(
+                            std::fs::read_to_string(checkout.join("new file/child"))?,
+                            "unrelated"
+                        );
+                    }
+                } else {
+                    assert!(error.contains("injected"), "{error}");
+                    assert_eq!(
+                        std::fs::read_to_string(checkout.join("new file"))?,
+                        "original"
+                    );
+                    assert!(repository.stash_entries().await?.entries.is_empty());
+                    let status = repository.status(&[]).await?;
+                    let (_, status) = status
+                        .entries
+                        .iter()
+                        .find(|(path, _)| path.as_unix_str() == "new file")
+                        .expect("new file status");
+                    if mode == "rollback" {
+                        assert!(error.contains("Also failed to undo"), "{error}");
+                        assert_eq!(*status, StatusCode::Added.worktree());
+                    } else {
+                        assert_eq!(*status, FileStatus::Untracked);
+                    }
+                }
+            }
+            anyhow::Ok(())
+        }
+        .await
+        .expect("preserve new files on stash failures");
     }
 
     #[gpui::test]

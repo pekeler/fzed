@@ -4546,7 +4546,10 @@ impl GitPanel {
 
         let (paths, repository_kind) = {
             let repository = active_repository.read(cx);
-            (self.stash_selection_paths(repository), repository.kind())
+            (
+                self.stash_selection_paths(repository, !keep_changes),
+                repository.kind(),
+            )
         };
 
         if paths.is_empty() {
@@ -7403,13 +7406,20 @@ impl GitPanel {
         })
     }
 
-    fn stash_selection_paths(&self, repository: &Repository) -> Vec<RepoPath> {
+    fn stash_selection_paths(
+        &self,
+        repository: &Repository,
+        include_untracked: bool,
+    ) -> Vec<RepoPath> {
         let use_staged_selection = self.has_staged_changes();
 
         self.change_entries
             .iter()
             .filter(|status_entry| {
-                if repository.kind().is_fossil() && status_entry.status.is_untracked() {
+                if repository.kind().is_fossil()
+                    && status_entry.status.is_untracked()
+                    && !include_untracked
+                {
                     return false;
                 }
 
@@ -7626,13 +7636,20 @@ impl GitPanel {
         let Some(repository) = self.active_repository.as_ref() else {
             return false;
         };
-        !self.stash_selection_paths(repository.read(cx)).is_empty()
+        !self
+            .stash_selection_paths(repository.read(cx), true)
+            .is_empty()
     }
 
     fn can_snapshot_stash(&self, cx: &App) -> bool {
         self.active_repository_kind(cx).is_fossil()
             && self.project.read(cx).is_local()
             && self.can_save_stash_from_commit_selection(cx)
+            && self.active_repository.as_ref().is_some_and(|repository| {
+                !self
+                    .stash_selection_paths(repository.read(cx), false)
+                    .is_empty()
+            })
     }
 
     pub fn can_stage_all(&self, cx: &App) -> bool {
@@ -7932,16 +7949,38 @@ impl GitPanel {
                                 )
                             })
                             .when(!repository_kind.is_fossil(), |this| this.separator())
-                            .action_disabled_when(
-                                !can_save_stash,
-                                "Save Stash",
-                                SaveStash.boxed_clone(),
+                            .item(
+                                ContextMenuEntry::new("Save Stash")
+                                    .disabled(!can_save_stash)
+                                    .action(SaveStash.boxed_clone())
+                                    .handler({
+                                        let git_panel = git_panel.downgrade();
+                                        move |window, cx| {
+                                            git_panel.update(cx, |panel, cx| {
+                                                panel.save_stash(&SaveStash, window, cx);
+                                            }).log_err();
+                                        }
+                                    })
+                                    .when(repository_kind.is_fossil(), |entry| {
+                                        entry.documentation_aside(DocumentationSide::Left, |_| {
+                                            Label::new("Stash included files, including new files, and remove their changes from the working copy. If none are included, stash managed changes only.")
+                                                .into_any_element()
+                                        })
+                                    }),
                             )
                             .when(repository_kind.is_fossil(), |this| {
                                 this.item(
                                     ContextMenuEntry::new("Snapshot Stash (Keep Changes)")
                                         .disabled(!can_snapshot_stash)
                                         .action(git::fossil_actions::SnapshotStash.boxed_clone())
+                                        .handler({
+                                            let git_panel = git_panel.downgrade();
+                                            move |window, cx| {
+                                                git_panel.update(cx, |panel, cx| {
+                                                    panel.snapshot_stash(&git::fossil_actions::SnapshotStash, window, cx);
+                                                }).log_err();
+                                            }
+                                        })
                                         .documentation_aside(DocumentationSide::Left, |_| {
                                             Label::new("Back up included files, or all managed changes if none are included. Uses files saved on disk and keeps your changes. Untracked files are excluded.")
                                                 .into_any_element()
@@ -14233,11 +14272,30 @@ mod tests {
             });
         });
 
-        panel.update_in(cx, |panel, window, cx| {
-            assert!(panel.can_snapshot_stash(cx));
-            panel.snapshot_stash(&git::fossil_actions::SnapshotStash, window, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<GitPanel>(window, cx);
         });
-        cx.executor().run_until_parked();
+        let activate_stash_menu = |snapshot: bool, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let handle = panel.read_with(cx, |panel, _| panel.commit_menu_handle.clone());
+            cx.update(|window, cx| handle.show(window, cx));
+            for _ in 0..3 {
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.run_until_parked();
+            }
+            assert!(handle.is_deployed(), "check-in menu should open");
+            let selector = if snapshot {
+                "MENU_ITEM-Snapshot Stash (Keep Changes)"
+            } else {
+                "MENU_ITEM-Save Stash"
+            };
+            let bounds = cx.debug_bounds(selector).expect("stash menu item");
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.run_until_parked();
+        };
+        assert!(panel.read_with(cx, |panel, cx| panel.can_snapshot_stash(cx)));
+        activate_stash_menu(true, cx);
 
         fs.with_git_state(path!("/root/project/.fslckout").as_ref(), false, |state| {
             let snapshot = state.stash_contents.first().unwrap();
@@ -14250,6 +14308,31 @@ mod tests {
             }
         })
         .unwrap();
+
+        let repo = project.read_with(cx, |project, cx| {
+            project
+                .repositories(cx)
+                .values()
+                .next()
+                .expect("repository")
+                .clone()
+        });
+        repo.update(cx, |repo, cx| {
+            repo.stage_entries(vec![repo_path("extra")], cx)
+        })
+        .await
+        .expect("include new file");
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            assert!(panel.can_save_stash_from_commit_selection(cx));
+            assert!(!panel.can_snapshot_stash(cx));
+            assert_eq!(
+                panel.stash_selection_paths(repo.read(cx), true),
+                vec![repo_path("extra")]
+            );
+            assert!(panel.stash_selection_paths(repo.read(cx), false).is_empty());
+        });
 
         let tracked_entry = panel
             .read_with(cx, |panel, _| {
@@ -14291,10 +14374,7 @@ mod tests {
             assert!(panel.can_save_stash_from_commit_selection(cx));
         });
 
-        panel.update_in(cx, |panel, window, cx| {
-            panel.snapshot_stash(&git::fossil_actions::SnapshotStash, window, cx);
-        });
-        cx.executor().run_until_parked();
+        activate_stash_menu(true, cx);
 
         let repo = project.read_with(cx, |project, cx| {
             project.repositories(cx).values().next().unwrap().clone()
@@ -14334,10 +14414,7 @@ mod tests {
             "stash selected tracked"
         );
 
-        panel.update_in(cx, |panel, window, cx| {
-            panel.save_stash(&git::SaveStash, window, cx);
-        });
-        cx.executor().run_until_parked();
+        activate_stash_menu(false, cx);
 
         repo.read_with(cx, |repo, _| {
             assert_eq!(repo.cached_stash().entries.len(), 3);
@@ -14351,11 +14428,18 @@ mod tests {
                     .map(|entry| entry.status),
                 Some(StatusCode::Modified.worktree())
             );
-            assert!(
-                repo.status_for_path(&repo_path("extra"))
-                    .is_some_and(|entry| entry.status.is_created())
-            );
+            assert_eq!(repo.status_for_path(&repo_path("extra")), None);
         });
+        assert!(!fs.is_file(path!("/root/project/extra").as_ref()).await);
+        fs.with_git_state(path!("/root/project/.fslckout").as_ref(), false, |state| {
+            let stash = state.stash_contents.first().expect("saved stash");
+            assert_eq!(stash.len(), 2);
+            assert_eq!(
+                stash.get(&repo_path("extra")),
+                Some(&Some(b"extra\n".to_vec()))
+            );
+        })
+        .expect("repository state");
 
         assert_eq!(
             fs.load(path!("/root/project/tracked").as_ref())
@@ -14372,6 +14456,22 @@ mod tests {
         assert_eq!(
             panel.read_with(cx, |panel, cx| panel.commit_editor.read(cx).text(cx)),
             ""
+        );
+        panel.update_in(cx, |panel, window, cx| {
+            panel.stash_pop(&StashPop, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            fs.load(path!("/root/project/extra").as_ref())
+                .await
+                .expect("restored new file"),
+            "extra\n"
+        );
+        assert_eq!(
+            fs.load(path!("/root/project/tracked").as_ref())
+                .await
+                .expect("restored tracked file"),
+            "tracked\n"
         );
     }
 

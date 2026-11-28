@@ -8806,14 +8806,16 @@ impl Repository {
                                 environment,
                                 ..
                             }) => {
-                                backend.stash_paths(entries, message, environment).await?;
+                                let result =
+                                    backend.stash_paths(entries, message, environment).await;
+                                // Saving can succeed even when removing a new working file fails.
                                 refresh_fossil_snapshot_after_command(
                                     weak_repository,
                                     backend,
                                     &mut cx,
                                 )
                                 .await?;
-                                Ok::<(), anyhow::Error>(())
+                                result
                             }
                             RepositoryState::Remote(RemoteRepositoryState {
                                 project_id,
